@@ -27,14 +27,14 @@ impl LabelCandidate {
         self.source
     }
 
-    fn significant_command(label: impl Into<String>) -> Self {
+    pub(crate) fn significant_command(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             source: LabelCandidateSource::SignificantCommand,
         }
     }
 
-    fn working_directory_basename(label: impl Into<String>) -> Self {
+    pub(crate) fn working_directory_basename(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             source: LabelCandidateSource::WorkingDirectoryBasename,

@@ -1,5 +1,6 @@
 pub mod herdr_client;
 pub mod labeler;
+pub mod stability;
 
 use std::fmt;
 
