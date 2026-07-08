@@ -293,7 +293,10 @@ mod tests {
     use super::*;
     use crate::herdr_client::{PaneInfo, PaneProcessInfo, RenameTabResult, TabInfo};
     use crate::labeler::LabelCandidate;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn detects_manual_lock_when_label_differs_from_plugin_and_candidate() {
@@ -548,8 +551,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system time after unix epoch")
                 .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("tabby-locks-test-{}-{unique}", std::process::id()));
+            let id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "tabby-locks-test-{}-{unique}-{id}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }

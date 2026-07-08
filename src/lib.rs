@@ -1,3 +1,4 @@
+pub mod daemon;
 pub mod herdr_client;
 pub mod labeler;
 pub mod locks;
@@ -67,17 +68,29 @@ where
 
 pub fn run_stub(command: Command) -> CommandOutcome {
     let message = match command {
-        Command::Daemon | Command::Start => "tabby daemon stub: rename loop is not implemented yet",
+        Command::Daemon | Command::Start => {
+            "tabby daemon runtime: use run_command to start the rename loop"
+        }
         Command::UnlockFocused => {
-            "tabby unlock-focused stub: daemon state path wiring is not implemented yet"
+            "tabby unlock-focused runtime: use run_command with injected state path"
         }
-        Command::UnlockAll => {
-            "tabby unlock-all stub: daemon state path wiring is not implemented yet"
-        }
+        Command::UnlockAll => "tabby unlock-all runtime: use run_command with injected state path",
         Command::Help => USAGE,
     };
 
     CommandOutcome { message }
+}
+
+pub fn run_command(command: Command) -> Result<String, daemon::RuntimeError> {
+    match command {
+        Command::Daemon | Command::Start => {
+            daemon::run_daemon_loop_from_env()?;
+            Ok("tabby daemon stopped".to_string())
+        }
+        Command::UnlockFocused => daemon::unlock_focused_from_env(),
+        Command::UnlockAll => daemon::unlock_all_from_env(),
+        Command::Help => Ok(USAGE.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -125,8 +138,8 @@ mod tests {
     }
 
     #[test]
-    fn daemon_stub_does_not_claim_rename_logic_exists() {
+    fn daemon_stub_points_to_runtime_command() {
         let outcome = run_stub(Command::Daemon);
-        assert!(outcome.message.contains("not implemented yet"));
+        assert!(outcome.message.contains("run_command"));
     }
 }
