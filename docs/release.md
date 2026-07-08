@@ -4,6 +4,8 @@ Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artif
 
 ## User install flow
 
+User-facing install, verification, trust-model, stop, uninstall, and rollback instructions live in [`docs/install.md`](install.md). The v1 release path remains:
+
 ```sh
 brew install yersonargotev/tap/tabby
 herdr plugin link "$(brew --prefix tabby)/share/tabby"
