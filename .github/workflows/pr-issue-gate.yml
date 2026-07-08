@@ -1,0 +1,41 @@
+name: PR Issue Gate
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  issue-gate:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require linked issue unless owner authored the PR
+        env:
+          OWNER_LOGIN: yersonargotev
+        run: |
+          set -euo pipefail
+
+          author="$(jq -r '.pull_request.user.login' "$GITHUB_EVENT_PATH")"
+          body="$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")"
+
+          if [[ "$author" == "$OWNER_LOGIN" ]]; then
+            echo "Owner-authored PR; linked issue gate skipped."
+            exit 0
+          fi
+
+          if grep -Eiq '(closes|fixes|resolves)[[:space:]]+#([0-9]+)' <<< "$body"; then
+            echo "Linked issue found."
+            exit 0
+          fi
+
+          cat <<'MESSAGE'
+          PRs must link an issue before merge.
+
+          Add one of these to the PR body:
+          - Closes #<issue-number>
+          - Fixes #<issue-number>
+          - Resolves #<issue-number>
+          MESSAGE
+          exit 1
