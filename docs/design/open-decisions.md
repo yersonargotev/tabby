@@ -48,4 +48,6 @@ Decision: keep `TABBY_LOCK_STORE_PATH` as the highest-priority explicit override
 - A real `herdr plugin action invoke unlock-all --plugin yersonargotev.tabby` run failed before rebuilding because the local-linked action command points at `target/debug/tabby`, and that binary was stale from before the default state-path change.
 - After `cargo build`, the same action succeeded without `TABBY_LOCK_STORE_PATH`.
 - The observed lock store path was `/Users/argote/.local/state/herdr/plugins/yersonargotev.tabby/locks.json`, with an empty v1 store. No `locks.json` was created under the `herdr plugin config-dir` fallback path.
+- `unlock-focused` also used the same runtime state path without `TABBY_LOCK_STORE_PATH`; with focused tab `w2:t1` and an empty store, it left the empty v1 store in place and did not create fallback state.
+- `start` was verified by temporarily locking all current tabs in the real lock store, invoking the action, stopping the spawned `target/debug/tabby start` process with `SIGTERM`, and restoring the original empty v1 store. No tab labels changed and no fallback state was created.
 - This confirms the implemented precedence can use Herdr plugin-owned state space at runtime; local-link verification must rebuild `target/debug/tabby` after source changes before invoking plugin actions.
