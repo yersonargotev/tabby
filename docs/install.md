@@ -18,6 +18,12 @@ tabby install
 
 This is the v1 release path. Homebrew installs the `tabby` binary and the release Herdr manifest; Herdr registration remains an explicit user command. `tabby install` is intentionally idempotent: it asks Herdr to unlink any existing `yersonargotev.tabby` registration, then links the manifest shipped with the currently running Homebrew package.
 
+If you also want to start the Tabby Session Daemon for the current Herdr Session after registration, use:
+
+```sh
+tabby install --start
+```
+
 Do not use `herdr plugin install yersonargotev/tabby` for the v1 release path. The Herdr marketplace/GitHub install path is intentionally not part of v1.
 
 ## Verify the install
@@ -31,7 +37,7 @@ tabby --help
 Expected output:
 
 ```text
-Usage: tabby <daemon|start|install|unlock-focused|unlock-all>
+Usage: tabby <daemon|start|ensure-started|install [--start]|unlock-focused|unlock-all>
 ```
 
 Check Homebrew's install prefix:
@@ -58,7 +64,7 @@ Expected output for the current installed version is shaped like:
 ```text
 true
 /opt/homebrew/Cellar/tabby/<version>/share/tabby
-start ../../bin/tabby start
+start ../../bin/tabby ensure-started
 unlock-all ../../bin/tabby unlock-all
 unlock-focused ../../bin/tabby unlock-focused
 ```
@@ -71,13 +77,13 @@ The important checks are:
 
 ## Start and use Tabby in Herdr
 
-Start the daemon from Herdr by invoking the `Start Tabby daemon` action for plugin `yersonargotev.tabby`. From the CLI, the equivalent is:
+Start the Tabby Session Daemon for the current Herdr Session by invoking the `Start Tabby daemon` action for plugin `yersonargotev.tabby`. From the CLI, the equivalent is:
 
 ```sh
 herdr plugin action invoke start --plugin yersonargotev.tabby
 ```
 
-The start action is long-running: it keeps `tabby start` active while Tabby watches Herdr tabs and applies automatic labels.
+The start action is idempotent: it runs `tabby ensure-started`, which starts a detached `tabby start` daemon only when this Herdr Session does not already have a valid Tabby Session Daemon.
 
 Manual labels are treated as locks. To clear locks from Herdr actions or the CLI:
 
@@ -99,7 +105,7 @@ Herdr plugins run their configured commands as normal user code on your machine.
 The v1 release path is intentionally explicit:
 
 - Homebrew installs files only; there is no silent Homebrew postinstall that registers or starts the plugin.
-- `tabby install` is the separate opt-in registration step. It is a small wrapper around `herdr plugin unlink yersonargotev.tabby` followed by `herdr plugin link <current package>/share/tabby`.
+- `tabby install` is the separate opt-in registration step. It is a small wrapper around `herdr plugin unlink yersonargotev.tabby` followed by `herdr plugin link <current package>/share/tabby`. `tabby install --start` is the explicit opt-in path that also starts the Tabby Session Daemon for the current Herdr Session.
 - Tabby does not silently auto-update. Updates happen through Homebrew, for example `brew upgrade tabby`; run `tabby install` after upgrades so Herdr stops pointing at any old Homebrew Cellar path that cleanup removed.
 - Tabby stores its lock state as `locks.json` in Herdr's plugin-owned state/config directory. You can inspect that directory with:
 

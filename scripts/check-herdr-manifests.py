@@ -59,6 +59,29 @@ def event_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {event["on"]: event for event in events}
 
 
+def check_command_pair(
+    errors: list[str],
+    kind: str,
+    name: str,
+    dev_command: list[str],
+    release_command: list[str],
+    expected_args: list[str] | None = None,
+) -> None:
+    if not dev_command or dev_command[0] != DEV_BINARY:
+        errors.append(f"dev {kind} {name!r} must invoke {DEV_BINARY!r}, got {dev_command!r}")
+    if not release_command or release_command[0] != RELEASE_BINARY:
+        errors.append(
+            f"release {kind} {name!r} must invoke {RELEASE_BINARY!r}, got {release_command!r}"
+        )
+    if dev_command[1:] != release_command[1:]:
+        errors.append(
+            f"{kind} {name!r} command args differ after binary path: "
+            f"{dev_command[1:]!r} != {release_command[1:]!r}"
+        )
+    if expected_args is not None and dev_command[1:] != expected_args:
+        errors.append(f"{kind} {name!r} must run {' '.join(expected_args)}, got {dev_command[1:]!r}")
+
+
 def main() -> int:
     dev = load_manifest(DEV_MANIFEST)
     release = load_manifest(RELEASE_MANIFEST)
@@ -92,23 +115,14 @@ def main() -> int:
 
         dev_command = dev_action.get("command", [])
         release_command = release_action.get("command", [])
-        if not dev_command or dev_command[0] != DEV_BINARY:
-            errors.append(
-                f"dev action {action_id!r} must invoke {DEV_BINARY!r}, got {dev_command!r}"
-            )
-        if not release_command or release_command[0] != RELEASE_BINARY:
-            errors.append(
-                f"release action {action_id!r} must invoke {RELEASE_BINARY!r}, got {release_command!r}"
-            )
-        if dev_command[1:] != release_command[1:]:
-            errors.append(
-                f"action {action_id!r} command args differ after binary path: "
-                f"{dev_command[1:]!r} != {release_command[1:]!r}"
-            )
-        if action_id == "start" and dev_command[1:] != ["ensure-started"]:
-            errors.append(
-                f"action 'start' must run ensure-started, got {dev_command[1:]!r}"
-            )
+        check_command_pair(
+            errors,
+            "action",
+            action_id,
+            dev_command,
+            release_command,
+            ["ensure-started"] if action_id == "start" else None,
+        )
 
     expected_events = {"workspace.created", "tab.created"}
     dev_events = event_map(dev)
@@ -138,23 +152,14 @@ def main() -> int:
 
         dev_command = dev_event.get("command", [])
         release_command = release_event.get("command", [])
-        if not dev_command or dev_command[0] != DEV_BINARY:
-            errors.append(
-                f"dev event {event_name!r} must invoke {DEV_BINARY!r}, got {dev_command!r}"
-            )
-        if not release_command or release_command[0] != RELEASE_BINARY:
-            errors.append(
-                f"release event {event_name!r} must invoke {RELEASE_BINARY!r}, got {release_command!r}"
-            )
-        if dev_command[1:] != release_command[1:]:
-            errors.append(
-                f"event {event_name!r} command args differ after binary path: "
-                f"{dev_command[1:]!r} != {release_command[1:]!r}"
-            )
-        if dev_command[1:] != ["ensure-started"]:
-            errors.append(
-                f"event {event_name!r} must run ensure-started, got {dev_command[1:]!r}"
-            )
+        check_command_pair(
+            errors,
+            "event",
+            event_name,
+            dev_command,
+            release_command,
+            ["ensure-started"],
+        )
 
     if errors:
         for error in errors:

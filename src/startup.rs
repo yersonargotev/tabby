@@ -207,7 +207,7 @@ pub struct DaemonMetadata {
 
 fn read_metadata_if_present(path: &Path) -> Result<Option<DaemonMetadata>, StartupError> {
     match fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(serde_json::from_str(&contents)?)),
+        Ok(contents) => Ok(serde_json::from_str(&contents).ok()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(StartupError::Io(error)),
     }
@@ -658,6 +658,36 @@ mod tests {
                 PathBuf::from("/tmp/herdr.sock")
             )]
         );
+    }
+
+    #[test]
+    fn malformed_metadata_is_replaced_and_spawns_daemon() {
+        let temp_dir = TestTempDir::new();
+        let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
+        let daemon_dir = temp_dir.path().join(DAEMONS_DIR_NAME);
+        fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        fs::write(
+            daemon_dir.join(format!("{}.json", socket.session_key)),
+            "{not valid json",
+        )
+        .expect("write malformed metadata");
+        let mut runtime = FakeStartupRuntime::default().with_spawn_pid(456);
+
+        let outcome = ensure_started_with(
+            &socket,
+            temp_dir.path(),
+            Path::new("/tmp/tabby"),
+            &mut runtime,
+        )
+        .expect("ensure started");
+        let metadata =
+            read_metadata_if_present(&daemon_dir.join(format!("{}.json", socket.session_key)))
+                .expect("read metadata")
+                .expect("metadata present");
+
+        assert_eq!(outcome, EnsureStartedOutcome::Started { pid: 456 });
+        assert_eq!(metadata.pid, 456);
+        assert_eq!(metadata.session_key, socket.session_key);
     }
 
     #[test]

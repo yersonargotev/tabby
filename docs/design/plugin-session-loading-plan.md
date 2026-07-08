@@ -1,6 +1,6 @@
 # Plugin Session Loading Implementation Plan
 
-Status: design accepted; no implementation yet.
+Status: implemented in `7e78988`; verification notes below.
 
 ## Final recommendation
 
@@ -67,3 +67,23 @@ Implement Tabby startup as an explicit, idempotent per-Herdr-session flow:
 - No heartbeat/control socket.
 - No `pane.created` or focus hooks unless verification proves they are necessary.
 - No dependency on filing the upstream Herdr issue.
+
+## Implementation verification notes
+
+2026-07-08 implementation checks:
+
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- `python3 scripts/check-herdr-manifests.py`
+- `cargo build`
+- Safe smoke test with a temporary `HERDR_PLUGIN_STATE_DIR` and fake absolute `HERDR_SOCKET_PATH` confirmed `target/debug/tabby ensure-started` writes `daemons/<session_key>.json`, spawns `tabby start`, and the spawned process exits when it cannot connect to the fake socket.
+
+Full live-Herdr verification was intentionally deferred during this implementation pass because the active Herdr environment already had an older `../../bin/tabby start` daemon running without v1 `daemons/<session_key>.json` metadata. Running real `ensure-started` against that same live socket would risk starting a duplicate daemon before the old process is stopped or v1 metadata is seeded safely.
+
+Remaining live verification:
+
+- `tabby install` does not start a daemon.
+- `tabby install --start` starts exactly one Tabby Session Daemon for the current Herdr Session.
+- Repeated Herdr `start` action invocations remain idempotent.
+- `workspace.created`/`tab.created` hooks start Tabby in new activity.
+- Restore behavior is observed and documented without overpromising.
