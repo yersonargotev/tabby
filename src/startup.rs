@@ -7,7 +7,7 @@
 use crate::paths::{
     HERDR_PLUGIN_CONFIG_DIR_ENV, HERDR_PLUGIN_STATE_DIR_ENV, HOME_ENV, PLUGIN_ID,
     PluginStateDirInputs, PluginStateDirSource, StatePathError, XDG_STATE_HOME_ENV,
-    default_plugin_state_dir,
+    default_plugin_state_dir, herdr_plugin_config_dir,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -134,7 +134,7 @@ fn is_stale_absolute_socket_path(path: &Path) -> bool {
 
 fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
     resolve_state_base_with(RuntimeStateInputs::from_env(), || {
-        herdr_plugin_config_dir(PLUGIN_ID)
+        herdr_plugin_config_dir(PLUGIN_ID).map_err(StartupError::from)
     })
 }
 
@@ -192,27 +192,6 @@ fn should_remove_herdr_socket_path(socket_path: Option<&OsStr>) -> bool {
     };
 
     is_stale_absolute_socket_path(Path::new(socket_path))
-}
-
-fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StartupError> {
-    let output = Command::new("herdr")
-        .args(["plugin", "config-dir", plugin_id])
-        .output()
-        .map_err(StartupError::HerdrConfigDirIo)?;
-    if !output.status.success() {
-        return Err(StartupError::HerdrConfigDirFailed {
-            status: output.status,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-    let stdout = String::from_utf8(output.stdout)?;
-    let path = stdout.trim();
-    if path.is_empty() {
-        return Err(StartupError::EmptyStateBase {
-            source: StateBaseSource::HerdrPluginConfigDirCommand,
-        });
-    }
-    Ok(PathBuf::from(path))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

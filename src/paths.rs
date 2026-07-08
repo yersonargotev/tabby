@@ -124,7 +124,7 @@ pub enum PluginStateDirSource {
     Home,
 }
 
-fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StatePathError> {
+pub fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StatePathError> {
     let output = Command::new("herdr")
         .args(["plugin", "config-dir", plugin_id])
         .output()
