@@ -42,3 +42,10 @@ macOS is first. Linux should be added only after the macOS behavior and process 
 - CLI-invoked plugin actions did not inherit arbitrary caller env (`TABBY_LOCK_STORE_PATH`) and did not expose `HERDR_SOCKET_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, or `HERDR_PLUGIN_STATE_DIR` in the action process env. The Herdr CLI is available inside the action process, and `herdr plugin config-dir yersonargotev.tabby` works there.
 
 Decision: keep `TABBY_LOCK_STORE_PATH` as the highest-priority explicit override for tests/development. Without it, resolve `locks.json` inside Herdr-provided plugin-owned state/config directories if Herdr exposes them, otherwise call `herdr plugin config-dir yersonargotev.tabby` and use `<config-dir>/locks.json`. Reject empty or relative resolved paths rather than writing to an invented implicit home/config path.
+
+2026-07-08 runtime verification:
+
+- A real `herdr plugin action invoke unlock-all --plugin yersonargotev.tabby` run failed before rebuilding because the local-linked action command points at `target/debug/tabby`, and that binary was stale from before the default state-path change.
+- After `cargo build`, the same action succeeded without `TABBY_LOCK_STORE_PATH`.
+- The observed lock store path was `/Users/argote/.local/state/herdr/plugins/yersonargotev.tabby/locks.json`, with an empty v1 store. No `locks.json` was created under the `herdr plugin config-dir` fallback path.
+- This confirms the implemented precedence can use Herdr plugin-owned state space at runtime; local-link verification must rebuild `target/debug/tabby` after source changes before invoking plugin actions.
