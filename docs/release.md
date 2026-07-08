@@ -11,6 +11,10 @@ herdr plugin link "$(brew --prefix tabby)/share/tabby"
 
 The Homebrew formula installs the `tabby` binary under the package `bin` directory and installs `packaging/herdr/herdr-plugin.toml` as `share/tabby/herdr-plugin.toml`. The release manifest invokes `../../bin/tabby` relative to `share/tabby`, keeping Herdr actions tied to the binary installed by the same Homebrew package.
 
+## Tap validation
+
+Validated on 2026-07-08 with `gh repo view yersonargotev/homebrew-tap --json nameWithOwner,visibility,isArchived,url,defaultBranchRef,pushedAt`: the tap exists at <https://github.com/yersonargotev/homebrew-tap>, is public, is not archived, and uses `main` as its default branch.
+
 ## Required release setup
 
 - The tap repository `yersonargotev/homebrew-tap` must exist and be writable by the release workflow.

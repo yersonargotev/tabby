@@ -5,6 +5,7 @@ edition = "2024"
 description = "Herdr plugin for automatic tab labels"
 homepage = "https://github.com/yersonargotev/tabby"
 repository = "https://github.com/yersonargotev/tabby"
+license = "Apache-2.0"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
