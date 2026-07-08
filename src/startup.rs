@@ -19,6 +19,14 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::string::FromUtf8Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setsid() -> i32;
+}
+
 const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
 const DAEMONS_DIR_NAME: &str = "daemons";
 const METADATA_SCHEMA_VERSION: u8 = 1;
@@ -342,6 +350,21 @@ fn spawn_detached_daemon(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
+    #[cfg(unix)]
+    {
+        // SAFETY: `pre_exec` runs in the child after fork and before exec. The
+        // closure only calls async-signal-safe `setsid` and reads errno via
+        // `last_os_error` when it fails.
+        unsafe {
+            command.pre_exec(|| {
+                if setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     let child: Child = command.spawn().map_err(StartupError::SpawnDaemon)?;
     Ok(SpawnedDaemon { pid: child.id() })
 }
@@ -566,6 +589,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs::File;
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(unix)]
+    use std::thread;
 
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -824,6 +849,55 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn spawned_daemon_is_isolated_from_parent_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TestTempDir::new();
+        let helper_path = temp_dir.path().join("fake-tabby");
+        let pid_path = temp_dir.path().join("child.pid");
+        let socket_path = temp_dir.path().join("herdr.sock");
+
+        fs::write(
+            &helper_path,
+            format!(
+                r#"#!/bin/sh
+test "$1" = "start" || exit 2
+test "$HERDR_SOCKET_PATH" = "{}" || exit 3
+echo "$$" > "{}"
+sleep 30
+"#,
+                socket_path.display(),
+                pid_path.display()
+            ),
+        )
+        .expect("write helper");
+        let mut permissions = fs::metadata(&helper_path)
+            .expect("helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&helper_path, permissions).expect("make helper executable");
+
+        let spawned = spawn_detached_daemon(&helper_path, &socket_path).expect("spawn helper");
+        wait_for_file(&pid_path);
+
+        let recorded_pid: u32 = fs::read_to_string(&pid_path)
+            .expect("read child pid")
+            .trim()
+            .parse()
+            .expect("parse child pid");
+        assert_eq!(recorded_pid, spawned.pid);
+        assert!(pid_is_running(spawned.pid));
+        assert_ne!(
+            process_group_id(spawned.pid),
+            process_group_id(std::process::id()),
+            "detached daemon must not remain in the short-lived ensure-started process group"
+        );
+
+        terminate_process(spawned.pid);
+    }
+
     fn metadata_path_for(state_base: &Path, socket: &SessionSocket) -> PathBuf {
         state_base
             .join(DAEMONS_DIR_NAME)
@@ -898,6 +972,47 @@ mod tests {
                 pid: self.spawn_pid,
             })
         }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_file(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("timed out waiting for {}", path.display());
+    }
+
+    #[cfg(unix)]
+    fn process_group_id(pid: u32) -> u32 {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pgid="])
+            .output()
+            .expect("run ps");
+        assert!(output.status.success(), "ps failed for pid {pid}");
+        String::from_utf8(output.stdout)
+            .expect("pgid output utf8")
+            .trim()
+            .parse()
+            .expect("parse pgid")
+    }
+
+    #[cfg(unix)]
+    fn pid_is_running(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    fn terminate_process(pid: u32) {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
     }
 
     struct TestTempDir {
