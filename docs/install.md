@@ -125,6 +125,16 @@ herdr plugin unlink yersonargotev.tabby || true
 herdr plugin link "$(brew --prefix tabby)/share/tabby"
 ```
 
+If Herdr returns `Error: Os { code: 2, kind: NotFound, message: "No such file or directory" }`
+from `plugin link` or `plugin action invoke`, the shell may be carrying a stale
+`HERDR_SOCKET_PATH` from a previous Herdr server process. Retry after letting
+Herdr rediscover the current session:
+
+```sh
+env -u HERDR_SOCKET_PATH tabby install
+env -u HERDR_SOCKET_PATH herdr plugin action invoke start --plugin yersonargotev.tabby
+```
+
 ## Stop, disable, uninstall, or roll back
 
 Tabby does not provide a separate `tabby stop` command. To stop a running daemon action, close the running Herdr plugin action/pane if it is visible in Herdr, or terminate the `tabby start` process from a shell:

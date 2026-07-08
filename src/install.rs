@@ -1,10 +1,12 @@
 use crate::paths::PLUGIN_ID;
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const HERDR_BINARY: &str = "herdr";
+const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
 const RELEASE_PLUGIN_RELATIVE_PATH: &[&str] = &["share", "tabby"];
 const MANIFEST_FILE_NAME: &str = "herdr-plugin.toml";
 
@@ -70,8 +72,19 @@ pub struct SystemCommandRunner;
 
 impl HerdrCommandRunner for SystemCommandRunner {
     fn run(&mut self, program: &str, args: &[&str]) -> Result<HerdrCommandOutput, InstallError> {
-        let output = Command::new(program)
-            .args(args)
+        let mut command = Command::new(program);
+        command.args(args);
+
+        // Herdr panes export HERDR_SOCKET_PATH. If that socket becomes stale after a
+        // Herdr restart, plugin link/action commands fail with a vague OS error 2.
+        // Let Herdr rediscover the active session from HERDR_SESSION/default config.
+        if is_herdr_program(program)
+            && should_remove_herdr_socket_path(std::env::var_os(HERDR_SOCKET_PATH_ENV).as_deref())
+        {
+            command.env_remove(HERDR_SOCKET_PATH_ENV);
+        }
+
+        let output = command
             .output()
             .map_err(|source| InstallError::HerdrCommandIo {
                 command: command_text(program, args),
@@ -175,6 +188,18 @@ fn command_text(program: &str, args: &[&str]) -> String {
         .join(" ")
 }
 
+fn is_herdr_program(program: &str) -> bool {
+    Path::new(program).file_name().and_then(OsStr::to_str) == Some(HERDR_BINARY)
+}
+
+fn should_remove_herdr_socket_path(socket_path: Option<&OsStr>) -> bool {
+    let Some(socket_path) = socket_path.filter(|path| !path.is_empty()) else {
+        return false;
+    };
+
+    !Path::new(socket_path).exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +270,27 @@ mod tests {
             ]
         );
         assert!(message.contains("tabby install: linked yersonargotev.tabby"));
+    }
+
+    #[test]
+    fn stale_herdr_socket_path_is_removed_before_running_herdr() {
+        let temp_dir = TestTempDir::new();
+        let missing_socket = temp_dir.path().join("missing-herdr.sock");
+
+        assert!(should_remove_herdr_socket_path(Some(
+            missing_socket.as_os_str()
+        )));
+    }
+
+    #[test]
+    fn existing_herdr_socket_path_is_preserved() {
+        let temp_dir = TestTempDir::new();
+        let socket_path = temp_dir.path().join("herdr.sock");
+        fs::write(&socket_path, "").expect("write socket placeholder");
+
+        assert!(!should_remove_herdr_socket_path(Some(
+            socket_path.as_os_str()
+        )));
     }
 
     struct FakeRunner {
