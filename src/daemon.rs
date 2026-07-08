@@ -10,14 +10,13 @@ use crate::locks::{
     LockStore, LockStoreError, ManualLockDecision, detect_manual_lock, unlock_all_at_path,
     unlock_focused_tab_at_path,
 };
+use crate::paths::{StatePathError, lock_store_path_from_runtime};
 use crate::stability::{StabilityDecision, StabilityPolicy, StabilityState};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::Instant;
-
-pub const LOCK_STORE_PATH_ENV: &str = "TABBY_LOCK_STORE_PATH";
 
 #[derive(Debug)]
 pub struct DaemonState {
@@ -278,7 +277,7 @@ where
 }
 
 pub fn run_daemon_loop_from_env() -> Result<(), RuntimeError> {
-    let lock_store_path = lock_store_path_from_env()?;
+    let lock_store_path = lock_store_path_from_runtime()?;
     let transport = UnixSocketTransport::from_env()?;
     let mut client = HerdrClient::new(transport);
     run_daemon_loop(&mut client, lock_store_path)?;
@@ -286,7 +285,7 @@ pub fn run_daemon_loop_from_env() -> Result<(), RuntimeError> {
 }
 
 pub fn unlock_focused_from_env() -> Result<String, RuntimeError> {
-    let lock_store_path = lock_store_path_from_env()?;
+    let lock_store_path = lock_store_path_from_runtime()?;
     let transport = UnixSocketTransport::from_env()?;
     let mut client = HerdrClient::new(transport);
     let outcome = unlock_focused_tab_at_path(lock_store_path, &mut client)?;
@@ -294,7 +293,7 @@ pub fn unlock_focused_from_env() -> Result<String, RuntimeError> {
 }
 
 pub fn unlock_all_from_env() -> Result<String, RuntimeError> {
-    let lock_store_path = lock_store_path_from_env()?;
+    let lock_store_path = lock_store_path_from_runtime()?;
     unlock_all_at_path(lock_store_path)?;
     Ok("tabby unlock-all: cleared persisted manual locks".to_string())
 }
@@ -331,12 +330,6 @@ fn stable_label_from_decision(decision: &StabilityDecision) -> Option<&str> {
         StabilityDecision::Pending => None,
         StabilityDecision::Rename { label } | StabilityDecision::NoOp { label } => Some(label),
     }
-}
-
-fn lock_store_path_from_env() -> Result<PathBuf, RuntimeError> {
-    std::env::var_os(LOCK_STORE_PATH_ENV)
-        .map(PathBuf::from)
-        .ok_or(RuntimeError::MissingLockStorePathEnv)
 }
 
 #[derive(Debug)]
@@ -379,7 +372,7 @@ impl From<LockStoreError> for DaemonError {
 
 #[derive(Debug)]
 pub enum RuntimeError {
-    MissingLockStorePathEnv,
+    StatePath(StatePathError),
     Herdr(HerdrError),
     LockStore(LockStoreError),
     UnlockFocused(crate::locks::UnlockFocusedError),
@@ -389,9 +382,9 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingLockStorePathEnv => write!(
+            Self::StatePath(error) => write!(
                 formatter,
-                "{LOCK_STORE_PATH_ENV} is required; refusing to write tabby state to an implicit real user path"
+                "failed to resolve Tabby lock store path: {error}"
             ),
             Self::Herdr(error) => write!(formatter, "Herdr runtime setup failed: {error}"),
             Self::LockStore(error) => {
@@ -406,12 +399,18 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::MissingLockStorePathEnv => None,
+            Self::StatePath(error) => Some(error),
             Self::Herdr(error) => Some(error),
             Self::LockStore(error) => Some(error),
             Self::UnlockFocused(error) => Some(error),
             Self::Daemon(error) => Some(error),
         }
+    }
+}
+
+impl From<StatePathError> for RuntimeError {
+    fn from(error: StatePathError) -> Self {
+        Self::StatePath(error)
     }
 }
 
@@ -445,6 +444,7 @@ mod tests {
     use crate::herdr_client::{PaneProcess, PaneProcessInfo, RenameTabResult, TabInfo};
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

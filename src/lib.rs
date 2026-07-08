@@ -2,6 +2,7 @@ pub mod daemon;
 pub mod herdr_client;
 pub mod labeler;
 pub mod locks;
+pub mod paths;
 pub mod stability;
 
 use std::fmt;

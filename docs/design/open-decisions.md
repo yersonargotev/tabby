@@ -32,3 +32,13 @@ Local linking is v1. Release packaging remains important and should include macO
 ## 6. Linux support timing
 
 macOS is first. Linux should be added only after the macOS behavior and process inspection model are stable, unless Linux support falls out for free from the same APIs.
+
+## 7. Plugin-owned lock store path
+
+2026-07-08 Herdr plugin runtime research resolved the v1 default:
+
+- `herdr plugin config-dir yersonargotev.tabby` returns `/Users/argote/.config/herdr/plugins/config/yersonargotev.tabby` for the local-linked plugin, and the directory exists as plugin-owned Herdr state/config space.
+- `herdr plugin action invoke` runs action commands from the plugin root, so the current relative `target/debug/tabby` commands resolve even when the invoking shell cwd is elsewhere.
+- CLI-invoked plugin actions did not inherit arbitrary caller env (`TABBY_LOCK_STORE_PATH`) and did not expose `HERDR_SOCKET_PATH`, `HERDR_PLUGIN_CONFIG_DIR`, or `HERDR_PLUGIN_STATE_DIR` in the action process env. The Herdr CLI is available inside the action process, and `herdr plugin config-dir yersonargotev.tabby` works there.
+
+Decision: keep `TABBY_LOCK_STORE_PATH` as the highest-priority explicit override for tests/development. Without it, resolve `locks.json` inside Herdr-provided plugin-owned state/config directories if Herdr exposes them, otherwise call `herdr plugin config-dir yersonargotev.tabby` and use `<config-dir>/locks.json`. Reject empty or relative resolved paths rather than writing to an invented implicit home/config path.
