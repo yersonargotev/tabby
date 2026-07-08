@@ -305,24 +305,31 @@ struct PaneSelection<'a> {
 }
 
 fn select_pane_for_tab<'a>(panes: &'a [PaneInfo], tab_id: &str) -> Option<PaneSelection<'a>> {
-    if let Some(pane) = panes
-        .iter()
-        .filter(|pane| pane.tab_id == tab_id)
-        .find(|pane| pane.focused)
-    {
+    let mut tab_panes = panes.iter().filter(|pane| pane.tab_id == tab_id);
+    let first = tab_panes.next()?;
+
+    if first.focused {
         return Some(PaneSelection {
-            pane,
+            pane: first,
             inspect_process: true,
         });
     }
 
-    panes
-        .iter()
-        .find(|pane| pane.tab_id == tab_id)
-        .map(|pane| PaneSelection {
-            pane,
-            inspect_process: false,
-        })
+    let mut pane_count = 1;
+    for pane in tab_panes {
+        pane_count += 1;
+        if pane.focused {
+            return Some(PaneSelection {
+                pane,
+                inspect_process: true,
+            });
+        }
+    }
+
+    Some(PaneSelection {
+        pane: first,
+        inspect_process: pane_count == 1,
+    })
 }
 
 fn stable_label_from_decision(decision: &StabilityDecision) -> Option<&str> {
@@ -686,6 +693,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inactive_single_pane_tabs_keep_significant_commands_across_focus_flip() {
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", true), tab("w1:t2", "old", false)],
+            vec![
+                pane("w1:p1", "w1:t1", true, "tabby"),
+                pane("w1:p2", "w1:t2", false, "tabby"),
+            ],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]))
+        .with_process_info(process("w1:p2", "nvim", &["nvim", "."]));
+        let mut state = DaemonState::default();
+
+        tick(&mut herdr, &mut state, start).expect("initial codex-focused tick");
+        tick(&mut herdr, &mut state, start + Duration::from_millis(500))
+            .expect("initial codex-focused stable tick");
+
+        herdr.set_focus("w1:t2", "w1:p2");
+        tick(&mut herdr, &mut state, start + Duration::from_millis(1000))
+            .expect("nvim-focused tick");
+        tick(&mut herdr, &mut state, start + Duration::from_millis(1500))
+            .expect("nvim-focused stable tick");
+
+        herdr.set_focus("w1:t1", "w1:p1");
+        herdr.process_info_calls.clear();
+        tick(&mut herdr, &mut state, start + Duration::from_millis(4000))
+            .expect("codex-refocused tick after grace");
+        tick(&mut herdr, &mut state, start + Duration::from_millis(4500))
+            .expect("codex-refocused stable tick after grace");
+
+        assert_eq!(
+            herdr.process_info_calls,
+            vec![
+                "w1:p1".to_string(),
+                "w1:p2".to_string(),
+                "w1:p1".to_string(),
+                "w1:p2".to_string(),
+            ]
+        );
+        assert_eq!(herdr.tab_label("w1:t1"), Some("codex"));
+        assert_eq!(herdr.tab_label("w1:t2"), Some("nvim"));
+        assert!(
+            !herdr
+                .renames
+                .iter()
+                .any(|(tab_id, label)| tab_id == "w1:t2" && label == "tabby"),
+            "inactive nvim tab unexpectedly degraded to cwd: {:?}",
+            herdr.renames
+        );
+    }
+
     struct FakeHerdr {
         tabs: Vec<TabInfo>,
         panes: Vec<PaneInfo>,
@@ -722,6 +781,23 @@ mod tests {
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.tab_id == tab_id) {
                 tab.label = label.to_string();
             }
+        }
+
+        fn set_focus(&mut self, tab_id: &str, pane_id: &str) {
+            for tab in &mut self.tabs {
+                tab.focused = tab.tab_id == tab_id;
+            }
+
+            for pane in &mut self.panes {
+                pane.focused = pane.pane_id == pane_id;
+            }
+        }
+
+        fn tab_label(&self, tab_id: &str) -> Option<&str> {
+            self.tabs
+                .iter()
+                .find(|tab| tab.tab_id == tab_id)
+                .map(|tab| tab.label.as_str())
         }
     }
 
