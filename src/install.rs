@@ -1,4 +1,4 @@
-use crate::paths::PLUGIN_ID;
+use crate::paths::{PLUGIN_ID, should_remove_stale_herdr_socket_path};
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
@@ -60,7 +60,7 @@ pub fn relink_with(
     }
 
     Ok(format!(
-        "tabby install: linked {PLUGIN_ID} to {plugin_root}\nstart it with: herdr plugin action invoke start --plugin {PLUGIN_ID}"
+        "tabby install: linked {PLUGIN_ID} to {plugin_root}\nstart the Tabby Session Daemon for the current Herdr Session with: tabby install --start\nor: herdr plugin action invoke start --plugin {PLUGIN_ID}"
     ))
 }
 
@@ -79,7 +79,9 @@ impl HerdrCommandRunner for SystemCommandRunner {
         // Herdr restart, plugin link/action commands fail with a vague OS error 2.
         // Let Herdr rediscover the active session from HERDR_SESSION/default config.
         if is_herdr_program(program)
-            && should_remove_herdr_socket_path(std::env::var_os(HERDR_SOCKET_PATH_ENV).as_deref())
+            && should_remove_stale_herdr_socket_path(
+                std::env::var_os(HERDR_SOCKET_PATH_ENV).as_deref(),
+            )
         {
             command.env_remove(HERDR_SOCKET_PATH_ENV);
         }
@@ -192,14 +194,6 @@ fn is_herdr_program(program: &str) -> bool {
     Path::new(program).file_name().and_then(OsStr::to_str) == Some(HERDR_BINARY)
 }
 
-fn should_remove_herdr_socket_path(socket_path: Option<&OsStr>) -> bool {
-    let Some(socket_path) = socket_path.filter(|path| !path.is_empty()) else {
-        return false;
-    };
-
-    !Path::new(socket_path).exists()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,7 +271,7 @@ mod tests {
         let temp_dir = TestTempDir::new();
         let missing_socket = temp_dir.path().join("missing-herdr.sock");
 
-        assert!(should_remove_herdr_socket_path(Some(
+        assert!(should_remove_stale_herdr_socket_path(Some(
             missing_socket.as_os_str()
         )));
     }
@@ -288,7 +282,7 @@ mod tests {
         let socket_path = temp_dir.path().join("herdr.sock");
         fs::write(&socket_path, "").expect("write socket placeholder");
 
-        assert!(!should_remove_herdr_socket_path(Some(
+        assert!(!should_remove_stale_herdr_socket_path(Some(
             socket_path.as_os_str()
         )));
     }
