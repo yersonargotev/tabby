@@ -1,3 +1,5 @@
+pub mod herdr_client;
+
 use std::fmt;
 
 pub const USAGE: &str = "Usage: tabby <daemon|start|unlock-focused|unlock-all>";

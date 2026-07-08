@@ -1,0 +1,1 @@
+{"id":"tabs-1","result":{"type":"tab_list","tabs":[{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"editor","focused":true,"pane_count":2,"agent_status":"idle"},{"tab_id":"w1:t2","workspace_id":"w1","number":2,"label":"server","focused":false,"pane_count":1,"agent_status":"working"}]}}
