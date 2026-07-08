@@ -1,7 +1,7 @@
 # Release Packaging Research
 
 Date: 2026-07-08
-Status: research note for GitHub issue #1; not a final decision.
+Status: resolved by ADR 0005; retained as supporting research for GitHub issue #1.
 
 ## Goal
 
@@ -45,9 +45,21 @@ The tap repository must already exist and the publishing token needs write acces
 
 Sources:
 
-- https://github.com/axodotdev/cargo-dist/blob/main/book/src/quickstart/rust.md
-- https://github.com/axodotdev/cargo-dist/blob/main/book/src/installers/homebrew.md
-- https://github.com/axodotdev/cargo-dist/blob/main/book/src/reference/config.md
+- https://axodotdev.github.io/cargo-dist/book/quickstart/rust.html
+- https://axodotdev.github.io/cargo-dist/book/installers/homebrew.html
+- https://axodotdev.github.io/cargo-dist/book/artifacts/checksums.html
+- https://axodotdev.github.io/cargo-dist/book/reference/config.html
+
+### Herdr plugin installation model
+
+Herdr plugins are directories with a `herdr-plugin.toml` manifest. `herdr plugin install owner/repo[/subdir...]` clones a GitHub-managed plugin checkout, runs supported build commands after preview/confirmation, and registers the plugin. `herdr plugin link /path/to/plugin` registers a local plugin directory without running build commands. Marketplace discovery is an automatic, unreviewed index of public GitHub repositories tagged with `herdr-plugin`; marketplace installation still uses `herdr plugin install owner/repo[/subdir...]`.
+
+This means a Homebrew-installed binary alone is not enough to register Tabby as a Herdr plugin. For v1, the release package needs to install plugin assets and docs need to tell the user to explicitly link the Homebrew-managed plugin directory.
+
+Sources:
+
+- https://herdr.dev/docs/plugins/
+- https://herdr.dev/docs/marketplace/
 
 ## Options
 
@@ -91,20 +103,24 @@ Cons:
 - Slower install and more user-environment failure modes.
 - Does not satisfy the project goal of release binaries first.
 
-## Recommendation to confirm
+## Resolved decision
 
-Use Option B: `dist` / `cargo-dist` generated releases with Homebrew tap publishing.
+See [ADR 0005](adr/0005-use-dist-and-homebrew-managed-plugin-link-for-release.md).
 
-Proposed initial release policy:
+The accepted v1 release policy is:
 
-- Create a separate tap repo, likely `yersonargotev/homebrew-tap` unless we want a Tabby-specific tap.
-- Ship macOS arm64 first if we want the smallest safe release, or macOS arm64+x86_64 if cross-target CI is low-friction.
-- Treat standalone install scripts as secondary; the public v1 install path should be `brew tap ... && brew install tabby` unless a script is still needed for Herdr plugin registration.
-- Review the generated workflow and formula before the first tag.
+- Use Option B: `dist` / `cargo-dist` generated releases with Homebrew tap publishing.
+- Publish to the general tap repo `yersonargotev/homebrew-tap`.
+- Ship Apple Silicon macOS only for the first release (`aarch64-apple-darwin`). Linux compatibility is a future direction, not part of v1 packaging.
+- Install the release binary and Herdr plugin assets through Homebrew, then require an explicit user-run registration command such as `herdr plugin link "$(brew --prefix tabby)/share/tabby"`.
+- Do not list Tabby in the Herdr marketplace for v1 and do not support `herdr plugin install yersonargotev/tabby` yet.
+- Do not ship a standalone install script for v1.
+- Keep separate Herdr manifests: the root `herdr-plugin.toml` remains the local-link development manifest, while a release manifest is installed under the Homebrew package prefix.
+- Review the generated release workflow and formula before the first tag.
 
-## Open questions for grilling
+## Grilling outcomes
 
-1. Should the tap be general (`yersonargotev/homebrew-tap`) or project-specific (`yersonargotev/homebrew-tabby`)?
-2. Should first release targets be macOS arm64 only or both macOS arm64 and x86_64?
-3. Is `brew install tabby` enough, or must release packaging also automate Herdr plugin registration?
-4. Should there be an auditable install script in v1, or should docs plus Homebrew be the only install surface?
+1. Use the general tap `yersonargotev/homebrew-tap`.
+2. First release target is Apple Silicon macOS only.
+3. `brew install` is not enough by itself: Homebrew installs the binary and plugin assets, and the user explicitly links the Homebrew-managed plugin directory with Herdr.
+4. No standalone install script in v1; docs plus explicit commands are the public install surface.
