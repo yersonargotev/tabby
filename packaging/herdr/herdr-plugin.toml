@@ -7,7 +7,7 @@ platforms = ["macos"]
 
 # Release flow:
 #   brew install yersonargotev/tap/tabby
-#   herdr plugin link "$(brew --prefix tabby)/share/tabby"
+#   tabby install
 # Homebrew installs this manifest under pkgshare (share/tabby) and the binary under bin.
 # Keep the command path relative to this manifest so Herdr invokes the binary installed
 # by the same Homebrew package, not target/debug/tabby or an ambiguous PATH lookup.
