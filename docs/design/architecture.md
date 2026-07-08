@@ -4,7 +4,7 @@ Status: initial design, no implementation yet.
 
 ## Goal
 
-Build a Herdr plugin that automatically keeps tab labels meaningful. For each tab, the plugin inspects the tab's Focused Pane, prefers a stable Significant Command as the label, and falls back to the Working Directory Basename when no useful command is present.
+Build a Herdr plugin that automatically keeps tab labels meaningful. For the currently focused tab, the plugin inspects the tab's Focused Pane, prefers a stable Significant Command as the label, and falls back to the Working Directory Basename when no useful command is present. Inactive tabs keep their last visible label until focused again so the tab bar stays stable while the user navigates.
 
 ## Inputs and controls
 
@@ -20,19 +20,20 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
 ## Core behavior
 
 1. Poll Herdr state every 500 ms.
-2. For each tab, select its Focused Pane.
-3. Ask the Process Inspector for foreground process details for that pane.
-4. Use Label Policy to derive a Tab Label Candidate:
+2. Skip inactive tabs without process inspection or renaming.
+3. For the focused tab, select its Focused Pane.
+4. Ask the Process Inspector for foreground process details for that pane.
+5. Use Label Policy to derive a Tab Label Candidate:
    - known interactive apps: `nvim`, `lazygit`, `codex`, `claude`;
    - useful runner/subcommand pairs: `pnpm dev`, `npm test`, `go test`, `cargo run`;
    - ignore shells, opaque wrappers, and transient processes;
    - fallback to Working Directory Basename.
-5. Pass candidates through stability checks:
+6. Pass candidates through stability checks:
    - require two consecutive observations before renaming;
    - keep the last Significant Command for a 2 second grace period before falling back to cwd;
    - skip no-op renames.
-6. Detect and preserve Manually Locked Tabs.
-7. Rename only unlocked tabs with stable labels.
+7. Detect and preserve Manually Locked Tabs.
+8. Rename only the focused unlocked tab when it has a stable label.
 
 ## Rust module shape
 

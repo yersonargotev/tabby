@@ -1,6 +1,6 @@
 # Herdr Tab Auto-Renamer
 
-This context describes a Herdr plugin that keeps tab labels useful by deriving them from the focused pane's meaningful foreground activity, falling back to the focused pane's working directory name.
+This context describes a Herdr plugin that keeps tab labels useful by deriving them from the focused tab's meaningful foreground activity, falling back to that tab's focused pane working directory name. Tabby only auto-renames the currently focused Herdr tab; inactive tabs keep their last label until focused again so the tab bar stays stable during navigation.
 
 ## Language
 
@@ -25,11 +25,15 @@ A user-invoked plugin action that removes one or more Manually Locked Tabs from 
 _Avoid_: reset, auto-unlock
 
 **Stable Label Candidate**:
-A Tab Label Candidate that has survived the plugin's anti-flapping checks and is safe to apply with `tab.rename`. The initial policy is polling every 500 ms, requiring two consecutive observations, and keeping the last Significant Command for a 2 second grace period before falling back to Working Directory Basename.
+A Tab Label Candidate that has survived the plugin's anti-flapping checks and is safe to apply with `tab.rename` to the currently focused unlocked tab. The initial policy is polling every 500 ms, requiring two consecutive observations, and keeping the last Significant Command for a 2 second grace period before falling back to Working Directory Basename.
 _Avoid_: immediate label, debounced title
 
+**Inactive Tab**:
+A Herdr tab that Herdr does not currently report as focused. Tabby does not inspect processes or apply renames to Inactive Tabs during the daemon loop; their last visible label is preserved until the tab becomes focused.
+_Avoid_: background tab, hidden tab
+
 **Focused Pane**:
-The pane within a tab that Herdr reports as focused. If no pane in a tab is reported as focused, the plugin may use the first listed pane only for Working Directory Basename fallback unless macOS testing proves Herdr exposes the tab's last-focused pane reliably.
+The pane within the focused tab that Herdr reports as focused. If no pane in the focused tab is reported as focused, the plugin may use the first listed pane only for Working Directory Basename fallback.
 _Avoid_: active pane, selected pane
 
 **Label Policy**:

@@ -12,6 +12,8 @@ Need macOS testing to confirm whether `pane.list` exposes the last-focused pane 
 
 2026-07-08 macOS Herdr verification: created a two-pane test tab, focused its second pane, then focused another tab. `pane.list` reported `focused: false` for both panes in the inactive test tab. V1 should therefore treat `pane.focused=true` as global focus evidence only; when a tab has no explicitly focused pane, use the first listed pane only for Working Directory Basename fallback and do not call `pane.process_info` for app-first labels.
 
+2026-07-08 follow-up: real usage reported that Tabby activity could interfere with clicking tabs to navigate. V1 now skips inactive tabs entirely during the daemon loop: no process inspection, no cwd fallback rename, and no `tab.rename` until a tab becomes focused. This trades stale inactive labels for stable tab-bar navigation.
+
 ## 3. Exact Significant Command allowlist
 
 Initial examples are `nvim`, `lazygit`, `codex`, `claude`, `pnpm dev`, `npm test`, `go test`, and `cargo run`. The first implementation should make this easy to expand through internal defaults; user config is deferred.
