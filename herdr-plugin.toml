@@ -1,0 +1,29 @@
+id = "yersonargotev.tabby"
+name = "Tabby"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Local-link Herdr plugin scaffold for automatic tab labels."
+platforms = ["macos"]
+
+# Local development flow:
+#   cargo build
+#   herdr plugin link .
+# Herdr plugin link does not run build commands, so commands target the local debug binary.
+
+[[actions]]
+id = "start"
+title = "Start Tabby daemon"
+contexts = ["workspace"]
+command = ["target/debug/tabby", "start"]
+
+[[actions]]
+id = "unlock-focused"
+title = "Unlock focused tab"
+contexts = ["tab"]
+command = ["target/debug/tabby", "unlock-focused"]
+
+[[actions]]
+id = "unlock-all"
+title = "Unlock all tabs"
+contexts = ["workspace"]
+command = ["target/debug/tabby", "unlock-all"]
