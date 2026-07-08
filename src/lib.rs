@@ -1,5 +1,6 @@
 pub mod herdr_client;
 pub mod labeler;
+pub mod locks;
 pub mod stability;
 
 use std::fmt;
@@ -67,8 +68,12 @@ where
 pub fn run_stub(command: Command) -> CommandOutcome {
     let message = match command {
         Command::Daemon | Command::Start => "tabby daemon stub: rename loop is not implemented yet",
-        Command::UnlockFocused => "tabby unlock-focused stub: lock store is not implemented yet",
-        Command::UnlockAll => "tabby unlock-all stub: lock store is not implemented yet",
+        Command::UnlockFocused => {
+            "tabby unlock-focused stub: daemon state path wiring is not implemented yet"
+        }
+        Command::UnlockAll => {
+            "tabby unlock-all stub: daemon state path wiring is not implemented yet"
+        }
         Command::Help => USAGE,
     };
 
