@@ -60,7 +60,7 @@ pub fn relink_with(
     }
 
     Ok(format!(
-        "tabby install: linked {PLUGIN_ID} to {plugin_root}\nstart it with: herdr plugin action invoke start --plugin {PLUGIN_ID}"
+        "tabby install: linked {PLUGIN_ID} to {plugin_root}\nstart the current Herdr session with: tabby install --start\nor: herdr plugin action invoke start --plugin {PLUGIN_ID}"
     ))
 }
 

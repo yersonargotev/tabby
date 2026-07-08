@@ -14,7 +14,7 @@ platforms = ["macos"]
 id = "start"
 title = "Start Tabby daemon"
 contexts = ["workspace"]
-command = ["target/debug/tabby", "start"]
+command = ["target/debug/tabby", "ensure-started"]
 
 [[actions]]
 id = "unlock-focused"
@@ -27,3 +27,11 @@ id = "unlock-all"
 title = "Unlock all tabs"
 contexts = ["workspace"]
 command = ["target/debug/tabby", "unlock-all"]
+
+[[events]]
+on = "workspace.created"
+command = ["target/debug/tabby", "ensure-started"]
+
+[[events]]
+on = "tab.created"
+command = ["target/debug/tabby", "ensure-started"]

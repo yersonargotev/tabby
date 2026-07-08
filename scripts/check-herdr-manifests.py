@@ -24,22 +24,26 @@ def parse_value(raw: str) -> Any:
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
-    manifest: dict[str, Any] = {"actions": []}
-    current_action: dict[str, Any] | None = None
+    manifest: dict[str, Any] = {"actions": [], "events": []}
+    current_section: dict[str, Any] | None = None
 
     for line_number, line in enumerate(path.read_text().splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if stripped == "[[actions]]":
-            current_action = {}
-            manifest["actions"].append(current_action)
+            current_section = {}
+            manifest["actions"].append(current_section)
+            continue
+        if stripped == "[[events]]":
+            current_section = {}
+            manifest["events"].append(current_section)
             continue
         if "=" not in stripped:
             raise ValueError(f"{path}:{line_number}: unsupported TOML line: {line!r}")
 
         key, raw_value = stripped.split("=", 1)
-        target = current_action if current_action is not None else manifest
+        target = current_section if current_section is not None else manifest
         target[key.strip()] = parse_value(raw_value)
 
     return manifest
@@ -48,6 +52,11 @@ def load_manifest(path: Path) -> dict[str, Any]:
 def action_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     actions = manifest.get("actions", [])
     return {action["id"]: action for action in actions}
+
+
+def event_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    events = manifest.get("events", [])
+    return {event["on"]: event for event in events}
 
 
 def main() -> int:
@@ -95,6 +104,56 @@ def main() -> int:
             errors.append(
                 f"action {action_id!r} command args differ after binary path: "
                 f"{dev_command[1:]!r} != {release_command[1:]!r}"
+            )
+        if action_id == "start" and dev_command[1:] != ["ensure-started"]:
+            errors.append(
+                f"action 'start' must run ensure-started, got {dev_command[1:]!r}"
+            )
+
+    expected_events = {"workspace.created", "tab.created"}
+    dev_events = event_map(dev)
+    release_events = event_map(release)
+    if set(dev_events) != expected_events:
+        errors.append(
+            f"dev event hooks must be {sorted(expected_events)}, got {sorted(dev_events)}"
+        )
+    if set(release_events) != expected_events:
+        errors.append(
+            f"release event hooks must be {sorted(expected_events)}, got {sorted(release_events)}"
+        )
+
+    for event_name in sorted(set(dev_events) & set(release_events)):
+        dev_event = dev_events[event_name]
+        release_event = release_events[event_name]
+        for manifest_path, event in [
+            (DEV_MANIFEST, dev_event),
+            (RELEASE_MANIFEST, release_event),
+        ]:
+            extra_keys = set(event) - {"on", "command"}
+            if extra_keys:
+                errors.append(
+                    f"event {event_name!r} in {manifest_path} has unsupported keys: "
+                    f"{sorted(extra_keys)}"
+                )
+
+        dev_command = dev_event.get("command", [])
+        release_command = release_event.get("command", [])
+        if not dev_command or dev_command[0] != DEV_BINARY:
+            errors.append(
+                f"dev event {event_name!r} must invoke {DEV_BINARY!r}, got {dev_command!r}"
+            )
+        if not release_command or release_command[0] != RELEASE_BINARY:
+            errors.append(
+                f"release event {event_name!r} must invoke {RELEASE_BINARY!r}, got {release_command!r}"
+            )
+        if dev_command[1:] != release_command[1:]:
+            errors.append(
+                f"event {event_name!r} command args differ after binary path: "
+                f"{dev_command[1:]!r} != {release_command[1:]!r}"
+            )
+        if dev_command[1:] != ["ensure-started"]:
+            errors.append(
+                f"event {event_name!r} must run ensure-started, got {dev_command[1:]!r}"
             )
 
     if errors:
