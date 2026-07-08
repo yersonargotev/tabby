@@ -33,7 +33,8 @@ It also avoids common shell and wrapper processes such as `zsh`, `bash`, `tmux`,
 
 ## Behavior details
 
-- Polls Herdr state and renames unlocked tabs when the candidate label is stable.
+- Polls Herdr state and renames the focused unlocked tab when the candidate label is stable.
+- Leaves inactive tab labels unchanged so Tabby does not rewrite the tab bar while the user is navigating between tabs.
 - Requires repeated observations before applying a label to reduce flapping.
 - Keeps the last Significant Command briefly before falling back to a cwd label.
 - Treats user-edited tab labels as Manually Locked Tabs.

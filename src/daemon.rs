@@ -4,7 +4,9 @@
 //! plugin-owned state keyed by Herdr `tab_id`; whether those IDs survive Herdr
 //! restarts is still an open design decision documented in `docs/design/open-decisions.md`.
 
-use crate::herdr_client::{HerdrApi, HerdrClient, HerdrError, PaneInfo, UnixSocketTransport};
+use crate::herdr_client::{
+    HerdrApi, HerdrClient, HerdrError, PaneInfo, TabInfo, UnixSocketTransport,
+};
 use crate::labeler::{LabelCandidate, LabelPolicy};
 use crate::locks::{
     LockStore, LockStoreError, ManualLockDecision, detect_manual_lock, unlock_all_at_path,
@@ -101,12 +103,25 @@ pub struct TabTickReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabTickAction {
     SkippedLocked,
+    SkippedInactive,
     SkippedNoPane,
     SkippedNoCandidate,
     DeferredUnstable { candidate_label: String },
     SkippedManualLockCreated { locked_label: String },
     SkippedAlreadyCurrent { label: String },
     Renamed { from: String, to: String },
+}
+
+fn skipped_tab_report(tab: TabInfo, action: TabTickAction) -> TabTickReport {
+    TabTickReport {
+        tab_id: tab.tab_id,
+        current_label: tab.label,
+        selected_pane_id: None,
+        raw_candidate_label: None,
+        stable_candidate_label: None,
+        process_info_error: None,
+        action,
+    }
 }
 
 pub fn tick<C>(
@@ -123,28 +138,17 @@ where
 
     for tab in tabs {
         if state.locks.is_locked(&tab.tab_id) {
-            reports.push(TabTickReport {
-                tab_id: tab.tab_id,
-                current_label: tab.label,
-                selected_pane_id: None,
-                raw_candidate_label: None,
-                stable_candidate_label: None,
-                process_info_error: None,
-                action: TabTickAction::SkippedLocked,
-            });
+            reports.push(skipped_tab_report(tab, TabTickAction::SkippedLocked));
+            continue;
+        }
+
+        if !tab.focused {
+            reports.push(skipped_tab_report(tab, TabTickAction::SkippedInactive));
             continue;
         }
 
         let Some(selection) = select_pane_for_tab(&panes, &tab.tab_id) else {
-            reports.push(TabTickReport {
-                tab_id: tab.tab_id,
-                current_label: tab.label,
-                selected_pane_id: None,
-                raw_candidate_label: None,
-                stable_candidate_label: None,
-                process_info_error: None,
-                action: TabTickAction::SkippedNoPane,
-            });
+            reports.push(skipped_tab_report(tab, TabTickAction::SkippedNoPane));
             continue;
         };
         let pane = selection.pane;
@@ -665,7 +669,7 @@ mod tests {
     fn fallback_pane_uses_cwd_without_process_inspection() {
         let start = Instant::now();
         let mut herdr = FakeHerdr::new(
-            vec![tab("w1:t1", "old", false)],
+            vec![tab("w1:t1", "old", true)],
             vec![
                 pane("w1:p1", "w1:t1", false, "fallback"),
                 pane("w1:p2", "w1:t1", false, "other"),
@@ -694,17 +698,30 @@ mod tests {
     }
 
     #[test]
+    fn inactive_tabs_are_not_renamed_or_inspected_while_user_navigates() {
+        let start = Instant::now();
+        let mut herdr = focused_codex_and_inactive_nvim_tabs();
+        let mut state = DaemonState::default();
+
+        tick(&mut herdr, &mut state, start).expect("first tick");
+        tick(&mut herdr, &mut state, start + Duration::from_millis(500)).expect("second tick");
+
+        assert_eq!(
+            herdr.process_info_calls,
+            vec!["w1:p1".to_string(), "w1:p1".to_string()]
+        );
+        assert_eq!(
+            herdr.renames,
+            vec![("w1:t1".to_string(), "codex".to_string())]
+        );
+        assert_eq!(herdr.tab_label("w1:t1"), Some("codex"));
+        assert_eq!(herdr.tab_label("w1:t2"), Some("old"));
+    }
+
+    #[test]
     fn inactive_single_pane_tabs_keep_significant_commands_across_focus_flip() {
         let start = Instant::now();
-        let mut herdr = FakeHerdr::new(
-            vec![tab("w1:t1", "old", true), tab("w1:t2", "old", false)],
-            vec![
-                pane("w1:p1", "w1:t1", true, "tabby"),
-                pane("w1:p2", "w1:t2", false, "tabby"),
-            ],
-        )
-        .with_process_info(process("w1:p1", "codex", &["codex"]))
-        .with_process_info(process("w1:p2", "nvim", &["nvim", "."]));
+        let mut herdr = focused_codex_and_inactive_nvim_tabs();
         let mut state = DaemonState::default();
 
         tick(&mut herdr, &mut state, start).expect("initial codex-focused tick");
@@ -726,12 +743,7 @@ mod tests {
 
         assert_eq!(
             herdr.process_info_calls,
-            vec![
-                "w1:p1".to_string(),
-                "w1:p2".to_string(),
-                "w1:p1".to_string(),
-                "w1:p2".to_string(),
-            ]
+            vec!["w1:p1".to_string(), "w1:p1".to_string()]
         );
         assert_eq!(herdr.tab_label("w1:t1"), Some("codex"));
         assert_eq!(herdr.tab_label("w1:t2"), Some("nvim"));
@@ -874,6 +886,18 @@ mod tests {
             }],
             tty: Some("/dev/ttys001".to_string()),
         }
+    }
+
+    fn focused_codex_and_inactive_nvim_tabs() -> FakeHerdr {
+        FakeHerdr::new(
+            vec![tab("w1:t1", "old", true), tab("w1:t2", "old", false)],
+            vec![
+                pane("w1:p1", "w1:t1", true, "tabby"),
+                pane("w1:p2", "w1:t2", false, "tabby"),
+            ],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]))
+        .with_process_info(process("w1:p2", "nvim", &["nvim", "."]))
     }
 
     struct TestTempDir {

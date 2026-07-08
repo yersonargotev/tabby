@@ -14,7 +14,11 @@ Persistent locks protect intentional names, but can make tabs look permanently u
 
 ## Focused pane data may be ambiguous
 
-Inactive tabs may not expose a reliable focused pane. Mitigation: only use app-first labels when focused-pane confidence is high; otherwise use cwd fallback and document the limitation.
+Inactive tabs may not expose a reliable focused pane. Mitigation: only inspect and rename the currently focused tab; inactive tabs keep their last label until focused again instead of being rewritten from ambiguous pane data.
+
+## Auto-renames can interfere with tab navigation
+
+`tab.rename` mutates Herdr's tab bar. If Tabby rewrites inactive tabs while the user is clicking between tabs, the tab bar can shift or re-render during navigation. Mitigation: the daemon skips inactive tabs entirely and applies renames only to the focused unlocked tab.
 
 ## Plugin trust and installation risk
 
