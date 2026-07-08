@@ -7,10 +7,10 @@
 use crate::paths::{
     HERDR_PLUGIN_CONFIG_DIR_ENV, HERDR_PLUGIN_STATE_DIR_ENV, HOME_ENV, PLUGIN_ID,
     PluginStateDirInputs, PluginStateDirSource, StatePathError, XDG_STATE_HOME_ENV,
-    default_plugin_state_dir, herdr_plugin_config_dir,
+    herdr_plugin_config_dir, plugin_state_dir_from_inputs, should_remove_stale_herdr_socket_path,
 };
 use serde::{Deserialize, Serialize};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -107,7 +107,7 @@ fn resolve_socket_with_env(
 ) -> Result<SessionSocket, StartupError> {
     if let Some(socket_path) = socket_path.filter(|value| !value.is_empty()) {
         let socket_path = PathBuf::from(socket_path);
-        if !is_stale_absolute_socket_path(&socket_path) {
+        if !should_remove_stale_herdr_socket_path(Some(socket_path.as_os_str())) {
             return SessionSocket::resolve(socket_path);
         }
     }
@@ -128,10 +128,6 @@ fn herdr_status_socket_path(status: &serde_json::Value) -> Option<&str> {
         .filter(|socket| !socket.is_empty())
 }
 
-fn is_stale_absolute_socket_path(path: &Path) -> bool {
-    path.is_absolute() && !path.exists()
-}
-
 fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
     resolve_state_base_with(RuntimeStateInputs::from_env(), || {
         herdr_plugin_config_dir(PLUGIN_ID).map_err(StartupError::from)
@@ -144,13 +140,7 @@ pub fn resolve_state_base_with(
     inputs: RuntimeStateInputs,
     discover_plugin_config_dir: impl FnOnce() -> Result<PathBuf, StartupError>,
 ) -> Result<PathBuf, StartupError> {
-    if let Some(path) = inputs.herdr_plugin_state_dir {
-        return absolute_state_base(PathBuf::from(path), StateBaseSource::HerdrPluginStateDir);
-    }
-    if let Some(path) = inputs.herdr_plugin_config_dir {
-        return absolute_state_base(PathBuf::from(path), StateBaseSource::HerdrPluginConfigDir);
-    }
-    if let Some((path, source)) = default_plugin_state_dir(&inputs) {
+    if let Some((path, source)) = plugin_state_dir_from_inputs(&inputs) {
         return absolute_state_base(path, source.into());
     }
     absolute_state_base(
@@ -172,7 +162,7 @@ fn absolute_state_base(path: PathBuf, source: StateBaseSource) -> Result<PathBuf
 fn herdr_status_json() -> Result<serde_json::Value, StartupError> {
     let mut command = Command::new("herdr");
     command.args(["status", "--json"]);
-    if should_remove_herdr_socket_path(std::env::var_os(HERDR_SOCKET_PATH_ENV).as_deref()) {
+    if should_remove_stale_herdr_socket_path(std::env::var_os(HERDR_SOCKET_PATH_ENV).as_deref()) {
         command.env_remove(HERDR_SOCKET_PATH_ENV);
     }
 
@@ -184,14 +174,6 @@ fn herdr_status_json() -> Result<serde_json::Value, StartupError> {
         });
     }
     serde_json::from_slice(&output.stdout).map_err(StartupError::HerdrStatusJson)
-}
-
-fn should_remove_herdr_socket_path(socket_path: Option<&OsStr>) -> bool {
-    let Some(socket_path) = socket_path.filter(|path| !path.is_empty()) else {
-        return false;
-    };
-
-    is_stale_absolute_socket_path(Path::new(socket_path))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,6 +394,8 @@ pub enum StateBaseSource {
 impl From<PluginStateDirSource> for StateBaseSource {
     fn from(source: PluginStateDirSource) -> Self {
         match source {
+            PluginStateDirSource::HerdrPluginStateDir => Self::HerdrPluginStateDir,
+            PluginStateDirSource::HerdrPluginConfigDir => Self::HerdrPluginConfigDir,
             PluginStateDirSource::XdgStateHome => Self::XdgStateHome,
             PluginStateDirSource::Home => Self::Home,
         }

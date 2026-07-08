@@ -4,9 +4,9 @@
 //! is absent, runtime commands ask Herdr for Tabby's plugin-owned config
 //! directory instead of inventing a path under the user's home directory.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::string::FromUtf8Error;
 
@@ -66,15 +66,7 @@ pub fn resolve_lock_store_path_with(
         return absolute_path(PathBuf::from(path), StatePathSource::Override);
     }
 
-    if let Some(path) = inputs.plugin_state.herdr_plugin_state_dir {
-        return state_file_in_dir(PathBuf::from(path), StatePathSource::HerdrPluginStateDir);
-    }
-
-    if let Some(path) = inputs.plugin_state.herdr_plugin_config_dir {
-        return state_file_in_dir(PathBuf::from(path), StatePathSource::HerdrPluginConfigDir);
-    }
-
-    if let Some((path, source)) = default_plugin_state_dir(&inputs.plugin_state) {
+    if let Some((path, source)) = plugin_state_dir_from_inputs(&inputs.plugin_state) {
         return state_file_in_dir(path, source.into());
     }
 
@@ -84,9 +76,23 @@ pub fn resolve_lock_store_path_with(
     )
 }
 
-pub fn default_plugin_state_dir(
+pub fn plugin_state_dir_from_inputs(
     inputs: &PluginStateDirInputs,
 ) -> Option<(PathBuf, PluginStateDirSource)> {
+    if let Some(path) = inputs.herdr_plugin_state_dir.as_ref() {
+        return Some((
+            PathBuf::from(path),
+            PluginStateDirSource::HerdrPluginStateDir,
+        ));
+    }
+
+    if let Some(path) = inputs.herdr_plugin_config_dir.as_ref() {
+        return Some((
+            PathBuf::from(path),
+            PluginStateDirSource::HerdrPluginConfigDir,
+        ));
+    }
+
     if let Some(path) = inputs
         .xdg_state_home
         .as_ref()
@@ -120,8 +126,19 @@ pub fn default_plugin_state_dir(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginStateDirSource {
+    HerdrPluginStateDir,
+    HerdrPluginConfigDir,
     XdgStateHome,
     Home,
+}
+
+pub fn should_remove_stale_herdr_socket_path(socket_path: Option<&OsStr>) -> bool {
+    let Some(socket_path) = socket_path.filter(|path| !path.is_empty()) else {
+        return false;
+    };
+
+    let socket_path = Path::new(socket_path);
+    socket_path.is_absolute() && !socket_path.exists()
 }
 
 pub fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StatePathError> {
@@ -178,6 +195,8 @@ pub enum StatePathSource {
 impl From<PluginStateDirSource> for StatePathSource {
     fn from(source: PluginStateDirSource) -> Self {
         match source {
+            PluginStateDirSource::HerdrPluginStateDir => Self::HerdrPluginStateDir,
+            PluginStateDirSource::HerdrPluginConfigDir => Self::HerdrPluginConfigDir,
             PluginStateDirSource::XdgStateHome => Self::XdgStateHome,
             PluginStateDirSource::Home => Self::Home,
         }
