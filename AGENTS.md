@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues and planning slices are tracked as local markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+Issues and planning slices are tracked as GitHub issues in `yersonargotev/tabby` using the `gh` CLI. External PRs are not a triage request surface. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
