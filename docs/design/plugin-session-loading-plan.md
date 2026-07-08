@@ -54,7 +54,7 @@ Implement Tabby startup as an explicit, idempotent per Herdr Session flow:
    - Duplicate prevention under lock.
    - Manifest sync checks for actions and events.
 
-8. Run manual verification against Herdr with sandboxed config where possible.
+8. Run manual verification against Herdr using sandboxed `HOME` and config paths only.
    - `tabby install` does not start a daemon.
    - `tabby install --start` starts exactly one Tabby Session Daemon for the current Herdr Session.
    - Repeated Herdr `start` action invocations remain idempotent.

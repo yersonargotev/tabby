@@ -6,7 +6,8 @@
 
 use crate::paths::{
     HERDR_PLUGIN_CONFIG_DIR_ENV, HERDR_PLUGIN_STATE_DIR_ENV, HOME_ENV, PLUGIN_ID,
-    PluginStateDirSource, StatePathError, XDG_STATE_HOME_ENV, default_plugin_state_dir,
+    PluginStateDirInputs, PluginStateDirSource, StatePathError, XDG_STATE_HOME_ENV,
+    default_plugin_state_dir,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -137,24 +138,7 @@ fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
     })
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RuntimeStateInputs {
-    pub herdr_plugin_state_dir: Option<OsString>,
-    pub herdr_plugin_config_dir: Option<OsString>,
-    pub xdg_state_home: Option<OsString>,
-    pub home: Option<OsString>,
-}
-
-impl RuntimeStateInputs {
-    fn from_env() -> Self {
-        Self {
-            herdr_plugin_state_dir: std::env::var_os(HERDR_PLUGIN_STATE_DIR_ENV),
-            herdr_plugin_config_dir: std::env::var_os(HERDR_PLUGIN_CONFIG_DIR_ENV),
-            xdg_state_home: std::env::var_os(XDG_STATE_HOME_ENV),
-            home: std::env::var_os(HOME_ENV),
-        }
-    }
-}
+pub type RuntimeStateInputs = PluginStateDirInputs;
 
 pub fn resolve_state_base_with(
     inputs: RuntimeStateInputs,
@@ -166,7 +150,7 @@ pub fn resolve_state_base_with(
     if let Some(path) = inputs.herdr_plugin_config_dir {
         return absolute_state_base(PathBuf::from(path), StateBaseSource::HerdrPluginConfigDir);
     }
-    if let Some((path, source)) = default_plugin_state_dir(inputs.xdg_state_home, inputs.home) {
+    if let Some((path, source)) = default_plugin_state_dir(&inputs) {
         return absolute_state_base(path, source.into());
     }
     absolute_state_base(
