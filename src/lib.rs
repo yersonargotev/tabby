@@ -1,4 +1,5 @@
 pub mod herdr_client;
+pub mod labeler;
 
 use std::fmt;
 
