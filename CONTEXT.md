@@ -39,3 +39,11 @@ _Avoid_: config, preferences, ruleset
 **Process Inspector**:
 The boundary that asks Herdr for foreground process details for a selected pane. If process inspection fails or returns no useful Significant Command, the plugin falls back to Working Directory Basename rather than failing the rename loop.
 _Avoid_: process_info call, ps lookup
+
+**Herdr Session**:
+A running Herdr server context identified by the socket that plugin commands use to inspect and rename tabs. Tabby's automatic behavior is scoped to one Herdr Session at a time.
+_Avoid_: terminal session, shell session
+
+**Tabby Session Daemon**:
+A long-running Tabby process responsible for keeping tab labels updated within one Herdr Session. There should be at most one active Tabby Session Daemon per Herdr Session.
+_Avoid_: plugin action process, background job

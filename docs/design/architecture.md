@@ -50,8 +50,20 @@ Proposed files/modules for a single Rust crate:
 Expected CLI/actions:
 
 - daemon/start command for Herdr autostart;
+- `ensure-started` command as the idempotent startup boundary for install, hooks, and the user-facing Herdr `start` action;
+- `install --start` for explicit current-session startup after relinking;
 - `unlock-focused` to remove the focused tab from the persisted lock store;
 - `unlock-all` to clear all persisted manual locks.
+
+## Session startup model
+
+Tabby runs one Tabby Session Daemon per Herdr Session/socket. Plain `tabby install` only relinks/registers the Homebrew-managed plugin and must not silently launch a long-running process. Users who want immediate current-session activation use `tabby install --start`, which delegates to `tabby ensure-started`.
+
+`ensure-started` is the only normal startup boundary. It derives a per-socket session key, acquires plugin-owned daemon state under `daemons/<session_key>.lock`, validates any existing `daemons/<session_key>.json` metadata, and spawns detached `tabby start` only when no matching live daemon exists. The lower-level `tabby start` command still runs the daemon loop, but Herdr manifests should not invoke it directly.
+
+Herdr manifests should keep a single user-facing `start` action id for compatibility and recovery, but that action should run `ensure-started`. Initial lifecycle hooks are `workspace.created` and `tab.created`, both also running `ensure-started`. `pane.created` and focus hooks are deferred unless real Herdr verification proves the initial hook set does not start Tabby early enough.
+
+Herdr 0.7.3 has no documented session-start/autostart hook, so restored sessions may not start Tabby until a supported creation hook fires or the user explicitly starts it. That limitation is intentional and documented rather than hidden behind noisy focus hooks.
 
 ## Manual lock semantics
 
