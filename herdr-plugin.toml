@@ -12,7 +12,7 @@ platforms = ["macos"]
 
 [[actions]]
 id = "start"
-title = "Start Tabby daemon"
+title = "Start Tabby Session Daemon"
 contexts = ["workspace"]
 command = ["target/debug/tabby", "ensure-started"]
 

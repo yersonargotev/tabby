@@ -77,7 +77,7 @@ The important checks are:
 
 ## Start and use Tabby in Herdr
 
-Start the Tabby Session Daemon for the current Herdr Session by invoking the `Start Tabby daemon` action for plugin `yersonargotev.tabby`. From the CLI, the equivalent is:
+Start the Tabby Session Daemon for the current Herdr Session by invoking the `Start Tabby Session Daemon` action for plugin `yersonargotev.tabby`. From the CLI, the equivalent is:
 
 ```sh
 herdr plugin action invoke start --plugin yersonargotev.tabby
@@ -134,7 +134,7 @@ herdr plugin link "$(brew --prefix tabby)/share/tabby"
 If Herdr returns `Error: Os { code: 2, kind: NotFound, message: "No such file or directory" }`
 from `plugin link` or `plugin action invoke`, the shell may be carrying a stale
 `HERDR_SOCKET_PATH` from a previous Herdr server process. Retry after letting
-Herdr rediscover the current session:
+Herdr rediscover the current Herdr Session:
 
 ```sh
 env -u HERDR_SOCKET_PATH tabby install

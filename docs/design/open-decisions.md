@@ -52,18 +52,18 @@ Decision: keep `TABBY_LOCK_STORE_PATH` as the highest-priority explicit override
 - `start` was verified by temporarily locking all current tabs in the real lock store, invoking the action, stopping the spawned `target/debug/tabby start` process with `SIGTERM`, and restoring the original empty v1 store. No tab labels changed and no fallback state was created.
 - This confirms the implemented precedence can use Herdr plugin-owned state space at runtime; local-link verification must rebuild `target/debug/tabby` after source changes before invoking plugin actions.
 
-## 8. Plugin startup for current and future Herdr sessions
+## 8. Plugin startup for current and future Herdr Sessions
 
 2026-07-08 grilling resolved the install/start boundary:
 
 - Plain `tabby install` remains relink/registration only and must not launch a long-running daemon implicitly.
-- Current-session startup is explicit via `tabby install --start`.
+- Herdr Session startup is explicit via `tabby install --start`.
 - `tabby install --start` must call the same idempotent startup path as lifecycle hooks: `tabby ensure-started`.
-- Neither install-time startup nor manifest event hooks should call `tabby start` directly, because `start` is the long-running daemon loop and does not protect against duplicate daemons by itself.
+- Neither install-time startup nor manifest event hooks should call `tabby start` directly, because `start` is the long-running daemon loop and does not protect against duplicate Tabby Session Daemons by itself.
 
 Still unresolved in this design session:
 
-- None for the Herdr session-loading design; remaining work should move into ADR and implementation tasks.
+- None for the Herdr Session-loading design; remaining work should move into ADR and implementation tasks.
 
 2026-07-08 grilling resolved the `ensure-started` contract:
 
@@ -99,7 +99,7 @@ Still unresolved in this design session:
 
 - Do not claim Tabby always starts immediately when Herdr opens or restores a session.
 - Promise automatic startup only when Herdr emits the supported creation hooks (`workspace.created` and `tab.created`) for an enabled installed plugin.
-- A fully restored Herdr session that does not emit those creation hooks may require explicit startup until Herdr exposes a stronger session-start/autostart plugin lifecycle.
+- A fully restored Herdr Session that does not emit those creation hooks may require explicit startup until Herdr exposes a stronger session-start/autostart plugin lifecycle.
 - Supported workaround: run `tabby install --start` after install/upgrade, or use the manual plugin action for startup/recovery.
 - Adding `pane.created` or focus hooks is a future mitigation only if real verification shows the limitation is unacceptable.
 
@@ -108,7 +108,7 @@ Still unresolved in this design session:
 - Do not block Tabby implementation on creating an upstream Herdr issue.
 - Document a draft upstream request for a session-start/autostart plugin lifecycle so it is easy to publish later.
 - The Tabby feature is considered implementable with available Herdr 0.7.3 resources using `ensure-started` plus `workspace.created`/`tab.created` hooks.
-- Development should only block if real verification shows Herdr does not reliably emit the chosen creation hooks for new sessions.
+- Development should only block if real verification shows Herdr does not reliably emit the chosen creation hooks for new Herdr Sessions.
 
 2026-07-08 grilling resolved the user-facing Herdr startup action:
 
@@ -124,7 +124,7 @@ Still unresolved in this design session:
 - Validate daemon metadata with all of:
   - the recorded process is alive;
   - the observed process command/name/path appears to be Tabby;
-  - the metadata `session_key` matches the target Herdr socket/session.
+  - the metadata `session_key` matches the target Herdr Session.
 - If any check fails, treat the metadata as stale and allow `ensure-started` to replace it while holding the per-session lock.
 - Do not add a heartbeat or daemon control socket in v1; that would add a larger IPC surface than this iteration needs.
 - Document this as best-effort liveness detection.

@@ -5,7 +5,7 @@ Status: research input; design accepted in `docs/adr/0006-start-daemons-through-
 
 ## Goal
 
-Find a way for Tabby to load in both the current Herdr session and future Herdr sessions so users do not have to run this manually in every session:
+Find a way for Tabby to load in both the current Herdr Session and future Herdr Sessions so users do not have to run this manually in every Herdr Session:
 
 ```sh
 herdr plugin action invoke start --plugin yersonargotev.tabby
@@ -35,7 +35,7 @@ This matches Tabby's current UX problem: `start` is a long-running action, so th
 
 Herdr runtime commands run from the plugin directory and receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`, and context ids when available. Source: https://herdr.dev/docs/plugins/#commands-and-environment
 
-Because `tabby start` connects to the socket exposed for that invocation, one daemon process is naturally scoped to the Herdr session/socket that launched it. New Herdr named sessions use distinct sockets; the socket docs list default and named-session socket paths and the resolution order (`--session`, `HERDR_SOCKET_PATH`, `HERDR_SESSION`, default). Source: https://herdr.dev/docs/socket-api/#socket-paths
+Because `tabby start` connects to the socket exposed for that invocation, one Tabby Session Daemon is naturally scoped to the Herdr Session that launched it. New Herdr named Herdr Sessions use distinct sockets; the socket docs list default and named-session socket paths and the resolution order (`--session`, `HERDR_SOCKET_PATH`, `HERDR_SESSION`, default). Source: https://herdr.dev/docs/socket-api/#socket-paths
 
 ### Herdr plugin v1 has manifest event hooks
 
@@ -57,9 +57,9 @@ The official plugin docs describe manifest-declared actions, event hooks, panes,
 
 ## Options
 
-### Option A — `tabby install --start` or implicit start for the current session
+### Option A — `tabby install --start` or implicit start for the current Herdr Session
 
-After relinking, `tabby install` can also invoke the `start` action for the currently reachable Herdr session, equivalent to:
+After relinking, `tabby install` can also invoke the `start` action for the currently reachable Herdr Session, equivalent to:
 
 ```sh
 herdr plugin action invoke start --plugin yersonargotev.tabby
@@ -67,13 +67,13 @@ herdr plugin action invoke start --plugin yersonargotev.tabby
 
 Pros:
 
-- Solves the current-session pain immediately after install or upgrade.
+- Solves the current Herdr Session pain immediately after install or upgrade.
 - Uses Herdr's documented action invocation path.
 - Keeps trust explicit: the user opted into `tabby install`.
 
 Cons:
 
-- Does not solve future sessions by itself.
+- Does not solve future Herdr Sessions by itself.
 - Needs idempotency so repeated installs do not spawn duplicate `tabby start` loops for the same Herdr socket.
 
 Implementation notes:
@@ -84,7 +84,7 @@ Implementation notes:
 
 ### Option B — Add manifest event hooks that run `tabby ensure-started`
 
-Add `[[events]]` entries to both manifests for a small command that ensures exactly one Tabby daemon is running for the invoking Herdr socket/session. Candidate hooks:
+Add `[[events]]` entries to both manifests for a small command that ensures exactly one Tabby Session Daemon is running for the invoking Herdr Session. Candidate hooks:
 
 ```toml
 [[events]]
@@ -105,7 +105,7 @@ Use `target/debug/tabby` in the development manifest and `../../bin/tabby` in th
 Pros:
 
 - Uses Herdr's first-party plugin mechanism.
-- Helps future sessions without the user manually invoking the `start` action.
+- Helps future Herdr Sessions without the user manually invoking the `start` action.
 - Hooks receive the right session-specific socket environment, so Tabby can start a daemon for the session that emitted the event.
 
 Cons:
@@ -117,7 +117,7 @@ Cons:
 Implementation notes:
 
 - Prefer `ensure-started` over pointing events directly at `start`. `ensure-started` should acquire a per-session lock and then spawn/detach `tabby start` only if absent.
-- Key the per-session lock by canonical socket path or a stable hash of `HERDR_SOCKET_PATH`/`HERDR_SESSION` so named sessions do not conflict.
+- Key the per-session lock by canonical socket path or a stable hash of `HERDR_SOCKET_PATH`/`HERDR_SESSION` so named Herdr Sessions do not conflict.
 - Store PID/metadata in `HERDR_PLUGIN_STATE_DIR`, not the plugin root. Herdr docs reserve plugin root for managed source and state/config dirs for plugin-owned durable files.
 - Keep `start` as a manual action for recovery/debugging.
 - After linking, check `herdr plugin list --plugin yersonargotev.tabby --json` and fail/warn if Herdr reports unknown event warnings.
@@ -156,10 +156,10 @@ Cons:
 
 Use a two-part approach:
 
-1. **Current sessions:** extend `tabby install` with an explicit `--start` path, or make install print and optionally run a new `tabby ensure-started` command. This gives immediate current-session coverage after install/upgrade.
-2. **New sessions:** add Herdr manifest event hooks (`workspace.created`, `tab.created`, and/or `pane.created`) that call `tabby ensure-started`, not `tabby start` directly. `ensure-started` must be idempotent per Herdr socket/session and should spawn/detach the real long-running daemon only when needed.
+1. **Current Herdr Sessions:** extend `tabby install` with an explicit `--start` path, or make install print and optionally run a new `tabby ensure-started` command. This gives immediate current Herdr Session coverage after install/upgrade.
+2. **New Herdr Sessions:** add Herdr manifest event hooks (`workspace.created`, `tab.created`, and/or `pane.created`) that call `tabby ensure-started`, not `tabby start` directly. `ensure-started` must be idempotent per Herdr Session and should spawn/detach the real long-running daemon only when needed.
 
-This stays inside Herdr's documented plugin v1 surfaces and avoids requiring users to manually invoke the `start` action for every session. The main remaining gap is restored sessions with no emitted lifecycle event; track that as either a documented limitation, an extra `workspace.focused`/`pane.focused` hook if not too noisy, or an upstream Herdr feature request for a real session-start/autostart hook.
+This stays inside Herdr's documented plugin v1 surfaces and avoids requiring users to manually invoke the `start` action for every Herdr Session. The main remaining gap is restored sessions with no emitted lifecycle event; track that as either a documented limitation, an extra `workspace.focused`/`pane.focused` hook if not too noisy, or an upstream Herdr feature request for a real session-start/autostart hook.
 
 ## Verification commands used
 

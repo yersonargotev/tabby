@@ -1,4 +1,4 @@
-//! Idempotent startup for one Tabby daemon per Herdr socket/session.
+//! Idempotent startup for one Tabby Session Daemon per Herdr Session.
 //!
 //! `tabby start` is the long-running daemon loop. Normal startup entrypoints
 //! call `ensure-started`, which serializes startup per Herdr socket, validates
@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
 const DAEMONS_DIR_NAME: &str = "daemons";
 const METADATA_SCHEMA_VERSION: u8 = 1;
+const DAEMON_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn ensure_started_from_env() -> Result<String, StartupError> {
     let socket = resolve_socket_from_env()?;
@@ -95,13 +96,21 @@ pub fn session_key_for_socket_path(path: &Path) -> String {
 }
 
 fn resolve_socket_from_env() -> Result<SessionSocket, StartupError> {
-    if let Some(socket_path) =
-        std::env::var_os(HERDR_SOCKET_PATH_ENV).filter(|value| !value.is_empty())
-    {
-        return SessionSocket::resolve(PathBuf::from(socket_path));
+    resolve_socket_with_env(std::env::var_os(HERDR_SOCKET_PATH_ENV), herdr_status_json)
+}
+
+fn resolve_socket_with_env(
+    socket_path: Option<OsString>,
+    load_status: impl FnOnce() -> Result<serde_json::Value, StartupError>,
+) -> Result<SessionSocket, StartupError> {
+    if let Some(socket_path) = socket_path.filter(|value| !value.is_empty()) {
+        let socket_path = PathBuf::from(socket_path);
+        if !socket_path.is_absolute() || socket_path.exists() {
+            return SessionSocket::resolve(socket_path);
+        }
     }
 
-    let status = herdr_status_json()?;
+    let status = load_status()?;
     let socket = status
         .get("server")
         .and_then(|server| server.get("socket"))
@@ -244,9 +253,14 @@ impl fmt::Display for EnsureStartedOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyRunning { pid } => {
-                write!(formatter, "daemon already running with pid {pid}")
+                write!(
+                    formatter,
+                    "Tabby Session Daemon already running with pid {pid}"
+                )
             }
-            Self::Started { pid } => write!(formatter, "started daemon with pid {pid}"),
+            Self::Started { pid } => {
+                write!(formatter, "started Tabby Session Daemon with pid {pid}")
+            }
         }
     }
 }
@@ -292,7 +306,15 @@ pub struct DaemonLock {
 
 impl DaemonLock {
     fn acquire(path: &Path) -> Result<Self, StartupError> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        Self::acquire_with_timeout(path, DAEMON_LOCK_TIMEOUT, process_appears_to_be_tabby)
+    }
+
+    fn acquire_with_timeout(
+        path: &Path,
+        timeout: Duration,
+        mut lock_holder_is_live: impl FnMut(u32) -> bool,
+    ) -> Result<Self, StartupError> {
+        let deadline = Instant::now() + timeout;
         loop {
             match OpenOptions::new().write(true).create_new(true).open(path) {
                 Ok(mut file) => {
@@ -303,15 +325,28 @@ impl DaemonLock {
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if Instant::now() >= deadline {
+                    if let Some(pid) = read_lock_holder_pid(path)?
+                        && !lock_holder_is_live(pid)
+                    {
                         fs::remove_file(path).map_err(StartupError::Io)?;
                         continue;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(StartupError::DaemonLockBusy(path.to_path_buf()));
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => return Err(StartupError::Io(error)),
             }
         }
+    }
+}
+
+fn read_lock_holder_pid(path: &Path) -> Result<Option<u32>, StartupError> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents.trim().parse().ok()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(StartupError::Io(error)),
     }
 }
 
@@ -417,6 +452,7 @@ pub enum StartupError {
     HerdrConfigDirUtf8(FromUtf8Error),
     MetadataJson(serde_json::Error),
     Io(io::Error),
+    DaemonLockBusy(PathBuf),
     SpawnDaemon(io::Error),
     StatePath(StatePathError),
 }
@@ -434,7 +470,7 @@ impl fmt::Display for StartupError {
             ),
             Self::RelativeSocketPath(path) => write!(
                 formatter,
-                "Herdr socket path `{}` is relative; refusing to derive a session daemon identity",
+                "Herdr socket path `{}` is relative; refusing to derive a Herdr Session identity",
                 path.display()
             ),
             Self::MissingSocketPath => write!(
@@ -478,6 +514,11 @@ impl fmt::Display for StartupError {
                 write!(formatter, "daemon metadata is invalid JSON: {error}")
             }
             Self::Io(error) => write!(formatter, "daemon startup state operation failed: {error}"),
+            Self::DaemonLockBusy(path) => write!(
+                formatter,
+                "Tabby Session Daemon startup lock `{}` is still held; refusing to remove a live lock and risk duplicate Tabby Session Daemons",
+                path.display()
+            ),
             Self::SpawnDaemon(error) => {
                 write!(formatter, "failed to spawn detached `tabby start`: {error}")
             }
@@ -502,6 +543,7 @@ impl std::error::Error for StartupError {
             Self::EmptySocketPath
             | Self::RelativeSocketPath(_)
             | Self::MissingSocketPath
+            | Self::DaemonLockBusy(_)
             | Self::HerdrStatusFailed { .. }
             | Self::EmptyStateBase { .. }
             | Self::RelativeStateBase { .. }
@@ -555,6 +597,33 @@ mod tests {
     }
 
     #[test]
+    fn existing_socket_env_wins_without_status_lookup() {
+        let temp_dir = TestTempDir::new();
+        let socket_path = temp_dir.path().join("herdr.sock");
+        fs::write(&socket_path, "").expect("socket placeholder");
+
+        let socket = resolve_socket_with_env(Some(socket_path.clone().into_os_string()), || {
+            panic!("existing HERDR_SOCKET_PATH must win")
+        })
+        .expect("socket from env");
+
+        assert_eq!(socket.socket_path, socket_path);
+    }
+
+    #[test]
+    fn stale_absolute_socket_env_falls_back_to_herdr_status() {
+        let temp_dir = TestTempDir::new();
+        let stale_socket = temp_dir.path().join("missing.sock");
+
+        let socket = resolve_socket_with_env(Some(stale_socket.into_os_string()), || {
+            Ok(serde_json::json!({ "server": { "socket": "/tmp/live-herdr.sock" } }))
+        })
+        .expect("socket from herdr status");
+
+        assert_eq!(socket.socket_path, PathBuf::from("/tmp/live-herdr.sock"));
+    }
+
+    #[test]
     fn resolves_daemon_state_base_from_state_dir_env_first() {
         let path = resolve_state_base_with(
             RuntimeStateInputs {
@@ -580,6 +649,39 @@ mod tests {
         .expect_err("relative state dir");
 
         assert!(matches!(error, StartupError::RelativeStateBase { .. }));
+    }
+
+    #[test]
+    fn stale_daemon_lock_with_dead_holder_is_replaced() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("daemon.lock");
+        fs::write(&lock_path, "424242\n").expect("stale lock");
+
+        let lock = DaemonLock::acquire_with_timeout(&lock_path, Duration::ZERO, |_| false)
+            .expect("replace stale lock");
+        let holder = fs::read_to_string(&lock_path).expect("lock holder");
+
+        assert_eq!(holder.trim(), std::process::id().to_string());
+        drop(lock);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn live_daemon_lock_is_not_removed_after_timeout() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("daemon.lock");
+        fs::write(&lock_path, "424242\n").expect("live lock");
+
+        let error = match DaemonLock::acquire_with_timeout(&lock_path, Duration::ZERO, |_| true) {
+            Ok(_) => panic!("live lock must not be acquired"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, StartupError::DaemonLockBusy(path) if path == lock_path));
+        assert_eq!(
+            fs::read_to_string(&lock_path).expect("lock holder"),
+            "424242\n"
+        );
     }
 
     #[test]

@@ -4,10 +4,10 @@ Status: implemented in `7e78988`; verification notes below.
 
 ## Final recommendation
 
-Implement Tabby startup as an explicit, idempotent per-Herdr-session flow:
+Implement Tabby startup as an explicit, idempotent per Herdr Session flow:
 
 1. Keep plain `tabby install` as relink/registration only.
-2. Add `tabby install --start` for explicit current-session startup.
+2. Add `tabby install --start` for explicit current Herdr Session startup.
 3. Add `tabby ensure-started` as the only normal startup boundary.
 4. Route the Herdr `start` action and manifest lifecycle hooks through `ensure-started`.
 5. Keep `tabby start` as the lower-level long-running daemon loop used only after `ensure-started` passes duplicate checks.
@@ -29,7 +29,7 @@ Implement Tabby startup as an explicit, idempotent per-Herdr-session flow:
    - Resolve the target Herdr socket from runtime context.
    - Prefer canonical socket path when possible.
    - Use a stable hash of an absolute socket path when canonicalization is not available.
-   - Fail clearly if no concrete socket/session target can be resolved.
+   - Fail clearly if no concrete Herdr Session target can be resolved.
 
 4. Implement `ensure-started` locking and metadata.
    - Lock `daemons/<session_key>.lock`.
@@ -56,7 +56,7 @@ Implement Tabby startup as an explicit, idempotent per-Herdr-session flow:
 
 8. Run manual verification against Herdr with sandboxed config where possible.
    - `tabby install` does not start a daemon.
-   - `tabby install --start` starts exactly one daemon for the current session.
+   - `tabby install --start` starts exactly one Tabby Session Daemon for the current Herdr Session.
    - Repeated Herdr `start` action invocations remain idempotent.
    - `workspace.created`/`tab.created` hooks start Tabby in new activity.
    - Restore behavior is observed and documented without overpromising.

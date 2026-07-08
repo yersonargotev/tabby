@@ -139,7 +139,7 @@ pub fn run_stub(command: Command) -> CommandOutcome {
             "tabby daemon runtime: use run_command to start the rename loop"
         }
         Command::EnsureStarted => {
-            "tabby ensure-started runtime: use run_command to start one session daemon"
+            "tabby ensure-started runtime: use run_command to start one Tabby Session Daemon"
         }
         Command::Install { .. } => {
             "tabby install runtime: use run_command to relink the Herdr plugin"
