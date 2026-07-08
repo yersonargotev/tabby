@@ -10,6 +10,8 @@ Need to verify whether Herdr tab IDs are stable enough across Herdr restarts for
 
 Need macOS testing to confirm whether `pane.list` exposes the last-focused pane per tab, or only the globally focused pane. Until verified, app-first labels should be conservative for tabs without an explicit focused pane.
 
+2026-07-08 macOS Herdr verification: created a two-pane test tab, focused its second pane, then focused another tab. `pane.list` reported `focused: false` for both panes in the inactive test tab. V1 should therefore treat `pane.focused=true` as global focus evidence only; when a tab has no explicitly focused pane, use the first listed pane only for Working Directory Basename fallback and do not call `pane.process_info` for app-first labels.
+
 ## 3. Exact Significant Command allowlist
 
 Initial examples are `nvim`, `lazygit`, `codex`, `claude`, `pnpm dev`, `npm test`, `go test`, and `cargo run`. The first implementation should make this easy to expand through internal defaults; user config is deferred.
@@ -17,6 +19,11 @@ Initial examples are `nvim`, `lazygit`, `codex`, `claude`, `pnpm dev`, `npm test
 ## 4. Process inspection reliability on macOS
 
 Need to collect real `pane.process_info` examples for shells, editors, package runners, and agent CLIs. The architecture assumes graceful fallback to cwd basename if process inspection is incomplete.
+
+2026-07-08 macOS Herdr verification:
+
+- `nvim`, `lazygit`, `go test`, `codex`, and `claude` exposed enough foreground process info for Significant Command labels.
+- `pnpm dev` installed through the local pnpm toolchain appeared as `node .../pnpm.mjs dev` plus the child Node process, so the label policy recognizes the pnpm Node shim shape in addition to direct `pnpm dev`.
 
 ## 5. Release/install design
 

@@ -136,7 +136,7 @@ where
             continue;
         }
 
-        let Some(pane) = select_pane_for_tab(&panes, &tab.tab_id) else {
+        let Some(selection) = select_pane_for_tab(&panes, &tab.tab_id) else {
             reports.push(TabTickReport {
                 tab_id: tab.tab_id,
                 current_label: tab.label,
@@ -148,10 +148,15 @@ where
             });
             continue;
         };
+        let pane = selection.pane;
 
-        let (process_info, process_info_error) = match herdr.pane_process_info(&pane.pane_id) {
-            Ok(process_info) => (Some(process_info), None),
-            Err(error) => (None, Some(error.to_string())),
+        let (process_info, process_info_error) = if selection.inspect_process {
+            match herdr.pane_process_info(&pane.pane_id) {
+                Ok(process_info) => (Some(process_info), None),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        } else {
+            (None, None)
         };
 
         let Some(candidate) = state
@@ -294,12 +299,31 @@ pub fn unlock_all_from_env() -> Result<String, RuntimeError> {
     Ok("tabby unlock-all: cleared persisted manual locks".to_string())
 }
 
-fn select_pane_for_tab<'a>(panes: &'a [PaneInfo], tab_id: &str) -> Option<&'a PaneInfo> {
-    panes
+#[derive(Debug, Clone, Copy)]
+struct PaneSelection<'a> {
+    pane: &'a PaneInfo,
+    inspect_process: bool,
+}
+
+fn select_pane_for_tab<'a>(panes: &'a [PaneInfo], tab_id: &str) -> Option<PaneSelection<'a>> {
+    if let Some(pane) = panes
         .iter()
         .filter(|pane| pane.tab_id == tab_id)
         .find(|pane| pane.focused)
-        .or_else(|| panes.iter().find(|pane| pane.tab_id == tab_id))
+    {
+        return Some(PaneSelection {
+            pane,
+            inspect_process: true,
+        });
+    }
+
+    panes
+        .iter()
+        .find(|pane| pane.tab_id == tab_id)
+        .map(|pane| PaneSelection {
+            pane,
+            inspect_process: false,
+        })
 }
 
 fn stable_label_from_decision(decision: &StabilityDecision) -> Option<&str> {
@@ -628,6 +652,38 @@ mod tests {
 
         assert_eq!(herdr.process_info_calls, vec!["w1:p2".to_string()]);
         assert_eq!(report.tabs[0].selected_pane_id.as_deref(), Some("w1:p2"));
+    }
+
+    #[test]
+    fn fallback_pane_uses_cwd_without_process_inspection() {
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", false)],
+            vec![
+                pane("w1:p1", "w1:t1", false, "fallback"),
+                pane("w1:p2", "w1:t1", false, "other"),
+            ],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut state = DaemonState::default();
+
+        tick(&mut herdr, &mut state, start).expect("first tick");
+        let report =
+            tick(&mut herdr, &mut state, start + Duration::from_millis(500)).expect("second tick");
+
+        assert!(herdr.process_info_calls.is_empty());
+        assert_eq!(
+            herdr.renames,
+            vec![("w1:t1".to_string(), "fallback".to_string())]
+        );
+        assert_eq!(report.tabs[0].selected_pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(
+            report.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "old".to_string(),
+                to: "fallback".to_string()
+            }
+        );
     }
 
     struct FakeHerdr {

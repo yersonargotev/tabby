@@ -105,6 +105,16 @@ impl LabelPolicy {
             return Some(format!("{command} {subcommand}"));
         }
 
+        if command == "node"
+            && let (Some(runner), Some(subcommand)) = (
+                argv.get(1).and_then(|argument| node_runner(argument)),
+                argv.get(2).map(String::as_str),
+            )
+            && self.is_runner_subcommand(runner, subcommand)
+        {
+            return Some(format!("{runner} {subcommand}"));
+        }
+
         None
     }
 
@@ -140,6 +150,13 @@ fn normalized_argv(process: &PaneProcess) -> Vec<String> {
 
 fn split_cmdline(cmdline: &str) -> Vec<String> {
     cmdline.split_whitespace().filter_map(basename).collect()
+}
+
+fn node_runner(argument: &str) -> Option<&'static str> {
+    match argument {
+        "pnpm" | "pnpm.mjs" | "pnpm.cjs" => Some("pnpm"),
+        _ => None,
+    }
 }
 
 fn basename(command: &str) -> Option<String> {
@@ -222,6 +239,24 @@ mod tests {
                 LabelCandidateSource::WorkingDirectoryBasename
             );
         }
+    }
+
+    #[test]
+    fn labels_pnpm_dev_when_exposed_through_node_shim() {
+        let candidate = candidate_for(
+            process(
+                "node",
+                &[
+                    "node",
+                    "/Users/me/Library/pnpm/.tools/pnpm/11.1.2/node_modules/pnpm/bin/pnpm.mjs",
+                    "dev",
+                ],
+            ),
+            pane_with_cwd("tabby"),
+        );
+
+        assert_eq!(candidate.label(), "pnpm dev");
+        assert_eq!(candidate.source(), LabelCandidateSource::SignificantCommand);
     }
 
     #[test]
