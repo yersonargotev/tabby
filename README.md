@@ -8,7 +8,7 @@ Install the packaged plugin through Homebrew:
 
 ```sh
 brew install yersonargotev/tap/tabby
-herdr plugin link "$(brew --prefix tabby)/share/tabby"
+tabby install
 ```
 
 Start the daemon from Herdr with the **Start Tabby daemon** action, or from the CLI:
@@ -43,13 +43,14 @@ Project vocabulary and domain rules live in [`CONTEXT.md`](CONTEXT.md).
 ## Commands
 
 ```text
-Usage: tabby <daemon|start|unlock-focused|unlock-all>
+Usage: tabby <daemon|start|install|unlock-focused|unlock-all>
 ```
 
 | Command | Purpose |
 | --- | --- |
 | `tabby start` | Start the long-running Herdr rename loop. |
 | `tabby daemon` | Alias for starting the same daemon loop. |
+| `tabby install` | Refresh Herdr registration for the current Homebrew-installed package. |
 | `tabby unlock-focused` | Clear the manual lock for the focused Herdr tab. |
 | `tabby unlock-all` | Clear all persisted manual locks. |
 
@@ -83,7 +84,7 @@ dist plan
 
 ## Release notes
 
-Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`.
+Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. After install or upgrade, `tabby install` refreshes Herdr registration so stale Homebrew Cellar paths are replaced with the current package path.
 
 Release setup and tagging details live in [`docs/release.md`](docs/release.md). The development and release manifests are kept aligned by [`scripts/check-herdr-manifests.py`](scripts/check-herdr-manifests.py).
 

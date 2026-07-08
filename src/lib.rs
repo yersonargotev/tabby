@@ -1,5 +1,6 @@
 pub mod daemon;
 pub mod herdr_client;
+pub mod install;
 pub mod labeler;
 pub mod locks;
 pub mod paths;
@@ -7,12 +8,13 @@ pub mod stability;
 
 use std::fmt;
 
-pub const USAGE: &str = "Usage: tabby <daemon|start|unlock-focused|unlock-all>";
+pub const USAGE: &str = "Usage: tabby <daemon|start|install|unlock-focused|unlock-all>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Daemon,
     Start,
+    Install,
     UnlockFocused,
     UnlockAll,
     Help,
@@ -40,6 +42,42 @@ impl fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
+#[derive(Debug)]
+pub enum CommandError {
+    Runtime(daemon::RuntimeError),
+    Install(install::InstallError),
+}
+
+impl fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime(error) => write!(formatter, "{error}"),
+            Self::Install(error) => write!(formatter, "install failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CommandError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Runtime(error) => Some(error),
+            Self::Install(error) => Some(error),
+        }
+    }
+}
+
+impl From<daemon::RuntimeError> for CommandError {
+    fn from(error: daemon::RuntimeError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<install::InstallError> for CommandError {
+    fn from(error: install::InstallError) -> Self {
+        Self::Install(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub message: &'static str,
@@ -60,6 +98,7 @@ where
     match command.as_str() {
         "daemon" => Ok(Command::Daemon),
         "start" => Ok(Command::Start),
+        "install" => Ok(Command::Install),
         "unlock-focused" => Ok(Command::UnlockFocused),
         "unlock-all" => Ok(Command::UnlockAll),
         "help" | "--help" | "-h" => Ok(Command::Help),
@@ -72,6 +111,7 @@ pub fn run_stub(command: Command) -> CommandOutcome {
         Command::Daemon | Command::Start => {
             "tabby daemon runtime: use run_command to start the rename loop"
         }
+        Command::Install => "tabby install runtime: use run_command to relink the Herdr plugin",
         Command::UnlockFocused => {
             "tabby unlock-focused runtime: use run_command with injected state path"
         }
@@ -82,14 +122,15 @@ pub fn run_stub(command: Command) -> CommandOutcome {
     CommandOutcome { message }
 }
 
-pub fn run_command(command: Command) -> Result<String, daemon::RuntimeError> {
+pub fn run_command(command: Command) -> Result<String, CommandError> {
     match command {
         Command::Daemon | Command::Start => {
             daemon::run_daemon_loop_from_env()?;
             Ok("tabby daemon stopped".to_string())
         }
-        Command::UnlockFocused => daemon::unlock_focused_from_env(),
-        Command::UnlockAll => daemon::unlock_all_from_env(),
+        Command::Install => install::relink_from_current_exe().map_err(CommandError::from),
+        Command::UnlockFocused => daemon::unlock_focused_from_env().map_err(CommandError::from),
+        Command::UnlockAll => daemon::unlock_all_from_env().map_err(CommandError::from),
         Command::Help => Ok(USAGE.to_string()),
     }
 }
@@ -102,6 +143,11 @@ mod tests {
     fn parses_daemon_and_start_commands() {
         assert_eq!(parse_command(["daemon"]), Ok(Command::Daemon));
         assert_eq!(parse_command(["start"]), Ok(Command::Start));
+    }
+
+    #[test]
+    fn parses_install_command() {
+        assert_eq!(parse_command(["install"]), Ok(Command::Install));
     }
 
     #[test]
