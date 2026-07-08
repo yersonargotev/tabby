@@ -5,10 +5,11 @@
 //! existing daemon metadata, and only spawns `tabby start` when needed.
 
 use crate::paths::{
-    HERDR_PLUGIN_CONFIG_DIR_ENV, HERDR_PLUGIN_STATE_DIR_ENV, PLUGIN_ID, StatePathError,
+    HERDR_PLUGIN_CONFIG_DIR_ENV, HERDR_PLUGIN_STATE_DIR_ENV, HOME_ENV, PLUGIN_ID,
+    PluginStateDirSource, StatePathError, XDG_STATE_HOME_ENV, default_plugin_state_dir,
 };
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -18,8 +19,6 @@ use std::string::FromUtf8Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
-const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
-const HOME_ENV: &str = "HOME";
 const DAEMONS_DIR_NAME: &str = "daemons";
 const METADATA_SCHEMA_VERSION: u8 = 1;
 const DAEMON_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -107,7 +106,7 @@ fn resolve_socket_with_env(
 ) -> Result<SessionSocket, StartupError> {
     if let Some(socket_path) = socket_path.filter(|value| !value.is_empty()) {
         let socket_path = PathBuf::from(socket_path);
-        if !socket_path.is_absolute() || socket_path.exists() {
+        if !is_stale_absolute_socket_path(&socket_path) {
             return SessionSocket::resolve(socket_path);
         }
     }
@@ -118,11 +117,18 @@ fn resolve_socket_with_env(
 }
 
 fn herdr_status_socket_path(status: &serde_json::Value) -> Option<&str> {
-    status
-        .get("server")?
+    let server = status.get("server")?;
+    if !server.get("running")?.as_bool()? {
+        return None;
+    }
+    server
         .get("socket")?
         .as_str()
         .filter(|socket| !socket.is_empty())
+}
+
+fn is_stale_absolute_socket_path(path: &Path) -> bool {
+    path.is_absolute() && !path.exists()
 }
 
 fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
@@ -161,39 +167,12 @@ pub fn resolve_state_base_with(
         return absolute_state_base(PathBuf::from(path), StateBaseSource::HerdrPluginConfigDir);
     }
     if let Some((path, source)) = default_plugin_state_dir(inputs.xdg_state_home, inputs.home) {
-        return absolute_state_base(path, source);
+        return absolute_state_base(path, source.into());
     }
     absolute_state_base(
         discover_plugin_config_dir()?,
         StateBaseSource::HerdrPluginConfigDirCommand,
     )
-}
-
-fn default_plugin_state_dir(
-    xdg_state_home: Option<OsString>,
-    home: Option<OsString>,
-) -> Option<(PathBuf, StateBaseSource)> {
-    if let Some(path) = xdg_state_home.filter(|path| !path.is_empty()) {
-        return Some((
-            PathBuf::from(path)
-                .join("herdr")
-                .join("plugins")
-                .join(PLUGIN_ID),
-            StateBaseSource::XdgStateHome,
-        ));
-    }
-
-    home.filter(|path| !path.is_empty()).map(|path| {
-        (
-            PathBuf::from(path)
-                .join(".local")
-                .join("state")
-                .join("herdr")
-                .join("plugins")
-                .join(PLUGIN_ID),
-            StateBaseSource::Home,
-        )
-    })
 }
 
 fn absolute_state_base(path: PathBuf, source: StateBaseSource) -> Result<PathBuf, StartupError> {
@@ -207,10 +186,13 @@ fn absolute_state_base(path: PathBuf, source: StateBaseSource) -> Result<PathBuf
 }
 
 fn herdr_status_json() -> Result<serde_json::Value, StartupError> {
-    let output = Command::new("herdr")
-        .args(["status", "--json"])
-        .output()
-        .map_err(StartupError::HerdrStatusIo)?;
+    let mut command = Command::new("herdr");
+    command.args(["status", "--json"]);
+    if should_remove_herdr_socket_path(std::env::var_os(HERDR_SOCKET_PATH_ENV).as_deref()) {
+        command.env_remove(HERDR_SOCKET_PATH_ENV);
+    }
+
+    let output = command.output().map_err(StartupError::HerdrStatusIo)?;
     if !output.status.success() {
         return Err(StartupError::HerdrStatusFailed {
             status: output.status,
@@ -218,6 +200,14 @@ fn herdr_status_json() -> Result<serde_json::Value, StartupError> {
         });
     }
     serde_json::from_slice(&output.stdout).map_err(StartupError::HerdrStatusJson)
+}
+
+fn should_remove_herdr_socket_path(socket_path: Option<&OsStr>) -> bool {
+    let Some(socket_path) = socket_path.filter(|path| !path.is_empty()) else {
+        return false;
+    };
+
+    is_stale_absolute_socket_path(Path::new(socket_path))
 }
 
 fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StartupError> {
@@ -456,6 +446,15 @@ pub enum StateBaseSource {
     HerdrPluginConfigDirCommand,
 }
 
+impl From<PluginStateDirSource> for StateBaseSource {
+    fn from(source: PluginStateDirSource) -> Self {
+        match source {
+            PluginStateDirSource::XdgStateHome => Self::XdgStateHome,
+            PluginStateDirSource::Home => Self::Home,
+        }
+    }
+}
+
 impl fmt::Display for StateBaseSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -660,11 +659,28 @@ mod tests {
         let stale_socket = temp_dir.path().join("missing.sock");
 
         let socket = resolve_socket_with_env(Some(stale_socket.into_os_string()), || {
-            Ok(serde_json::json!({ "server": { "socket": "/tmp/live-herdr.sock" } }))
+            Ok(serde_json::json!({
+                "server": { "running": true, "socket": "/tmp/live-herdr.sock" }
+            }))
         })
         .expect("socket from herdr status");
 
         assert_eq!(socket.socket_path, PathBuf::from("/tmp/live-herdr.sock"));
+    }
+
+    #[test]
+    fn herdr_status_must_report_running_server_before_socket_is_used() {
+        let temp_dir = TestTempDir::new();
+        let stale_socket = temp_dir.path().join("missing.sock");
+
+        let error = resolve_socket_with_env(Some(stale_socket.into_os_string()), || {
+            Ok(serde_json::json!({
+                "server": { "running": false, "socket": "/tmp/stale-herdr.sock" }
+            }))
+        })
+        .expect_err("not-running Herdr status must not resolve a socket");
+
+        assert!(matches!(error, StartupError::MissingSocketPath));
     }
 
     #[test]

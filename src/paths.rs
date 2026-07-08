@@ -14,8 +14,8 @@ pub const PLUGIN_ID: &str = "yersonargotev.tabby";
 pub const LOCK_STORE_PATH_ENV: &str = "TABBY_LOCK_STORE_PATH";
 pub const HERDR_PLUGIN_STATE_DIR_ENV: &str = "HERDR_PLUGIN_STATE_DIR";
 pub const HERDR_PLUGIN_CONFIG_DIR_ENV: &str = "HERDR_PLUGIN_CONFIG_DIR";
-const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
-const HOME_ENV: &str = "HOME";
+pub const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+pub const HOME_ENV: &str = "HOME";
 const LOCK_STORE_FILE_NAME: &str = "locks.json";
 
 pub fn lock_store_path_from_runtime() -> Result<PathBuf, StatePathError> {
@@ -62,7 +62,7 @@ pub fn resolve_lock_store_path_with(
     }
 
     if let Some((path, source)) = default_plugin_state_dir(inputs.xdg_state_home, inputs.home) {
-        return state_file_in_dir(path, source);
+        return state_file_in_dir(path, source.into());
     }
 
     state_file_in_dir(
@@ -71,17 +71,17 @@ pub fn resolve_lock_store_path_with(
     )
 }
 
-fn default_plugin_state_dir(
+pub fn default_plugin_state_dir(
     xdg_state_home: Option<OsString>,
     home: Option<OsString>,
-) -> Option<(PathBuf, StatePathSource)> {
+) -> Option<(PathBuf, PluginStateDirSource)> {
     if let Some(path) = xdg_state_home.filter(|path| !path.is_empty()) {
         return Some((
             PathBuf::from(path)
                 .join("herdr")
                 .join("plugins")
                 .join(PLUGIN_ID),
-            StatePathSource::XdgStateHome,
+            PluginStateDirSource::XdgStateHome,
         ));
     }
 
@@ -93,9 +93,15 @@ fn default_plugin_state_dir(
                 .join("herdr")
                 .join("plugins")
                 .join(PLUGIN_ID),
-            StatePathSource::Home,
+            PluginStateDirSource::Home,
         )
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginStateDirSource {
+    XdgStateHome,
+    Home,
 }
 
 fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StatePathError> {
@@ -147,6 +153,15 @@ pub enum StatePathSource {
     XdgStateHome,
     Home,
     HerdrPluginConfigDirCommand,
+}
+
+impl From<PluginStateDirSource> for StatePathSource {
+    fn from(source: PluginStateDirSource) -> Self {
+        match source {
+            PluginStateDirSource::XdgStateHome => Self::XdgStateHome,
+            PluginStateDirSource::Home => Self::Home,
+        }
+    }
 }
 
 impl fmt::Display for StatePathSource {
