@@ -1,6 +1,6 @@
 id = "yersonargotev.tabby"
 name = "Tabby"
-version = "0.1.4"
+version = "0.1.5"
 min_herdr_version = "0.7.0"
 description = "Local-link Herdr plugin scaffold for automatic tab labels."
 platforms = ["macos"]

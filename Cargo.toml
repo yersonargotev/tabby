@@ -1,6 +1,6 @@
 [package]
 name = "tabby"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Herdr plugin for automatic tab labels"
 homepage = "https://github.com/yersonargotev/tabby"
