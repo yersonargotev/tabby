@@ -18,6 +18,8 @@ use std::string::FromUtf8Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
+const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+const HOME_ENV: &str = "HOME";
 const DAEMONS_DIR_NAME: &str = "daemons";
 const METADATA_SCHEMA_VERSION: u8 = 1;
 const DAEMON_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -111,13 +113,16 @@ fn resolve_socket_with_env(
     }
 
     let status = load_status()?;
-    let socket = status
-        .get("server")
-        .and_then(|server| server.get("socket"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|socket| !socket.is_empty())
-        .ok_or(StartupError::MissingSocketPath)?;
+    let socket = herdr_status_socket_path(&status).ok_or(StartupError::MissingSocketPath)?;
     SessionSocket::resolve(socket)
+}
+
+fn herdr_status_socket_path(status: &serde_json::Value) -> Option<&str> {
+    status
+        .get("server")?
+        .get("socket")?
+        .as_str()
+        .filter(|socket| !socket.is_empty())
 }
 
 fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
@@ -130,6 +135,8 @@ fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
 pub struct RuntimeStateInputs {
     pub herdr_plugin_state_dir: Option<OsString>,
     pub herdr_plugin_config_dir: Option<OsString>,
+    pub xdg_state_home: Option<OsString>,
+    pub home: Option<OsString>,
 }
 
 impl RuntimeStateInputs {
@@ -137,6 +144,8 @@ impl RuntimeStateInputs {
         Self {
             herdr_plugin_state_dir: std::env::var_os(HERDR_PLUGIN_STATE_DIR_ENV),
             herdr_plugin_config_dir: std::env::var_os(HERDR_PLUGIN_CONFIG_DIR_ENV),
+            xdg_state_home: std::env::var_os(XDG_STATE_HOME_ENV),
+            home: std::env::var_os(HOME_ENV),
         }
     }
 }
@@ -151,10 +160,40 @@ pub fn resolve_state_base_with(
     if let Some(path) = inputs.herdr_plugin_config_dir {
         return absolute_state_base(PathBuf::from(path), StateBaseSource::HerdrPluginConfigDir);
     }
+    if let Some((path, source)) = default_plugin_state_dir(inputs.xdg_state_home, inputs.home) {
+        return absolute_state_base(path, source);
+    }
     absolute_state_base(
         discover_plugin_config_dir()?,
         StateBaseSource::HerdrPluginConfigDirCommand,
     )
+}
+
+fn default_plugin_state_dir(
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<(PathBuf, StateBaseSource)> {
+    if let Some(path) = xdg_state_home.filter(|path| !path.is_empty()) {
+        return Some((
+            PathBuf::from(path)
+                .join("herdr")
+                .join("plugins")
+                .join(PLUGIN_ID),
+            StateBaseSource::XdgStateHome,
+        ));
+    }
+
+    home.filter(|path| !path.is_empty()).map(|path| {
+        (
+            PathBuf::from(path)
+                .join(".local")
+                .join("state")
+                .join("herdr")
+                .join("plugins")
+                .join(PLUGIN_ID),
+            StateBaseSource::Home,
+        )
+    })
 }
 
 fn absolute_state_base(path: PathBuf, source: StateBaseSource) -> Result<PathBuf, StartupError> {
@@ -360,14 +399,15 @@ fn spawn_detached_daemon(
     binary_path: &Path,
     socket_path: &Path,
 ) -> Result<SpawnedDaemon, StartupError> {
-    let child: Child = Command::new(binary_path)
+    let mut command = Command::new(binary_path);
+    command
         .arg("start")
         .env(HERDR_SOCKET_PATH_ENV, socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(StartupError::SpawnDaemon)?;
+        .stderr(Stdio::null());
+
+    let child: Child = command.spawn().map_err(StartupError::SpawnDaemon)?;
     Ok(SpawnedDaemon { pid: child.id() })
 }
 
@@ -411,6 +451,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 pub enum StateBaseSource {
     HerdrPluginStateDir,
     HerdrPluginConfigDir,
+    XdgStateHome,
+    Home,
     HerdrPluginConfigDirCommand,
 }
 
@@ -419,6 +461,8 @@ impl fmt::Display for StateBaseSource {
         let name = match self {
             Self::HerdrPluginStateDir => HERDR_PLUGIN_STATE_DIR_ENV,
             Self::HerdrPluginConfigDir => HERDR_PLUGIN_CONFIG_DIR_ENV,
+            Self::XdgStateHome => XDG_STATE_HOME_ENV,
+            Self::Home => HOME_ENV,
             Self::HerdrPluginConfigDirCommand => "herdr plugin config-dir",
         };
         formatter.write_str(name)
@@ -629,6 +673,7 @@ mod tests {
             RuntimeStateInputs {
                 herdr_plugin_state_dir: Some(OsString::from("/tmp/tabby-state")),
                 herdr_plugin_config_dir: Some(OsString::from("/tmp/tabby-config")),
+                ..RuntimeStateInputs::default()
             },
             || panic!("state dir must win"),
         )
@@ -643,12 +688,48 @@ mod tests {
             RuntimeStateInputs {
                 herdr_plugin_state_dir: Some(OsString::from("relative/state")),
                 herdr_plugin_config_dir: None,
+                ..RuntimeStateInputs::default()
             },
             || panic!("relative state dir must fail"),
         )
         .expect_err("relative state dir");
 
         assert!(matches!(error, StartupError::RelativeStateBase { .. }));
+    }
+
+    #[test]
+    fn xdg_state_home_matches_herdr_plugin_state_layout_without_plugin_env() {
+        let path = resolve_state_base_with(
+            RuntimeStateInputs {
+                xdg_state_home: Some(OsString::from("/tmp/tabby-state")),
+                home: Some(OsString::from("/tmp/tabby-home")),
+                ..RuntimeStateInputs::default()
+            },
+            || panic!("XDG_STATE_HOME should avoid Herdr config-dir discovery"),
+        )
+        .expect("state base");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/tabby-state/herdr/plugins/yersonargotev.tabby")
+        );
+    }
+
+    #[test]
+    fn home_state_fallback_matches_herdr_plugin_state_layout_without_plugin_env() {
+        let path = resolve_state_base_with(
+            RuntimeStateInputs {
+                home: Some(OsString::from("/tmp/tabby-home")),
+                ..RuntimeStateInputs::default()
+            },
+            || panic!("HOME state fallback should avoid Herdr config-dir discovery"),
+        )
+        .expect("state base");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/tabby-home/.local/state/herdr/plugins/yersonargotev.tabby")
+        );
     }
 
     #[test]
@@ -688,21 +769,7 @@ mod tests {
     fn live_matching_metadata_prevents_duplicate_spawn() {
         let temp_dir = TestTempDir::new();
         let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
-        let daemon_dir = temp_dir.path().join(DAEMONS_DIR_NAME);
-        fs::create_dir_all(&daemon_dir).expect("daemon dir");
-        write_metadata(
-            &daemon_dir.join(format!("{}.json", socket.session_key)),
-            &DaemonMetadata {
-                schema_version: METADATA_SCHEMA_VERSION,
-                pid: 123,
-                session_key: socket.session_key.clone(),
-                socket_path: socket.socket_path.to_string_lossy().to_string(),
-                started_at: 1,
-                tabby_version: "test".to_string(),
-                binary_path: Some("/tmp/tabby".to_string()),
-            },
-        )
-        .expect("metadata");
+        let metadata_path = write_test_metadata(temp_dir.path(), &socket, 123);
         let mut runtime = FakeStartupRuntime::default().with_live_tabby_pid(123);
 
         let outcome = ensure_started_with(
@@ -715,27 +782,14 @@ mod tests {
 
         assert_eq!(outcome, EnsureStartedOutcome::AlreadyRunning { pid: 123 });
         assert!(runtime.spawns.is_empty());
+        assert!(metadata_path.exists());
     }
 
     #[test]
     fn stale_metadata_is_replaced_and_spawns_daemon() {
         let temp_dir = TestTempDir::new();
         let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
-        let daemon_dir = temp_dir.path().join(DAEMONS_DIR_NAME);
-        fs::create_dir_all(&daemon_dir).expect("daemon dir");
-        write_metadata(
-            &daemon_dir.join(format!("{}.json", socket.session_key)),
-            &DaemonMetadata {
-                schema_version: METADATA_SCHEMA_VERSION,
-                pid: 123,
-                session_key: socket.session_key.clone(),
-                socket_path: socket.socket_path.to_string_lossy().to_string(),
-                started_at: 1,
-                tabby_version: "test".to_string(),
-                binary_path: Some("/tmp/tabby".to_string()),
-            },
-        )
-        .expect("metadata");
+        let metadata_path = write_test_metadata(temp_dir.path(), &socket, 123);
         let mut runtime = FakeStartupRuntime::default().with_spawn_pid(456);
 
         let outcome = ensure_started_with(
@@ -745,10 +799,9 @@ mod tests {
             &mut runtime,
         )
         .expect("ensure started");
-        let metadata =
-            read_metadata_if_present(&daemon_dir.join(format!("{}.json", socket.session_key)))
-                .expect("read metadata")
-                .expect("metadata present");
+        let metadata = read_metadata_if_present(&metadata_path)
+            .expect("read metadata")
+            .expect("metadata present");
 
         assert_eq!(outcome, EnsureStartedOutcome::Started { pid: 456 });
         assert_eq!(metadata.pid, 456);
@@ -766,13 +819,9 @@ mod tests {
     fn malformed_metadata_is_replaced_and_spawns_daemon() {
         let temp_dir = TestTempDir::new();
         let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
-        let daemon_dir = temp_dir.path().join(DAEMONS_DIR_NAME);
-        fs::create_dir_all(&daemon_dir).expect("daemon dir");
-        fs::write(
-            daemon_dir.join(format!("{}.json", socket.session_key)),
-            "{not valid json",
-        )
-        .expect("write malformed metadata");
+        let metadata_path = metadata_path_for(temp_dir.path(), &socket);
+        fs::create_dir_all(metadata_path.parent().expect("metadata parent")).expect("daemon dir");
+        fs::write(&metadata_path, "{not valid json").expect("write malformed metadata");
         let mut runtime = FakeStartupRuntime::default().with_spawn_pid(456);
 
         let outcome = ensure_started_with(
@@ -782,10 +831,9 @@ mod tests {
             &mut runtime,
         )
         .expect("ensure started");
-        let metadata =
-            read_metadata_if_present(&daemon_dir.join(format!("{}.json", socket.session_key)))
-                .expect("read metadata")
-                .expect("metadata present");
+        let metadata = read_metadata_if_present(&metadata_path)
+            .expect("read metadata")
+            .expect("metadata present");
 
         assert_eq!(outcome, EnsureStartedOutcome::Started { pid: 456 });
         assert_eq!(metadata.pid, 456);
@@ -811,6 +859,31 @@ mod tests {
             &socket,
             &mut runtime
         ));
+    }
+
+    fn metadata_path_for(state_base: &Path, socket: &SessionSocket) -> PathBuf {
+        state_base
+            .join(DAEMONS_DIR_NAME)
+            .join(format!("{}.json", socket.session_key))
+    }
+
+    fn write_test_metadata(state_base: &Path, socket: &SessionSocket, pid: u32) -> PathBuf {
+        let path = metadata_path_for(state_base, socket);
+        fs::create_dir_all(path.parent().expect("metadata parent")).expect("daemon dir");
+        write_metadata(
+            &path,
+            &DaemonMetadata {
+                schema_version: METADATA_SCHEMA_VERSION,
+                pid,
+                session_key: socket.session_key.clone(),
+                socket_path: socket.socket_path.to_string_lossy().to_string(),
+                started_at: 1,
+                tabby_version: "test".to_string(),
+                binary_path: Some("/tmp/tabby".to_string()),
+            },
+        )
+        .expect("metadata");
+        path
     }
 
     #[derive(Default)]

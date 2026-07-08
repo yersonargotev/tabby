@@ -14,6 +14,8 @@ pub const PLUGIN_ID: &str = "yersonargotev.tabby";
 pub const LOCK_STORE_PATH_ENV: &str = "TABBY_LOCK_STORE_PATH";
 pub const HERDR_PLUGIN_STATE_DIR_ENV: &str = "HERDR_PLUGIN_STATE_DIR";
 pub const HERDR_PLUGIN_CONFIG_DIR_ENV: &str = "HERDR_PLUGIN_CONFIG_DIR";
+const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+const HOME_ENV: &str = "HOME";
 const LOCK_STORE_FILE_NAME: &str = "locks.json";
 
 pub fn lock_store_path_from_runtime() -> Result<PathBuf, StatePathError> {
@@ -27,6 +29,8 @@ pub struct RuntimePathInputs {
     pub lock_store_override: Option<OsString>,
     pub herdr_plugin_state_dir: Option<OsString>,
     pub herdr_plugin_config_dir: Option<OsString>,
+    pub xdg_state_home: Option<OsString>,
+    pub home: Option<OsString>,
 }
 
 impl RuntimePathInputs {
@@ -35,6 +39,8 @@ impl RuntimePathInputs {
             lock_store_override: std::env::var_os(LOCK_STORE_PATH_ENV),
             herdr_plugin_state_dir: std::env::var_os(HERDR_PLUGIN_STATE_DIR_ENV),
             herdr_plugin_config_dir: std::env::var_os(HERDR_PLUGIN_CONFIG_DIR_ENV),
+            xdg_state_home: std::env::var_os(XDG_STATE_HOME_ENV),
+            home: std::env::var_os(HOME_ENV),
         }
     }
 }
@@ -55,10 +61,41 @@ pub fn resolve_lock_store_path_with(
         return state_file_in_dir(PathBuf::from(path), StatePathSource::HerdrPluginConfigDir);
     }
 
+    if let Some((path, source)) = default_plugin_state_dir(inputs.xdg_state_home, inputs.home) {
+        return state_file_in_dir(path, source);
+    }
+
     state_file_in_dir(
         discover_plugin_config_dir()?,
         StatePathSource::HerdrPluginConfigDirCommand,
     )
+}
+
+fn default_plugin_state_dir(
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<(PathBuf, StatePathSource)> {
+    if let Some(path) = xdg_state_home.filter(|path| !path.is_empty()) {
+        return Some((
+            PathBuf::from(path)
+                .join("herdr")
+                .join("plugins")
+                .join(PLUGIN_ID),
+            StatePathSource::XdgStateHome,
+        ));
+    }
+
+    home.filter(|path| !path.is_empty()).map(|path| {
+        (
+            PathBuf::from(path)
+                .join(".local")
+                .join("state")
+                .join("herdr")
+                .join("plugins")
+                .join(PLUGIN_ID),
+            StatePathSource::Home,
+        )
+    })
 }
 
 fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StatePathError> {
@@ -107,6 +144,8 @@ pub enum StatePathSource {
     Override,
     HerdrPluginStateDir,
     HerdrPluginConfigDir,
+    XdgStateHome,
+    Home,
     HerdrPluginConfigDirCommand,
 }
 
@@ -116,6 +155,8 @@ impl fmt::Display for StatePathSource {
             Self::Override => LOCK_STORE_PATH_ENV,
             Self::HerdrPluginStateDir => HERDR_PLUGIN_STATE_DIR_ENV,
             Self::HerdrPluginConfigDir => HERDR_PLUGIN_CONFIG_DIR_ENV,
+            Self::XdgStateHome => XDG_STATE_HOME_ENV,
+            Self::Home => HOME_ENV,
             Self::HerdrPluginConfigDirCommand => "herdr plugin config-dir",
         };
         formatter.write_str(name)
@@ -196,6 +237,7 @@ mod tests {
                 lock_store_override: Some(OsString::from("/tmp/tabby-test/override.json")),
                 herdr_plugin_state_dir: Some(OsString::from("/tmp/tabby-test/state")),
                 herdr_plugin_config_dir: Some(OsString::from("/tmp/tabby-test/config")),
+                ..RuntimePathInputs::default()
             },
             || panic!("override must not call Herdr config-dir"),
         )
@@ -211,6 +253,7 @@ mod tests {
                 lock_store_override: None,
                 herdr_plugin_state_dir: Some(OsString::from("/tmp/tabby-test/state")),
                 herdr_plugin_config_dir: Some(OsString::from("/tmp/tabby-test/config")),
+                ..RuntimePathInputs::default()
             },
             || panic!("env state dir must not call Herdr config-dir"),
         )
@@ -226,6 +269,7 @@ mod tests {
                 lock_store_override: None,
                 herdr_plugin_state_dir: None,
                 herdr_plugin_config_dir: Some(OsString::from("/tmp/tabby-test/config")),
+                ..RuntimePathInputs::default()
             },
             || panic!("env config dir must not call Herdr config-dir"),
         )
@@ -244,6 +288,43 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/tmp/tabby-test/herdr-config/locks.json")
+        );
+    }
+
+    #[test]
+    fn xdg_state_home_matches_herdr_plugin_state_layout_without_plugin_env() {
+        let path = resolve_lock_store_path_with(
+            RuntimePathInputs {
+                xdg_state_home: Some(OsString::from("/tmp/tabby-test/xdg-state")),
+                home: Some(OsString::from("/tmp/tabby-test/home")),
+                ..RuntimePathInputs::default()
+            },
+            || panic!("XDG_STATE_HOME should avoid Herdr config-dir discovery"),
+        )
+        .expect("resolve XDG state path");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/tabby-test/xdg-state/herdr/plugins/yersonargotev.tabby/locks.json")
+        );
+    }
+
+    #[test]
+    fn home_state_fallback_matches_herdr_plugin_state_layout_without_plugin_env() {
+        let path = resolve_lock_store_path_with(
+            RuntimePathInputs {
+                home: Some(OsString::from("/tmp/tabby-test/home")),
+                ..RuntimePathInputs::default()
+            },
+            || panic!("HOME state fallback should avoid Herdr config-dir discovery"),
+        )
+        .expect("resolve HOME state path");
+
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/tmp/tabby-test/home/.local/state/herdr/plugins/yersonargotev.tabby/locks.json"
+            )
         );
     }
 
