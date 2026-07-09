@@ -71,6 +71,10 @@ impl StabilityState {
         self.policy
     }
 
+    pub fn last_stable_label(&self) -> Option<&str> {
+        self.last_stable.as_ref().map(|candidate| candidate.label())
+    }
+
     pub fn observe(
         &mut self,
         candidate: LabelCandidate,
