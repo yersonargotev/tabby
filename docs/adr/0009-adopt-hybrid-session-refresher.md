@@ -22,10 +22,10 @@ Tabby will run a Hybrid Session Refresher with these rules:
 - Manifest auto-start hooks are limited to `workspace.created` and `tab.created`; focus events must not spawn or ensure processes.
 - The refresher subscribes to focus/create events over the Herdr socket: `tab.focused`, `workspace.focused`, `tab.created`, `workspace.created`, and `pane.focused`.
 - Every focus/create event resets a 1000 ms Focus Quiet Window.
-- During the Focus Quiet Window, the refresher must not call `tab.rename` or `pane.process_info`; only minimal focus-state reads are allowed.
-- Outside the quiet window, the refresher may inspect the focused tab every 500 ms and uses the existing two-consecutive-observation stability requirement.
+- During the Focus Quiet Window, the refresher must not call any Herdr API, including `tab.list`, `pane.list`, `pane.process_info`, or `tab.rename`.
+- Outside the quiet window, the refresher may inspect the focused tab on a low-cadence 5 second idle interval and uses the existing two-consecutive-observation stability requirement.
 - The refresher never inspects processes or renames Inactive Tabs.
-- Stable labels discovered during the quiet window become Pending Renames and may be applied only after revalidating that the same tab is still focused, the candidate is still current, the tab is not manually locked, the visible label still differs, and no newer focus event reset the window.
+- The refresher does not discover new labels during the quiet window. After the window expires, it revalidates by reading only the focused tab; cached stable labels may be reapplied only if the tab is still focused, not manually locked, and the visible label still differs.
 - `tabby refresh` remains a compatible one-shot action for manual recovery; no refresher IPC is required in the first hybrid slice.
 - Manual lock semantics remain unchanged: user labels beat automatic labels until `unlock-focused` or `unlock-all` removes the lock.
 
@@ -39,4 +39,4 @@ Tabby will run a Hybrid Session Refresher with these rules:
 
 Labels become fresh again while the user remains in the same tab, without requiring manual refresh or a focus event. This reintroduces a long-running per-session process and idempotent startup metadata, so startup complexity returns.
 
-Navigation Stability remains the hard constraint. Tabby still does not rename inactive tabs, and it now also suppresses `pane.process_info` plus `tab.rename` during the 1000 ms quiet window after focus/create events. If this is still not enough, the next mitigation should adjust quiet-window duration or read cadence before considering inactive-tab renames or high-volume events.
+Navigation Stability remains the hard constraint. Tabby still does not rename inactive tabs, and it now suppresses all Herdr API calls during the 1000 ms quiet window after focus/create events while using a lower idle read cadence. If this is still not enough, the next mitigation should further reduce automatic reads or return to explicit/manual refresh before considering inactive-tab renames or high-volume events.

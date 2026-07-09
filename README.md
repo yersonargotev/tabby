@@ -35,8 +35,8 @@ It also avoids common shell and wrapper processes such as `zsh`, `bash`, `tmux`,
 
 - Runs one Hybrid Session Refresher per Herdr Session for automatic focused-tab freshness.
 - Starts idempotently through `tabby ensure-started`, `tabby install --start`, creation hooks, or the visible `Start Tabby` action.
-- Suppresses `pane.process_info` and `tab.rename` during the 1000 ms Focus Quiet Window after focus/create events.
-- Inspects only the focused tab every 500 ms outside the quiet window, and still requires two consecutive observations before renaming.
+- Suppresses all Herdr API calls during the 1000 ms Focus Quiet Window after focus/create events.
+- Inspects only the focused tab on a low-cadence 5 second idle interval outside the quiet window, and still requires two consecutive observations before new labels become stable.
 - Leaves inactive tab labels unchanged so Tabby does not rewrite the tab bar while the user is navigating between tabs.
 - Keeps `tabby refresh` as a safe one-shot manual recovery path.
 - Treats user-edited labels as manual locks after Tabby has established a plugin label baseline, and persists those locks until an unlock action clears them.

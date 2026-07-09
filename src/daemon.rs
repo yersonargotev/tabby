@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_REFRESH_STABILIZATION_DELAY: Duration = Duration::from_millis(400);
 pub const DEFAULT_FOCUS_QUIET_WINDOW: Duration = Duration::from_millis(1000);
+pub const DEFAULT_HYBRID_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct DaemonState {
@@ -137,7 +138,13 @@ impl HybridRefresherState {
     }
 
     pub fn poll_interval(&self) -> Duration {
-        self.runtime.poll_interval()
+        DEFAULT_HYBRID_IDLE_POLL_INTERVAL
+    }
+
+    fn next_tick_after_quiet(&self, observed_at: Instant) -> Instant {
+        self.quiet_until
+            .filter(|quiet_until| observed_at < *quiet_until)
+            .unwrap_or(observed_at)
     }
 }
 
@@ -312,16 +319,21 @@ where
                 }
             }
             StabilityDecision::NoOp { label } => {
-                if label == current_label {
-                    runtime.last_plugin_label = Some(label.clone());
-                    if state
-                        .locks
-                        .record_plugin_label(tab_id.clone(), label.clone())
-                    {
-                        state.mark_locks_dirty();
-                    }
+                let record_label = label.clone();
+                runtime.last_plugin_label = Some(label.clone());
+                if state
+                    .locks
+                    .record_plugin_label(tab_id.clone(), record_label)
+                {
+                    state.mark_locks_dirty();
                 }
-                TabTickAction::SkippedAlreadyCurrent { label }
+                if label == current_label {
+                    TabTickAction::SkippedAlreadyCurrent { label }
+                } else {
+                    herdr.rename_tab(&tab_id, &label)?;
+                    let from = current_label.clone();
+                    TabTickAction::Renamed { from, to: label }
+                }
             }
         };
 
@@ -367,7 +379,7 @@ where
     let lock_store_path = lock_store_path.as_ref();
 
     if state.is_quiet(observed_at) {
-        return quiet_window_tick(herdr, state);
+        return Ok(quiet_window_tick());
     }
 
     if state.pending_rename.is_some()
@@ -379,33 +391,8 @@ where
     tick_and_save_locks(herdr, &mut state.runtime, lock_store_path, observed_at)
 }
 
-fn quiet_window_tick<C>(
-    herdr: &mut C,
-    state: &mut HybridRefresherState,
-) -> Result<TickReport, DaemonError>
-where
-    C: HerdrApi,
-{
-    let tabs = herdr.list_tabs()?;
-    let Some(tab) = tabs.into_iter().find(|tab| tab.focused) else {
-        return Ok(TickReport { tabs: Vec::new() });
-    };
-
-    if !state.runtime.locks.is_locked(&tab.tab_id)
-        && let Some(runtime) = state.runtime.tabs.get(&tab.tab_id)
-        && let Some(label) = runtime.stability.last_stable_label()
-        && label != tab.label
-    {
-        state.pending_rename = Some(PendingRename {
-            tab_id: tab.tab_id.clone(),
-            label: label.to_string(),
-            focus_generation: state.focus_generation,
-        });
-    }
-
-    Ok(TickReport {
-        tabs: vec![skipped_tab_report(tab, TabTickAction::SkippedFocusQuiet)],
-    })
+fn quiet_window_tick() -> TickReport {
+    TickReport { tabs: Vec::new() }
 }
 
 fn revalidate_pending_rename<C>(
@@ -729,8 +716,9 @@ where
 {
     let lock_store_path = lock_store_path.as_ref();
     let mut state = HybridRefresherState::load(lock_store_path)?;
-    state.note_focus_or_create_event(Instant::now());
-    let mut next_tick_at = Instant::now();
+    let now = Instant::now();
+    state.note_focus_or_create_event(now);
+    let mut next_tick_at = state.next_tick_after_quiet(now);
 
     loop {
         let now = Instant::now();
@@ -743,8 +731,9 @@ where
         if let Some(event) = events.next_event_timeout(timeout)?
             && is_refresher_quiet_event(&event)
         {
-            state.note_focus_or_create_event(Instant::now());
-            next_tick_at = Instant::now();
+            let now = Instant::now();
+            state.note_focus_or_create_event(now);
+            next_tick_at = state.next_tick_after_quiet(now);
         }
     }
 }
@@ -1015,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_quiet_window_does_not_call_process_info_or_rename() {
+    fn hybrid_quiet_window_does_not_call_any_herdr_api() {
         let temp_dir = TestTempDir::new();
         let lock_path = temp_dir.path().join("locks.json");
         let start = Instant::now();
@@ -1031,7 +1020,9 @@ mod tests {
         )
         .expect("quiet tick");
 
-        assert_eq!(report.tabs[0].action, TabTickAction::SkippedFocusQuiet);
+        assert!(report.tabs.is_empty());
+        assert!(herdr.list_tab_calls.is_empty());
+        assert!(herdr.list_pane_calls.is_empty());
         assert!(herdr.process_info_calls.is_empty());
         assert!(herdr.renames.is_empty());
     }
@@ -1068,8 +1059,8 @@ mod tests {
             &lock_path,
             start + Duration::from_millis(700),
         )
-        .expect("quiet tick records pending");
-        assert!(state.pending_rename.is_some());
+        .expect("quiet tick skips all Herdr API calls");
+        assert!(state.pending_rename.is_none());
 
         herdr.set_process_info(process("w1:p1", "codex", &["codex"]));
         state.note_focus_or_create_event(start + Duration::from_millis(800));
@@ -1089,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_pending_rename_applies_after_revalidation() {
+    fn hybrid_reobserves_after_quiet_before_renaming() {
         let temp_dir = TestTempDir::new();
         let lock_path = temp_dir.path().join("locks.json");
         let start = Instant::now();
@@ -1126,17 +1117,19 @@ mod tests {
             &lock_path,
             start + Duration::from_millis(700),
         )
-        .expect("quiet tick records pending");
-        let report = hybrid_tick_and_save_locks(
+        .expect("quiet tick skips all Herdr API calls");
+        assert!(state.pending_rename.is_none());
+
+        let first_after_quiet = hybrid_tick_and_save_locks(
             &mut herdr,
             &mut state,
             &lock_path,
             start + Duration::from_millis(1601),
         )
-        .expect("pending apply tick");
+        .expect("first post-quiet tick");
 
         assert_eq!(
-            report.tabs[0].action,
+            first_after_quiet.tabs[0].action,
             TabTickAction::Renamed {
                 from: "old".to_string(),
                 to: "nvim".to_string()
@@ -1583,6 +1576,8 @@ mod tests {
         panes: Vec<PaneInfo>,
         process_infos: BTreeMap<String, PaneProcessInfo>,
         process_errors: BTreeSet<String>,
+        list_tab_calls: Vec<()>,
+        list_pane_calls: Vec<()>,
         process_info_calls: Vec<String>,
         renames: Vec<(String, String)>,
     }
@@ -1594,6 +1589,8 @@ mod tests {
                 panes,
                 process_infos: BTreeMap::new(),
                 process_errors: BTreeSet::new(),
+                list_tab_calls: Vec::new(),
+                list_pane_calls: Vec::new(),
                 process_info_calls: Vec::new(),
                 renames: Vec::new(),
             }
@@ -1641,10 +1638,12 @@ mod tests {
 
     impl HerdrApi for FakeHerdr {
         fn list_tabs(&mut self) -> Result<Vec<TabInfo>, HerdrError> {
+            self.list_tab_calls.push(());
             Ok(self.tabs.clone())
         }
 
         fn list_panes(&mut self) -> Result<Vec<PaneInfo>, HerdrError> {
+            self.list_pane_calls.push(());
             Ok(self.panes.clone())
         }
 
