@@ -13,10 +13,10 @@ brew install yersonargotev/tap/tabby
 Register, or refresh, the Homebrew-managed plugin directory with Herdr:
 
 ```sh
-tabby install
+tabby install --start
 ```
 
-This is the v1 release path. Homebrew installs the `tabby` binary and the release Herdr manifest; Herdr registration remains an explicit user command. `tabby install` is intentionally idempotent: it asks Herdr to unlink any existing `yersonargotev.tabby` registration, then links the manifest shipped with the currently running Homebrew package. It does not start or clean up a long-running daemon.
+This is the v1 release path. Homebrew installs the `tabby` binary and the release Herdr manifest; Herdr registration remains an explicit user command. `tabby install` is intentionally idempotent: it asks Herdr to unlink any existing `yersonargotev.tabby` registration, then links the manifest shipped with the currently running Homebrew package. Plain `tabby install` remains registration-only; `tabby install --start` also ensures exactly one Hybrid Session Refresher is running for the current Herdr Session.
 
 Do not use `herdr plugin install yersonargotev/tabby` for the v1 release path. The Herdr marketplace/GitHub install path is intentionally not part of v1.
 
@@ -31,7 +31,7 @@ tabby --help
 Expected output:
 
 ```text
-Usage: tabby <refresh|install|unlock-focused|unlock-all>
+Usage: tabby <refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>
 ```
 
 Check Homebrew's install prefix:
@@ -59,6 +59,7 @@ Expected output for the current installed version is shaped like:
 true
 /opt/homebrew/Cellar/tabby/<version>/share/tabby
 refresh ../../bin/tabby refresh
+start ../../bin/tabby ensure-started
 unlock-all ../../bin/tabby unlock-all
 unlock-focused ../../bin/tabby unlock-focused
 ```
@@ -68,18 +69,18 @@ The important checks are:
 - `enabled` is `true`.
 - `plugin_root` is under Homebrew's current `tabby` Cellar version, ending in `share/tabby`.
 - actions run `../../bin/tabby`, so Herdr invokes the binary installed by the same Homebrew package.
-- the refresh action and event hooks run `tabby refresh`, not `ensure-started` or `start`.
+- the `start` action runs `tabby ensure-started`; creation event hooks also run `ensure-started`; focus events are handled inside the running refresher, not by manifest hooks.
 
 ## Use Tabby in Herdr
 
-Tabby refreshes labels from Herdr creation/focus hooks and from the manual `Refresh Tabby Label` action. From the CLI, the equivalent manual refresh is:
+Tabby refreshes labels through one Hybrid Session Refresher per Herdr Session. Start it with `tabby install --start`, `tabby ensure-started`, or Herdr’s `Start Tabby` action. The manual one-shot refresh remains available:
 
 ```sh
 tabby refresh
 herdr plugin action invoke refresh --plugin yersonargotev.tabby
 ```
 
-Each refresh waits briefly for focus/process state to settle, inspects only the tab focused at refresh time, applies at most one automatic rename, and exits. There is no permanent Tabby polling daemon in the current design.
+The refresher subscribes to Herdr focus/create events, suppresses `pane.process_info` and `tab.rename` during the 1000 ms Focus Quiet Window, then inspects only the focused tab every 500 ms outside the window. The `tabby refresh` command is still one-shot and exits after at most one focused-tab rename.
 
 User-edited labels are treated as manual locks after Tabby has established a plugin label baseline. To clear locks from Herdr actions or the CLI:
 
@@ -101,8 +102,8 @@ Herdr plugins run their configured commands as normal user code on your machine.
 The v1 release path is intentionally explicit:
 
 - Homebrew installs files only; there is no silent Homebrew postinstall that registers or starts the plugin.
-- `tabby install` is the separate opt-in registration step. It is a small wrapper around `herdr plugin unlink yersonargotev.tabby` followed by `herdr plugin link <current package>/share/tabby`.
-- Label refreshes are short-lived commands triggered by Herdr focus/creation events or by explicit user action.
+- `tabby install` is the separate opt-in registration step. It is a small wrapper around `herdr plugin unlink yersonargotev.tabby` followed by `herdr plugin link <current package>/share/tabby`; add `--start` to start the current session refresher explicitly.
+- Automatic label refreshes come from one long-running Hybrid Session Refresher per Herdr Session; duplicate prevention is keyed by the Herdr socket identity.
 - Tabby does not silently auto-update. Updates happen through Homebrew, for example `brew upgrade tabby`; run `tabby install` after upgrades so Herdr stops pointing at any old Homebrew Cellar path that cleanup removed.
 - Tabby stores its lock state as `locks.json` in Herdr's plugin-owned state/config directory. You can inspect that directory with:
 

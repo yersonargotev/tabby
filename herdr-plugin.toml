@@ -11,6 +11,12 @@ platforms = ["macos"]
 # Herdr plugin link does not run build commands, so commands target the local debug binary.
 
 [[actions]]
+id = "start"
+title = "Start Tabby"
+contexts = ["workspace"]
+command = ["target/debug/tabby", "ensure-started"]
+
+[[actions]]
 id = "refresh"
 title = "Refresh Tabby Label"
 contexts = ["tab", "workspace"]
@@ -30,16 +36,8 @@ command = ["target/debug/tabby", "unlock-all"]
 
 [[events]]
 on = "workspace.created"
-command = ["target/debug/tabby", "refresh"]
-
-[[events]]
-on = "workspace.focused"
-command = ["target/debug/tabby", "refresh"]
+command = ["target/debug/tabby", "ensure-started"]
 
 [[events]]
 on = "tab.created"
-command = ["target/debug/tabby", "refresh"]
-
-[[events]]
-on = "tab.focused"
-command = ["target/debug/tabby", "refresh"]
+command = ["target/debug/tabby", "ensure-started"]

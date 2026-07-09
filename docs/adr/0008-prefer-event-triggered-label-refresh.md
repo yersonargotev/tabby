@@ -1,5 +1,7 @@
 # Prefer event-triggered label refresh
 
+Status: Superseded by ADR 0009 for normal automatic behavior.
+
 Tabby will move away from a continuously polling daemon as the primary source of automatic label updates. Navigation Stability is more important than label freshness, so Tabby should update labels from explicit Herdr lifecycle/navigation triggers such as tab focus, tab creation, or workspace focus, with any needed stabilization happening after the trigger instead of through constant 500 ms UI-touching polling.
 
 The automatic refresh trigger set is intentionally narrow: tab focus, workspace focus, tab creation, workspace creation, and an explicit manual Start/Refresh action. Tabby should not use pane output changes, layout updates, or continuous polling as automatic label refresh triggers.

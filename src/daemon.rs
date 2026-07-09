@@ -1,14 +1,16 @@
 //! Herdr tab auto-renaming orchestration.
 //!
-//! The normal runtime path is a short One-Shot Refresh: wait before entering this
-//! module, inspect only the currently focused tab, optionally rename it once, and
-//! exit. Runtime state is intentionally injectable. The persisted lock store
-//! remains plugin-owned state keyed by Herdr `tab_id`; whether those IDs survive
-//! Herdr restarts is still an open design decision documented in
-//! `docs/design/open-decisions.md`.
+//! The normal runtime path is the Hybrid Session Refresher: one long-running
+//! process per Herdr Session that observes focus/create events, waits through a
+//! Focus Quiet Window, and then inspects only the focused tab. `tabby refresh`
+//! remains a bounded one-shot compatibility path. Runtime state is intentionally
+//! injectable. The persisted lock store remains plugin-owned state keyed by
+//! Herdr `tab_id`; whether those IDs survive Herdr restarts is still an open
+//! design decision documented in `docs/design/open-decisions.md`.
 
 use crate::herdr_client::{
-    HerdrApi, HerdrClient, HerdrError, PaneInfo, TabInfo, UnixSocketTransport,
+    HYBRID_REFRESHER_SUBSCRIPTIONS, HerdrApi, HerdrClient, HerdrError, HerdrEventStream, PaneInfo,
+    TabInfo, UnixSocketTransport,
 };
 use crate::labeler::{LabelCandidate, LabelPolicy};
 use crate::locks::{
@@ -24,6 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_REFRESH_STABILIZATION_DELAY: Duration = Duration::from_millis(400);
+pub const DEFAULT_FOCUS_QUIET_WINDOW: Duration = Duration::from_millis(1000);
 
 #[derive(Debug)]
 pub struct DaemonState {
@@ -31,6 +34,7 @@ pub struct DaemonState {
     locks: LockStore,
     label_policy: LabelPolicy,
     stability_policy: StabilityPolicy,
+    locks_dirty: bool,
 }
 
 impl Default for DaemonState {
@@ -46,6 +50,7 @@ impl DaemonState {
             locks,
             label_policy: LabelPolicy::default(),
             stability_policy: StabilityPolicy::default(),
+            locks_dirty: false,
         }
     }
 
@@ -59,6 +64,20 @@ impl DaemonState {
 
     pub fn locks_mut(&mut self) -> &mut LockStore {
         &mut self.locks
+    }
+
+    pub fn poll_interval(&self) -> Duration {
+        self.stability_policy.poll_interval()
+    }
+
+    fn mark_locks_dirty(&mut self) {
+        self.locks_dirty = true;
+    }
+
+    fn take_locks_dirty(&mut self) -> bool {
+        let dirty = self.locks_dirty;
+        self.locks_dirty = false;
+        dirty
     }
 }
 
@@ -74,6 +93,51 @@ impl TabRuntimeState {
             stability: StabilityState::new(stability_policy),
             last_plugin_label: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingRename {
+    tab_id: String,
+    label: String,
+    focus_generation: u64,
+}
+
+#[derive(Debug)]
+pub struct HybridRefresherState {
+    runtime: DaemonState,
+    quiet_until: Option<Instant>,
+    focus_generation: u64,
+    pending_rename: Option<PendingRename>,
+}
+
+impl HybridRefresherState {
+    pub fn new(runtime: DaemonState) -> Self {
+        Self {
+            runtime,
+            quiet_until: None,
+            focus_generation: 0,
+            pending_rename: None,
+        }
+    }
+
+    pub fn load(lock_store_path: impl AsRef<Path>) -> Result<Self, DaemonError> {
+        Ok(Self::new(DaemonState::load(lock_store_path)?))
+    }
+
+    pub fn note_focus_or_create_event(&mut self, observed_at: Instant) {
+        self.focus_generation = self.focus_generation.saturating_add(1);
+        self.quiet_until = Some(observed_at + DEFAULT_FOCUS_QUIET_WINDOW);
+        self.pending_rename = None;
+    }
+
+    fn is_quiet(&self, observed_at: Instant) -> bool {
+        self.quiet_until
+            .is_some_and(|quiet_until| observed_at < quiet_until)
+    }
+
+    pub fn poll_interval(&self) -> Duration {
+        self.runtime.poll_interval()
     }
 }
 
@@ -105,6 +169,8 @@ pub struct TabTickReport {
 pub enum TabTickAction {
     SkippedLocked,
     SkippedInactive,
+    SkippedFocusQuiet,
+    SkippedPendingCancelled,
     SkippedNoPane,
     SkippedNoCandidate,
     DeferredUnstable { candidate_label: String },
@@ -182,6 +248,7 @@ where
         let raw_candidate_label = candidate.label().to_string();
         let tab_id = tab.tab_id;
         let current_label = tab.label;
+        let persisted_plugin_label = state.locks.last_plugin_label(&tab_id).map(str::to_string);
         let runtime = state
             .tabs
             .entry(tab_id.clone())
@@ -194,10 +261,14 @@ where
 
         if let ManualLockDecision::Lock { label } = detect_manual_lock(
             &current_label,
-            runtime.last_plugin_label.as_deref(),
+            runtime
+                .last_plugin_label
+                .as_deref()
+                .or(persisted_plugin_label.as_deref()),
             stable_candidate.as_ref(),
         ) {
             state.locks.lock_tab(tab_id.clone(), Some(label.clone()));
+            state.mark_locks_dirty();
             reports.push(TabTickReport {
                 tab_id,
                 current_label,
@@ -217,19 +288,38 @@ where
                 candidate_label: raw_candidate_label.clone(),
             },
             StabilityDecision::Rename { label } => {
+                let record_label = label.clone();
                 if label == current_label {
                     runtime.last_plugin_label = Some(label.clone());
+                    if state
+                        .locks
+                        .record_plugin_label(tab_id.clone(), record_label)
+                    {
+                        state.mark_locks_dirty();
+                    }
                     TabTickAction::SkippedAlreadyCurrent { label }
                 } else {
                     herdr.rename_tab(&tab_id, &label)?;
                     let from = current_label.clone();
                     runtime.last_plugin_label = Some(label.clone());
+                    if state
+                        .locks
+                        .record_plugin_label(tab_id.clone(), record_label)
+                    {
+                        state.mark_locks_dirty();
+                    }
                     TabTickAction::Renamed { from, to: label }
                 }
             }
             StabilityDecision::NoOp { label } => {
                 if label == current_label {
                     runtime.last_plugin_label = Some(label.clone());
+                    if state
+                        .locks
+                        .record_plugin_label(tab_id.clone(), label.clone())
+                    {
+                        state.mark_locks_dirty();
+                    }
                 }
                 TabTickAction::SkippedAlreadyCurrent { label }
             }
@@ -259,10 +349,224 @@ where
     C: HerdrApi,
 {
     let report = tick(herdr, state, observed_at)?;
-    if report.has_new_lock() {
+    if report.has_new_lock() || state.take_locks_dirty() {
         state.locks.save(lock_store_path)?;
     }
     Ok(report)
+}
+
+pub fn hybrid_tick_and_save_locks<C>(
+    herdr: &mut C,
+    state: &mut HybridRefresherState,
+    lock_store_path: impl AsRef<Path>,
+    observed_at: Instant,
+) -> Result<TickReport, DaemonError>
+where
+    C: HerdrApi,
+{
+    let lock_store_path = lock_store_path.as_ref();
+
+    if state.is_quiet(observed_at) {
+        return quiet_window_tick(herdr, state);
+    }
+
+    if state.pending_rename.is_some()
+        && let Some(report) = revalidate_pending_rename(herdr, state, lock_store_path, observed_at)?
+    {
+        return Ok(report);
+    }
+
+    tick_and_save_locks(herdr, &mut state.runtime, lock_store_path, observed_at)
+}
+
+fn quiet_window_tick<C>(
+    herdr: &mut C,
+    state: &mut HybridRefresherState,
+) -> Result<TickReport, DaemonError>
+where
+    C: HerdrApi,
+{
+    let tabs = herdr.list_tabs()?;
+    let Some(tab) = tabs.into_iter().find(|tab| tab.focused) else {
+        return Ok(TickReport { tabs: Vec::new() });
+    };
+
+    if !state.runtime.locks.is_locked(&tab.tab_id)
+        && let Some(runtime) = state.runtime.tabs.get(&tab.tab_id)
+        && let Some(label) = runtime.stability.last_stable_label()
+        && label != tab.label
+    {
+        state.pending_rename = Some(PendingRename {
+            tab_id: tab.tab_id.clone(),
+            label: label.to_string(),
+            focus_generation: state.focus_generation,
+        });
+    }
+
+    Ok(TickReport {
+        tabs: vec![skipped_tab_report(tab, TabTickAction::SkippedFocusQuiet)],
+    })
+}
+
+fn revalidate_pending_rename<C>(
+    herdr: &mut C,
+    state: &mut HybridRefresherState,
+    lock_store_path: &Path,
+    observed_at: Instant,
+) -> Result<Option<TickReport>, DaemonError>
+where
+    C: HerdrApi,
+{
+    let Some(pending) = state.pending_rename.clone() else {
+        return Ok(None);
+    };
+
+    if pending.focus_generation != state.focus_generation {
+        state.pending_rename = None;
+        return Ok(None);
+    }
+
+    let Some(tab) = herdr.list_tabs()?.into_iter().find(|tab| tab.focused) else {
+        state.pending_rename = None;
+        return Ok(Some(TickReport { tabs: Vec::new() }));
+    };
+
+    if tab.tab_id != pending.tab_id
+        || tab.label == pending.label
+        || state.runtime.locks.is_locked(&tab.tab_id)
+    {
+        state.pending_rename = None;
+        return Ok(Some(TickReport {
+            tabs: vec![skipped_tab_report(
+                tab,
+                TabTickAction::SkippedPendingCancelled,
+            )],
+        }));
+    }
+
+    let panes = herdr.list_panes()?;
+    let Some(selection) = select_pane_for_tab(&panes, &tab.tab_id) else {
+        state.pending_rename = None;
+        return Ok(Some(TickReport {
+            tabs: vec![skipped_tab_report(tab, TabTickAction::SkippedNoPane)],
+        }));
+    };
+    let pane = selection.pane;
+    let process_info = if selection.inspect_process {
+        herdr.pane_process_info(&pane.pane_id).ok()
+    } else {
+        None
+    };
+    let Some(candidate) = state
+        .runtime
+        .label_policy
+        .candidate_for_pane(pane, process_info.as_ref())
+    else {
+        state.pending_rename = None;
+        return Ok(Some(TickReport {
+            tabs: vec![skipped_tab_report(
+                tab,
+                TabTickAction::SkippedPendingCancelled,
+            )],
+        }));
+    };
+    if candidate.label() != pending.label {
+        state.pending_rename = None;
+        return Ok(Some(TickReport {
+            tabs: vec![skipped_tab_report(
+                tab,
+                TabTickAction::SkippedPendingCancelled,
+            )],
+        }));
+    }
+
+    state.pending_rename = None;
+    let raw_candidate_label = candidate.label().to_string();
+    let tab_id = tab.tab_id;
+    let current_label = tab.label;
+    let persisted_plugin_label = state
+        .runtime
+        .locks
+        .last_plugin_label(&tab_id)
+        .map(str::to_string);
+    let runtime = state
+        .runtime
+        .tabs
+        .entry(tab_id.clone())
+        .or_insert_with(|| TabRuntimeState::new(state.runtime.stability_policy));
+    let stability_decision = runtime.stability.observe(candidate, observed_at);
+    let stable_label = stable_label_from_decision(&stability_decision).map(str::to_string);
+    if stable_label.as_deref() != Some(pending.label.as_str()) {
+        return Ok(Some(TickReport {
+            tabs: vec![TabTickReport {
+                tab_id,
+                current_label,
+                selected_pane_id: Some(pane.pane_id.clone()),
+                raw_candidate_label: Some(raw_candidate_label.clone()),
+                stable_candidate_label: stable_label,
+                process_info_error: None,
+                action: TabTickAction::DeferredUnstable {
+                    candidate_label: raw_candidate_label,
+                },
+            }],
+        }));
+    }
+
+    let stable_candidate = LabelCandidate::working_directory_basename(pending.label.clone());
+    let mut store_changed = false;
+    let action = if let ManualLockDecision::Lock { label } = detect_manual_lock(
+        &current_label,
+        runtime
+            .last_plugin_label
+            .as_deref()
+            .or(persisted_plugin_label.as_deref()),
+        Some(&stable_candidate),
+    ) {
+        state
+            .runtime
+            .locks
+            .lock_tab(tab_id.clone(), Some(label.clone()));
+        store_changed = true;
+        TabTickAction::SkippedManualLockCreated {
+            locked_label: label,
+        }
+    } else if pending.label == current_label {
+        runtime.last_plugin_label = Some(pending.label.clone());
+        store_changed |= state
+            .runtime
+            .locks
+            .record_plugin_label(tab_id.clone(), pending.label.clone());
+        TabTickAction::SkippedAlreadyCurrent {
+            label: pending.label.clone(),
+        }
+    } else {
+        herdr.rename_tab(&tab_id, &pending.label)?;
+        runtime.last_plugin_label = Some(pending.label.clone());
+        store_changed |= state
+            .runtime
+            .locks
+            .record_plugin_label(tab_id.clone(), pending.label.clone());
+        TabTickAction::Renamed {
+            from: current_label.clone(),
+            to: pending.label.clone(),
+        }
+    };
+
+    if store_changed {
+        state.runtime.locks.save(lock_store_path)?;
+    }
+
+    Ok(Some(TickReport {
+        tabs: vec![TabTickReport {
+            tab_id,
+            current_label,
+            selected_pane_id: Some(pane.pane_id.clone()),
+            raw_candidate_label: Some(raw_candidate_label),
+            stable_candidate_label: stable_label,
+            process_info_error: None,
+            action,
+        }],
+    }))
 }
 
 pub fn refresh_once<C>(
@@ -392,6 +696,75 @@ pub fn run_one_shot_refresh_from_env() -> Result<String, RuntimeError> {
     Ok(format!("tabby refresh: {report:?}"))
 }
 
+pub fn run_hybrid_refresher_from_env() -> Result<(), RuntimeError> {
+    let lock_store_path = lock_store_path_from_runtime()?;
+    let transport = UnixSocketTransport::from_env()?;
+    let socket_path = transport.socket_path().to_path_buf();
+    let mut client = HerdrClient::new(transport);
+    let mut events = HerdrEventStream::subscribe(&socket_path, HYBRID_REFRESHER_SUBSCRIPTIONS)?;
+    run_hybrid_refresher_loop(&mut client, &mut events, lock_store_path)?;
+    Ok(())
+}
+
+pub trait RefresherEvents {
+    fn next_event_timeout(&mut self, timeout: Duration) -> Result<Option<String>, DaemonError>;
+}
+
+impl RefresherEvents for HerdrEventStream {
+    fn next_event_timeout(&mut self, timeout: Duration) -> Result<Option<String>, DaemonError> {
+        HerdrEventStream::next_event_timeout(self, timeout)
+            .map(|event| event.map(|event| event.event))
+            .map_err(DaemonError::from)
+    }
+}
+
+pub fn run_hybrid_refresher_loop<C, E>(
+    herdr: &mut C,
+    events: &mut E,
+    lock_store_path: impl AsRef<Path>,
+) -> Result<(), DaemonError>
+where
+    C: HerdrApi,
+    E: RefresherEvents,
+{
+    let lock_store_path = lock_store_path.as_ref();
+    let mut state = HybridRefresherState::load(lock_store_path)?;
+    state.note_focus_or_create_event(Instant::now());
+    let mut next_tick_at = Instant::now();
+
+    loop {
+        let now = Instant::now();
+        if now >= next_tick_at {
+            let _ = hybrid_tick_and_save_locks(herdr, &mut state, lock_store_path, now)?;
+            next_tick_at = now + state.poll_interval();
+        }
+
+        let timeout = next_tick_at.saturating_duration_since(Instant::now());
+        if let Some(event) = events.next_event_timeout(timeout)?
+            && is_refresher_quiet_event(&event)
+        {
+            state.note_focus_or_create_event(Instant::now());
+            next_tick_at = Instant::now();
+        }
+    }
+}
+
+fn is_refresher_quiet_event(event: &str) -> bool {
+    matches!(
+        event,
+        "tab_focused"
+            | "workspace_focused"
+            | "tab_created"
+            | "workspace_created"
+            | "pane_focused"
+            | "tab.focused"
+            | "workspace.focused"
+            | "tab.created"
+            | "workspace.created"
+            | "pane.focused"
+    )
+}
+
 pub fn unlock_focused_from_env() -> Result<String, RuntimeError> {
     let lock_store_path = lock_store_path_from_runtime()?;
     let transport = UnixSocketTransport::from_env()?;
@@ -456,9 +829,9 @@ pub enum DaemonError {
 impl fmt::Display for DaemonError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Herdr(error) => write!(formatter, "daemon Herdr operation failed: {error}"),
+            Self::Herdr(error) => write!(formatter, "refresher Herdr operation failed: {error}"),
             Self::LockStore(error) => {
-                write!(formatter, "daemon lock store operation failed: {error}")
+                write!(formatter, "refresher lock store operation failed: {error}")
             }
         }
     }
@@ -506,7 +879,7 @@ impl fmt::Display for RuntimeError {
                 write!(formatter, "lock store runtime operation failed: {error}")
             }
             Self::UnlockFocused(error) => write!(formatter, "unlock-focused failed: {error}"),
-            Self::Daemon(error) => write!(formatter, "daemon failed: {error}"),
+            Self::Daemon(error) => write!(formatter, "refresher failed: {error}"),
         }
     }
 }
@@ -642,6 +1015,266 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_quiet_window_does_not_call_process_info_or_rename() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = focused_codex_and_inactive_nvim_tabs();
+        let mut state = HybridRefresherState::new(DaemonState::default());
+        state.note_focus_or_create_event(start);
+
+        let report = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("quiet tick");
+
+        assert_eq!(report.tabs[0].action, TabTickAction::SkippedFocusQuiet);
+        assert!(herdr.process_info_calls.is_empty());
+        assert!(herdr.renames.is_empty());
+    }
+
+    #[test]
+    fn hybrid_focus_event_resets_quiet_window_and_cancels_pending_rename() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut state = HybridRefresherState::new(DaemonState::default());
+
+        hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("first observation");
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("stable observation");
+        herdr.renames.clear();
+        herdr.process_info_calls.clear();
+        herdr.set_tab_label("w1:t1", "old");
+
+        state.note_focus_or_create_event(start + Duration::from_millis(600));
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(700),
+        )
+        .expect("quiet tick records pending");
+        assert!(state.pending_rename.is_some());
+
+        herdr.set_process_info(process("w1:p1", "codex", &["codex"]));
+        state.note_focus_or_create_event(start + Duration::from_millis(800));
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(1801),
+        )
+        .expect("post quiet tick");
+
+        assert!(
+            !herdr.renames.iter().any(|(_, label)| label == "nvim"),
+            "stale pending rename should be cancelled after focus reset: {:?}",
+            herdr.renames
+        );
+    }
+
+    #[test]
+    fn hybrid_pending_rename_applies_after_revalidation() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "nvim", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut state = HybridRefresherState::new(DaemonState::default());
+
+        hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("first observation");
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("stable observation");
+        state.runtime.locks = LockStore::default();
+        state
+            .runtime
+            .tabs
+            .get_mut("w1:t1")
+            .expect("runtime tab")
+            .last_plugin_label = None;
+        herdr.set_tab_label("w1:t1", "old");
+        herdr.renames.clear();
+
+        state.note_focus_or_create_event(start + Duration::from_millis(600));
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(700),
+        )
+        .expect("quiet tick records pending");
+        let report = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(1601),
+        )
+        .expect("pending apply tick");
+
+        assert_eq!(
+            report.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "old".to_string(),
+                to: "nvim".to_string()
+            }
+        );
+        assert_eq!(
+            herdr.renames,
+            vec![("w1:t1".to_string(), "nvim".to_string())]
+        );
+    }
+
+    #[test]
+    fn hybrid_persisted_plugin_baseline_detects_manual_lock_after_restart() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut first_state = DaemonState::load(&lock_path).expect("load first state");
+
+        tick_and_save_locks(&mut herdr, &mut first_state, &lock_path, start)
+            .expect("first observation");
+        tick_and_save_locks(
+            &mut herdr,
+            &mut first_state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("rename and persist baseline");
+        herdr.set_tab_label("w1:t1", "custom");
+
+        let mut restarted_state = DaemonState::load(&lock_path).expect("load restarted state");
+        let report = tick_and_save_locks(
+            &mut herdr,
+            &mut restarted_state,
+            &lock_path,
+            start + Duration::from_millis(1000),
+        )
+        .expect("restarted first observation");
+        let persisted = LockStore::load(&lock_path).expect("reload lock store");
+
+        assert_eq!(
+            report.tabs[0].action,
+            TabTickAction::SkippedManualLockCreated {
+                locked_label: "custom".to_string()
+            }
+        );
+        assert!(persisted.is_locked("w1:t1"));
+        assert_eq!(herdr.tab_label("w1:t1"), Some("custom"));
+    }
+
+    #[test]
+    fn hybrid_inactive_tabs_are_not_inspected_or_renamed() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = focused_codex_and_inactive_nvim_tabs();
+        let mut state = HybridRefresherState::new(DaemonState::default());
+
+        hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("first observation");
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("stable observation");
+
+        assert_eq!(
+            herdr.process_info_calls,
+            vec!["w1:p1".to_string(), "w1:p1".to_string()]
+        );
+        assert_eq!(
+            herdr.renames,
+            vec![("w1:t1".to_string(), "codex".to_string())]
+        );
+        assert_eq!(herdr.tab_label("w1:t2"), Some("old"));
+    }
+
+    #[test]
+    fn hybrid_stability_requires_two_consecutive_observations() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut state = HybridRefresherState::new(DaemonState::default());
+
+        hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("first observation");
+        assert!(herdr.renames.is_empty());
+
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("second observation");
+
+        assert_eq!(
+            herdr.renames,
+            vec![("w1:t1".to_string(), "nvim".to_string())]
+        );
+    }
+
+    #[test]
+    fn hybrid_manual_locks_are_respected_without_inspection_or_rename() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "custom", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut state = HybridRefresherState::new(DaemonState::default());
+        state
+            .runtime
+            .locks_mut()
+            .lock_tab("w1:t1", Some("custom".to_string()));
+
+        let report = hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("hybrid tick");
+
+        assert_eq!(report.tabs[0].action, TabTickAction::SkippedLocked);
+        assert!(herdr.process_info_calls.is_empty());
+        assert!(herdr.renames.is_empty());
+    }
+
+    #[test]
     fn manual_label_change_creates_persistent_lock() {
         let temp_dir = TestTempDir::new();
         let lock_path = temp_dir.path().join("locks.json");
@@ -651,7 +1284,7 @@ mod tests {
             vec![pane("w1:p1", "w1:t1", true, "tabby")],
         )
         .with_process_info(process("w1:p1", "nvim", &["nvim"]));
-        let mut state = DaemonState::load(&lock_path).expect("load daemon state");
+        let mut state = DaemonState::load(&lock_path).expect("load refresher state");
 
         tick(&mut herdr, &mut state, start).expect("first tick");
         tick(&mut herdr, &mut state, start + Duration::from_millis(500)).expect("rename tick");
@@ -730,13 +1363,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_locks_are_respected_when_daemon_state_is_recreated() {
+    fn persisted_locks_are_respected_when_refresher_state_is_recreated() {
         let temp_dir = TestTempDir::new();
         let lock_path = temp_dir.path().join("locks.json");
         let mut store = LockStore::default();
         store.lock_tab("w1:t1", Some("custom".to_string()));
         store.save(&lock_path).expect("save lock store");
-        let mut state = DaemonState::load(&lock_path).expect("load daemon state");
+        let mut state = DaemonState::load(&lock_path).expect("load refresher state");
         let mut herdr = FakeHerdr::new(
             vec![tab("w1:t1", "custom", true)],
             vec![pane("w1:p1", "w1:t1", true, "tabby")],
@@ -972,6 +1605,11 @@ mod tests {
             self
         }
 
+        fn set_process_info(&mut self, process_info: PaneProcessInfo) {
+            self.process_infos
+                .insert(process_info.pane_id.clone(), process_info);
+        }
+
         fn with_process_error(mut self, pane_id: &str) -> Self {
             self.process_errors.insert(pane_id.to_string());
             self
@@ -1100,7 +1738,7 @@ mod tests {
                 .as_nanos();
             let id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "tabby-daemon-test-{}-{unique}-{id}",
+                "tabby-refresher-test-{}-{unique}-{id}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("create temp dir");

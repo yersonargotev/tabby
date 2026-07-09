@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -119,6 +120,100 @@ pub struct HerdrClient<T> {
     next_request_id: u64,
 }
 
+pub const HYBRID_REFRESHER_SUBSCRIPTIONS: &[&str] = &[
+    "tab.focused",
+    "workspace.focused",
+    "tab.created",
+    "workspace.created",
+    "pane.focused",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HerdrEvent {
+    pub event: String,
+    #[serde(default)]
+    pub data: serde_json::Value,
+}
+
+pub struct HerdrEventStream {
+    reader: BufReader<UnixStream>,
+}
+
+impl HerdrEventStream {
+    #[cfg(unix)]
+    pub fn subscribe(
+        socket_path: impl AsRef<Path>,
+        subscriptions: &[&'static str],
+    ) -> Result<Self, HerdrError> {
+        let mut stream = UnixStream::connect(socket_path)?;
+        let id = "tabby-events-1";
+        let request = JsonRpcRequest {
+            id: id.to_string(),
+            method: "events.subscribe",
+            params: EventsSubscribeParams {
+                subscriptions: subscriptions
+                    .iter()
+                    .map(|subscription_type| EventSubscription { subscription_type })
+                    .collect(),
+            },
+        };
+        let request_line = serde_json::to_string(&request)?;
+        stream.write_all(request_line.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response_line = String::new();
+        let bytes_read = reader.read_line(&mut response_line)?;
+        if bytes_read == 0 {
+            return Err(HerdrError::Protocol(
+                "Herdr closed the event subscription without a response".to_string(),
+            ));
+        }
+        let started: SubscriptionStartedResult = decode_response(id, &response_line)?;
+        if started.response_type != "subscription_started" {
+            return Err(HerdrError::Protocol(format!(
+                "unexpected events.subscribe response type `{}`",
+                started.response_type
+            )));
+        }
+
+        Ok(Self { reader })
+    }
+
+    pub fn from_env(subscriptions: &[&'static str]) -> Result<Self, HerdrError> {
+        let socket_path = std::env::var_os("HERDR_SOCKET_PATH").ok_or_else(|| {
+            HerdrError::Protocol("HERDR_SOCKET_PATH is not set for Herdr socket access".to_string())
+        })?;
+        Self::subscribe(socket_path, subscriptions)
+    }
+
+    pub fn next_event_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<HerdrEvent>, HerdrError> {
+        self.reader.get_ref().set_read_timeout(Some(timeout))?;
+        let mut line = String::new();
+        match self.reader.read_line(&mut line) {
+            Ok(0) => Err(HerdrError::Protocol(
+                "Herdr closed the event subscription".to_string(),
+            )),
+            Ok(_) => serde_json::from_str(&line)
+                .map(Some)
+                .map_err(HerdrError::from),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(HerdrError::Io(error)),
+        }
+    }
+}
+
 impl<T> HerdrClient<T>
 where
     T: RpcTransport,
@@ -227,6 +322,23 @@ pub struct PaneProcessInfoParams {
 pub struct TabRenameParams {
     pub tab_id: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EventsSubscribeParams {
+    pub subscriptions: Vec<EventSubscription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EventSubscription {
+    #[serde(rename = "type")]
+    pub subscription_type: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SubscriptionStartedResult {
+    #[serde(rename = "type")]
+    response_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

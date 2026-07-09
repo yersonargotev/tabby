@@ -28,13 +28,21 @@ _Avoid_: reset, auto-unlock
 A Tab Label Candidate considered safe to apply with `tab.rename` to the currently focused unlocked tab. In the One-Shot Refresh design, the short stabilization delay happens before inspection and Tabby applies at most one candidate from the focused tab before exiting.
 _Avoid_: immediate label, debounced title
 
+**Pending Rename**:
+A Stable Label Candidate observed during a Focus Quiet Window that the Hybrid Session Refresher may apply only after revalidating that the same tab is still focused, the candidate is still current, the tab is not Manually Locked, the visible label still differs, and no newer focus event reset the window.
+_Avoid_: queued title, delayed rename, cached label
+
 **Inactive Tab**:
-A Herdr tab that Herdr does not currently report as focused. Tabby does not inspect processes or apply renames to Inactive Tabs during a One-Shot Refresh; their last visible label is preserved until a later refresh sees them focused.
+A Herdr tab that Herdr does not currently report as focused. The Hybrid Session Refresher does not inspect processes or apply renames to Inactive Tabs; their last visible label is preserved until a later refresh sees them focused and outside the Focus Quiet Window.
 _Avoid_: background tab, hidden tab
 
 **Navigation Stability**:
 The user-facing guarantee that clicking or otherwise navigating between Herdr tabs must not be disrupted by Tabby's automatic label updates. Navigation Stability is more important than immediate label freshness.
 _Avoid_: click workaround, UI quirk, placebo fix
+
+**Focus Quiet Window**:
+A short interval after a Herdr tab or workspace focus change during which the Hybrid Session Refresher must not call `tab.rename` or `pane.process_info`. The window resets on each new focus change; the accepted default is 1000 ms.
+_Avoid_: debounce, delay, cooldown
 
 **Refresh Trigger**:
 A discrete Herdr navigation or lifecycle event, or an explicit user action, that permits Tabby to evaluate whether the focused tab label should change. Accepted Refresh Triggers are tab focus, workspace focus, tab creation, workspace creation, and manual refresh.
@@ -61,5 +69,9 @@ A running Herdr server context identified by the socket that plugin commands use
 _Avoid_: terminal session, shell session
 
 **Tabby Session Daemon**:
-A legacy long-running Tabby process from the superseded polling design. Current Tabby behavior should use short One-Shot Refresh processes instead of starting a Tabby Session Daemon.
+A legacy long-running Tabby process from the superseded pre-hybrid polling design. Use Hybrid Session Refresher for current behavior.
 _Avoid_: current refresh process, plugin action process
+
+**Hybrid Session Refresher**:
+A long-running Tabby process scoped to one Herdr Session that restores automatic label freshness while preserving Navigation Stability. It may observe the focused tab continuously, but it must not inspect or rename Inactive Tabs, and it must suppress or defer `tab.rename` around tab/workspace focus changes until the focused tab has settled.
+_Avoid_: old daemon, polling daemon, background renamer
