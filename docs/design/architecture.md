@@ -21,8 +21,8 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
 
 1. Run one Hybrid Session Refresher per Herdr Session, started idempotently by `ensure-started`.
 2. Subscribe to `tab.focused`, `workspace.focused`, `tab.created`, `workspace.created`, and `pane.focused`.
-3. Reset a 1000 ms Focus Quiet Window on each focus/create event; during the window, do not call `pane.process_info` or `tab.rename`.
-4. Outside the quiet window, read only the focused tab; inactive tabs are not inspected or renamed.
+3. Reset a 1000 ms Focus Quiet Window on each focus/create event; during the window, do not call any Herdr API.
+4. Outside the quiet window, read only the focused tab on a low-cadence 5 second idle interval; inactive tabs are not inspected or renamed.
 5. Select the focused tab's Focused Pane.
 6. Ask the Process Inspector for foreground process details for that pane.
 7. Use Label Policy to derive a Tab Label Candidate:
@@ -63,7 +63,7 @@ Expected CLI/actions:
 
 Tabby prioritizes Navigation Stability while restoring automatic label freshness. The normal update path is one Hybrid Session Refresher per Herdr Session. Manifest startup hooks are limited to `workspace.created` and `tab.created`, both running `ensure-started`; focus events are handled inside the live refresher instead of spawning processes.
 
-The refresher subscribes to `workspace.focused`, `tab.focused`, `pane.focused`, `workspace.created`, and `tab.created`. Every such event resets the 1000 ms Focus Quiet Window. Pane output changes and layout updates remain intentionally out of scope.
+The refresher subscribes to `workspace.focused`, `tab.focused`, `pane.focused`, `workspace.created`, and `tab.created`. Every such event resets the 1000 ms Focus Quiet Window and defers the next automatic read until the window expires. Pane output changes and layout updates remain intentionally out of scope.
 
 `tabby install` only refreshes Herdr registration. `tabby install --start` refreshes registration and ensures the current Herdr Session refresher is running.
 

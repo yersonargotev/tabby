@@ -29,7 +29,7 @@ A Tab Label Candidate considered safe to apply with `tab.rename` to the currentl
 _Avoid_: immediate label, debounced title
 
 **Pending Rename**:
-A Stable Label Candidate observed during a Focus Quiet Window that the Hybrid Session Refresher may apply only after revalidating that the same tab is still focused, the candidate is still current, the tab is not Manually Locked, the visible label still differs, and no newer focus event reset the window.
+A Stable Label Candidate held by the Hybrid Session Refresher for possible later application. Current hybrid behavior does not discover new Pending Renames during the Focus Quiet Window because the window performs no Herdr API calls; after quiet, Tabby revalidates by reading the focused tab normally.
 _Avoid_: queued title, delayed rename, cached label
 
 **Inactive Tab**:
@@ -41,7 +41,7 @@ The user-facing guarantee that clicking or otherwise navigating between Herdr ta
 _Avoid_: click workaround, UI quirk, placebo fix
 
 **Focus Quiet Window**:
-A short interval after a Herdr tab or workspace focus change during which the Hybrid Session Refresher must not call `tab.rename` or `pane.process_info`. The window resets on each new focus change; the accepted default is 1000 ms.
+A short interval after a Herdr tab or workspace focus change during which the Hybrid Session Refresher must not call any Herdr API, including `tab.list`, `pane.list`, `pane.process_info`, or `tab.rename`. The window resets on each new focus change; the accepted default is 1000 ms.
 _Avoid_: debounce, delay, cooldown
 
 **Refresh Trigger**:
@@ -73,5 +73,5 @@ A legacy long-running Tabby process from the superseded pre-hybrid polling desig
 _Avoid_: current refresh process, plugin action process
 
 **Hybrid Session Refresher**:
-A long-running Tabby process scoped to one Herdr Session that restores automatic label freshness while preserving Navigation Stability. It may observe the focused tab continuously, but it must not inspect or rename Inactive Tabs, and it must suppress or defer `tab.rename` around tab/workspace focus changes until the focused tab has settled.
+A long-running Tabby process scoped to one Herdr Session that restores automatic label freshness while preserving Navigation Stability. It observes the focused tab on a low-cadence idle interval, never inspects or renames Inactive Tabs, and performs no Herdr API calls during the Focus Quiet Window.
 _Avoid_: old daemon, polling daemon, background renamer
