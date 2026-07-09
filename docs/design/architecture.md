@@ -1,6 +1,6 @@
 # Herdr Tab Auto-Renamer Architecture Proposal
 
-Status: initial design, no implementation yet.
+Status: implemented design; ADR 0008 supersedes the earlier polling-daemon startup model.
 
 ## Goal
 
@@ -19,11 +19,12 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
 
 ## Core behavior
 
-1. Poll Herdr state every 500 ms.
-2. Skip inactive tabs without process inspection or renaming.
-3. For the focused tab, select its Focused Pane.
-4. Ask the Process Inspector for foreground process details for that pane.
-5. Use Label Policy to derive a Tab Label Candidate:
+1. Run only from an accepted Refresh Trigger: workspace created/focused, tab created/focused, or manual refresh.
+2. Wait briefly for focus/process state to settle.
+3. Read the tab focused at refresh time; inactive tabs are not inspected or renamed.
+4. Select the focused tab's Focused Pane.
+5. Ask the Process Inspector for foreground process details for that pane.
+6. Use Label Policy to derive a Tab Label Candidate:
    - known interactive apps: `nvim`, `lazygit`, `codex`, `claude`;
    - useful runner/subcommand pairs: `pnpm dev`, `npm test`, `go test`, `cargo run`;
    - ignore shells, opaque wrappers, and transient processes;
@@ -33,14 +34,14 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
    - keep the last Significant Command for a 2 second grace period before falling back to cwd;
    - skip no-op renames.
 7. Detect and preserve Manually Locked Tabs.
-8. Rename only the focused unlocked tab when it has a stable label.
+8. Apply at most one `tab.rename` to the focused unlocked tab, then exit.
 
 ## Rust module shape
 
 Proposed files/modules for a single Rust crate:
 
 - `src/main.rs` — CLI entrypoint and command dispatch.
-- `src/daemon.rs` — daemon loop and orchestration.
+- `src/daemon.rs` — one-shot refresh orchestration plus legacy daemon-loop internals kept out of normal CLI paths.
 - `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client and DTOs.
 - `src/process_inspector.rs` — wrapper around `pane.process_info`; failure returns no Significant Command and allows cwd fallback.
 - `src/labeler.rs` — Label Policy and candidate derivation.
@@ -50,25 +51,22 @@ Proposed files/modules for a single Rust crate:
 
 Expected CLI/actions:
 
-- daemon/start command for Herdr autostart;
-- `ensure-started` command as the idempotent startup boundary for install, hooks, and the user-facing Herdr `start` action;
-- `install --start` for explicit current Herdr Session startup after relinking;
+- `refresh` for a One-Shot Refresh after a manual action or accepted Herdr trigger;
+- `install` to relink/register the Homebrew-managed plugin without launching a long-running process;
 - `unlock-focused` to remove the focused tab from the persisted lock store;
 - `unlock-all` to clear all persisted manual locks.
 
-## Session startup model
+## Refresh trigger model
 
-Tabby runs one Tabby Session Daemon per Herdr Session. Plain `tabby install` only relinks/registers the Homebrew-managed plugin and must not silently launch a long-running process. Users who want immediate current Herdr Session activation use `tabby install --start`, which delegates to `tabby ensure-started`.
+Tabby prioritizes Navigation Stability over label freshness. It no longer keeps a continuously polling Tabby Session Daemon as the normal update path.
 
-`ensure-started` is the only normal startup boundary. It derives a per-socket session key, acquires plugin-owned daemon state under `daemons/<session_key>.lock`, validates any existing `daemons/<session_key>.json` metadata, and spawns detached `tabby start` only when no matching live daemon exists. The lower-level `tabby start` command still runs the daemon loop, but Herdr manifests should not invoke it directly.
+Accepted Refresh Triggers are `workspace.created`, `workspace.focused`, `tab.created`, `tab.focused`, and the manual `Refresh Tabby Label` action. Each trigger runs `tabby refresh`, waits briefly for focus/process state to settle, selects the tab focused at refresh time, inspects only that tab's selected pane, applies at most one `tab.rename`, and exits. Pane output changes, layout updates, and continuous polling are intentionally not Refresh Triggers.
 
-Herdr manifests should keep a single user-facing `start` action id for compatibility and recovery, but that action should run `ensure-started`. Initial lifecycle hooks are `workspace.created` and `tab.created`, both also running `ensure-started`. `pane.created` and focus hooks are deferred unless real Herdr verification proves the initial hook set does not start Tabby early enough.
-
-Herdr 0.7.3 has no documented session-start/autostart hook, so restored sessions may not start Tabby until a supported creation hook fires or the user explicitly starts it. That limitation is intentional and documented rather than hidden behind noisy focus hooks.
+`tabby install` only refreshes Herdr registration. It does not start daemons and does not clean up stale daemon metadata from older releases; old local daemon cleanup is an operator verification step, not product behavior.
 
 ## Manual lock semantics
 
-A tab becomes Manually Locked when its current label changes to a value that is neither the plugin's last-applied/last-seen label nor the current Stable Label Candidate. Locks persist across daemon/plugin restarts. Users unlock explicitly with `unlock-focused` or `unlock-all`; there is no implicit auto-unlock in v1.
+Manual locks persist across plugin runs. Users unlock explicitly with `unlock-focused` or `unlock-all`; there is no implicit auto-unlock in v1. One-shot refreshes respect persisted locks before inspecting panes or renaming.
 
 ## Distribution model
 

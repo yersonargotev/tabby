@@ -1,6 +1,6 @@
 # Tabby
 
-Tabby is a Herdr plugin that keeps tab labels meaningful. It watches Herdr tabs, prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, and falls back to the working-directory basename when no significant command is running.
+Tabby is a Herdr plugin that keeps tab labels meaningful. It refreshes labels from explicit Herdr triggers, prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, and falls back to the working-directory basename when no significant command is running.
 
 ## Quick path
 
@@ -11,14 +11,14 @@ brew install yersonargotev/tap/tabby
 tabby install
 ```
 
-Start the Tabby Session Daemon for the current Herdr Session explicitly:
+Refresh the focused tab label manually when you want an immediate update:
 
 ```sh
-tabby install --start
-herdr plugin action invoke start --plugin yersonargotev.tabby
+tabby refresh
+herdr plugin action invoke refresh --plugin yersonargotev.tabby
 ```
 
-For the full install, verification, trust-model, stop, uninstall, and rollback guide, see [`docs/install.md`](docs/install.md).
+For the full install, verification, trust-model, uninstall, and rollback guide, see [`docs/install.md`](docs/install.md).
 
 ## What Tabby does
 
@@ -33,28 +33,24 @@ It also avoids common shell and wrapper processes such as `zsh`, `bash`, `tmux`,
 
 ## Behavior details
 
-- Polls Herdr state and renames the focused unlocked tab when the candidate label is stable.
+- Runs a One-Shot Refresh after accepted Herdr triggers instead of keeping a polling daemon alive.
+- Waits briefly for focus/process state to settle, then inspects only the tab focused at refresh time.
+- Applies at most one automatic `tab.rename` per refresh and then exits.
 - Leaves inactive tab labels unchanged so Tabby does not rewrite the tab bar while the user is navigating between tabs.
-- Requires repeated observations before applying a label to reduce flapping.
-- Keeps the last Significant Command briefly before falling back to a cwd label.
-- Treats user-edited tab labels as Manually Locked Tabs.
-- Persists manual locks across daemon restarts until an unlock action clears them.
+- Treats user-edited labels as manual locks after Tabby has established a plugin label baseline, and persists those locks until an unlock action clears them.
 
 Project vocabulary and domain rules live in [`CONTEXT.md`](CONTEXT.md).
 
 ## Commands
 
 ```text
-Usage: tabby <daemon|start|ensure-started|install [--start]|unlock-focused|unlock-all>
+Usage: tabby <refresh|install|unlock-focused|unlock-all>
 ```
 
 | Command | Purpose |
 | --- | --- |
-| `tabby start` | Low-level command that runs the long-running Herdr rename loop. |
-| `tabby daemon` | Alias for the same low-level daemon loop. |
-| `tabby ensure-started` | Idempotently start one Tabby Session Daemon for the current Herdr Session. |
-| `tabby install` | Refresh Herdr registration for the current Homebrew-installed package without starting a daemon. |
-| `tabby install --start` | Refresh registration, then idempotently start the Tabby Session Daemon for the current Herdr Session. |
+| `tabby refresh` | Wait briefly, inspect the focused Herdr tab, apply at most one label refresh, and exit. |
+| `tabby install` | Refresh Herdr registration for the current Homebrew-installed package; it does not start a daemon. |
 | `tabby unlock-focused` | Clear the manual lock for the focused Herdr tab. |
 | `tabby unlock-all` | Clear all persisted manual locks. |
 
@@ -75,9 +71,11 @@ Run the focused local checks before opening a PR:
 
 ```sh
 cargo fmt -- --check
+git diff --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 python3 scripts/check-herdr-manifests.py
+cargo build
 ```
 
 For release planning, also run:
@@ -88,7 +86,7 @@ dist plan
 
 ## Release notes
 
-Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. After install or upgrade, `tabby install` refreshes Herdr registration so stale Homebrew Cellar paths are replaced with the current package path; use `tabby install --start` when you also want to start the Tabby Session Daemon for the current Herdr Session.
+Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. After install or upgrade, `tabby install` refreshes Herdr registration so stale Homebrew Cellar paths are replaced with the current package path. Label updates come from `tabby refresh`, invoked by the manual action and by Herdr focus/creation events.
 
 Release setup and tagging details live in [`docs/release.md`](docs/release.md). The development and release manifests are kept aligned by [`scripts/check-herdr-manifests.py`](scripts/check-herdr-manifests.py).
 
@@ -96,7 +94,7 @@ Release setup and tagging details live in [`docs/release.md`](docs/release.md). 
 
 | File | Use |
 | --- | --- |
-| [`docs/install.md`](docs/install.md) | User install, verification, trust model, stop, uninstall, and rollback. |
+| [`docs/install.md`](docs/install.md) | User install, verification, trust model, uninstall, and rollback. |
 | [`docs/release.md`](docs/release.md) | Maintainer release process and required GitHub secret. |
 | [`docs/design/architecture.md`](docs/design/architecture.md) | Architecture and module responsibilities. |
 | [`docs/adr/`](docs/adr/) | Accepted architecture decisions. |

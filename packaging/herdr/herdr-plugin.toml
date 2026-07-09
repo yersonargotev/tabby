@@ -13,10 +13,10 @@ platforms = ["macos"]
 # by the same Homebrew package, not target/debug/tabby or an ambiguous PATH lookup.
 
 [[actions]]
-id = "start"
-title = "Start Tabby Session Daemon"
-contexts = ["workspace"]
-command = ["../../bin/tabby", "ensure-started"]
+id = "refresh"
+title = "Refresh Tabby Label"
+contexts = ["tab", "workspace"]
+command = ["../../bin/tabby", "refresh"]
 
 [[actions]]
 id = "unlock-focused"
@@ -32,8 +32,16 @@ command = ["../../bin/tabby", "unlock-all"]
 
 [[events]]
 on = "workspace.created"
-command = ["../../bin/tabby", "ensure-started"]
+command = ["../../bin/tabby", "refresh"]
+
+[[events]]
+on = "workspace.focused"
+command = ["../../bin/tabby", "refresh"]
 
 [[events]]
 on = "tab.created"
-command = ["../../bin/tabby", "ensure-started"]
+command = ["../../bin/tabby", "refresh"]
+
+[[events]]
+on = "tab.focused"
+command = ["../../bin/tabby", "refresh"]

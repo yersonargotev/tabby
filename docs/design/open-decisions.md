@@ -56,6 +56,8 @@ Decision: keep `TABBY_LOCK_STORE_PATH` as the highest-priority explicit override
 
 ## 8. Plugin startup for current and future Herdr Sessions
 
+> This section is historical and superseded by ADR 0008 / the One-Shot Refresh update below for current product behavior.
+
 2026-07-08 grilling resolved the install/start boundary:
 
 - Plain `tabby install` remains relink/registration only and must not launch a long-running daemon implicitly.
@@ -130,3 +132,14 @@ Still unresolved in this design session:
 - If any check fails, treat the metadata as stale and allow `ensure-started` to replace it while holding the per-session lock.
 - Do not add a heartbeat or daemon control socket in v1; that would add a larger IPC surface than this iteration needs.
 - Document this as best-effort liveness detection.
+
+## 2026-07-08 — One-Shot Refresh supersedes daemon startup model
+
+ADR 0008 supersedes the earlier `ensure-started`/`install --start` daemon-startup decisions for normal product behavior. Tabby now prioritizes Navigation Stability over label freshness:
+
+- `tabby refresh` is the automatic/manual refresh boundary.
+- `tabby install` only relinks or updates the Herdr plugin registration.
+- `ensure-started`, `install --start`, and the user-facing `start` action are removed from the public CLI/manifest contract.
+- Herdr manifests trigger `refresh` from `workspace.created`, `workspace.focused`, `tab.created`, and `tab.focused`.
+- Continuous polling, pane output changes, and layout updates are rejected refresh mechanisms.
+- Cleanup of old local `tabby start` processes or `daemons/` metadata from previous releases is an explicit operator verification step, not install-time product behavior.
