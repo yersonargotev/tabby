@@ -5,19 +5,15 @@ pub mod labeler;
 pub mod locks;
 pub mod paths;
 pub mod stability;
-pub mod startup;
 
 use std::fmt;
 
-pub const USAGE: &str =
-    "Usage: tabby <daemon|start|ensure-started|install [--start]|unlock-focused|unlock-all>";
+pub const USAGE: &str = "Usage: tabby <refresh|install|unlock-focused|unlock-all>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    Daemon,
-    Start,
-    EnsureStarted,
-    Install { start: bool },
+    Refresh,
+    Install,
     UnlockFocused,
     UnlockAll,
     Help,
@@ -49,7 +45,6 @@ impl std::error::Error for CliError {}
 pub enum CommandError {
     Runtime(daemon::RuntimeError),
     Install(install::InstallError),
-    Startup(startup::StartupError),
 }
 
 impl fmt::Display for CommandError {
@@ -57,7 +52,6 @@ impl fmt::Display for CommandError {
         match self {
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Install(error) => write!(formatter, "install failed: {error}"),
-            Self::Startup(error) => write!(formatter, "startup failed: {error}"),
         }
     }
 }
@@ -67,7 +61,6 @@ impl std::error::Error for CommandError {
         match self {
             Self::Runtime(error) => Some(error),
             Self::Install(error) => Some(error),
-            Self::Startup(error) => Some(error),
         }
     }
 }
@@ -81,12 +74,6 @@ impl From<daemon::RuntimeError> for CommandError {
 impl From<install::InstallError> for CommandError {
     fn from(error: install::InstallError) -> Self {
         Self::Install(error)
-    }
-}
-
-impl From<startup::StartupError> for CommandError {
-    fn from(error: startup::StartupError) -> Self {
-        Self::Startup(error)
     }
 }
 
@@ -104,25 +91,13 @@ where
     let command = args.next().unwrap_or_else(|| "help".to_string());
 
     match command.as_str() {
-        "install" => {
-            let start = match args.next() {
-                Some(argument) if argument == "--start" => true,
-                Some(argument) => return Err(CliError::UnexpectedArgument { command, argument }),
-                None => false,
-            };
-            if let Some(argument) = args.next() {
-                return Err(CliError::UnexpectedArgument { command, argument });
-            }
-            Ok(Command::Install { start })
-        }
-        "daemon" | "start" | "ensure-started" | "unlock-focused" | "unlock-all" => {
+        "refresh" | "install" | "unlock-focused" | "unlock-all" => {
             if let Some(argument) = args.next() {
                 return Err(CliError::UnexpectedArgument { command, argument });
             }
             match command.as_str() {
-                "daemon" => Ok(Command::Daemon),
-                "start" => Ok(Command::Start),
-                "ensure-started" => Ok(Command::EnsureStarted),
+                "refresh" => Ok(Command::Refresh),
+                "install" => Ok(Command::Install),
                 "unlock-focused" => Ok(Command::UnlockFocused),
                 "unlock-all" => Ok(Command::UnlockAll),
                 _ => unreachable!(),
@@ -135,15 +110,8 @@ where
 
 pub fn run_stub(command: Command) -> CommandOutcome {
     let message = match command {
-        Command::Daemon | Command::Start => {
-            "tabby daemon runtime: use run_command to start the rename loop"
-        }
-        Command::EnsureStarted => {
-            "tabby ensure-started runtime: use run_command to start one Tabby Session Daemon"
-        }
-        Command::Install { .. } => {
-            "tabby install runtime: use run_command to relink the Herdr plugin"
-        }
+        Command::Refresh => "tabby refresh runtime: use run_command for a one-shot label refresh",
+        Command::Install => "tabby install runtime: use run_command to relink the Herdr plugin",
         Command::UnlockFocused => {
             "tabby unlock-focused runtime: use run_command with injected state path"
         }
@@ -156,20 +124,8 @@ pub fn run_stub(command: Command) -> CommandOutcome {
 
 pub fn run_command(command: Command) -> Result<String, CommandError> {
     match command {
-        Command::Daemon | Command::Start => {
-            daemon::run_daemon_loop_from_env()?;
-            Ok("tabby daemon stopped".to_string())
-        }
-        Command::EnsureStarted => startup::ensure_started_from_env().map_err(CommandError::from),
-        Command::Install { start } => {
-            let install_message = install::relink_from_current_exe()?;
-            if start {
-                let startup_message = startup::ensure_started_from_env()?;
-                Ok(format!("{install_message}\n{startup_message}"))
-            } else {
-                Ok(install_message)
-            }
-        }
+        Command::Refresh => daemon::run_one_shot_refresh_from_env().map_err(CommandError::from),
+        Command::Install => install::relink_from_current_exe().map_err(CommandError::from),
         Command::UnlockFocused => daemon::unlock_focused_from_env().map_err(CommandError::from),
         Command::UnlockAll => daemon::unlock_all_from_env().map_err(CommandError::from),
         Command::Help => Ok(USAGE.to_string()),
@@ -181,32 +137,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_daemon_and_start_commands() {
-        assert_eq!(parse_command(["daemon"]), Ok(Command::Daemon));
-        assert_eq!(parse_command(["start"]), Ok(Command::Start));
+    fn parses_refresh_command() {
+        assert_eq!(parse_command(["refresh"]), Ok(Command::Refresh));
     }
 
     #[test]
     fn parses_install_command() {
-        assert_eq!(
-            parse_command(["install"]),
-            Ok(Command::Install { start: false })
-        );
+        assert_eq!(parse_command(["install"]), Ok(Command::Install));
     }
 
     #[test]
-    fn parses_install_start_command() {
-        assert_eq!(
-            parse_command(["install", "--start"]),
-            Ok(Command::Install { start: true })
-        );
-    }
-
-    #[test]
-    fn parses_ensure_started_command() {
+    fn rejects_removed_daemon_startup_commands() {
         assert_eq!(
             parse_command(["ensure-started"]),
-            Ok(Command::EnsureStarted)
+            Err(CliError::UnknownCommand("ensure-started".to_string()))
+        );
+        assert_eq!(
+            parse_command(["start"]),
+            Err(CliError::UnknownCommand("start".to_string()))
+        );
+        assert_eq!(
+            parse_command(["daemon"]),
+            Err(CliError::UnknownCommand("daemon".to_string()))
         );
     }
 
@@ -243,17 +195,17 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_command(["install", "--start", "again"]),
+            parse_command(["install", "--start"]),
             Err(CliError::UnexpectedArgument {
                 command: "install".to_string(),
-                argument: "again".to_string(),
+                argument: "--start".to_string(),
             })
         );
     }
 
     #[test]
-    fn daemon_stub_points_to_runtime_command() {
-        let outcome = run_stub(Command::Daemon);
-        assert!(outcome.message.contains("run_command"));
+    fn refresh_stub_points_to_runtime_command() {
+        let outcome = run_stub(Command::Refresh);
+        assert!(outcome.message.contains("one-shot label refresh"));
     }
 }

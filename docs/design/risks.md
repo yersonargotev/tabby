@@ -6,7 +6,7 @@ Package runners and wrappers may appear as `node`, shell, or another transient p
 
 ## Tab labels may flap
 
-Fast foreground process changes can cause noisy labels. Mitigation: poll every 500 ms, require two consecutive observations, and use a 2 second grace period before command-to-cwd fallback.
+Fast foreground process changes can cause noisy labels. Mitigation: wait briefly during each One-Shot Refresh before inspecting focus/process state, and prefer Navigation Stability over immediate label freshness.
 
 ## Manual lock persistence can surprise users
 
@@ -18,7 +18,7 @@ Inactive tabs may not expose a reliable focused pane. Mitigation: only inspect a
 
 ## Auto-renames can interfere with tab navigation
 
-`tab.rename` mutates Herdr's tab bar. If Tabby rewrites inactive tabs while the user is clicking between tabs, the tab bar can shift or re-render during navigation. Mitigation: the daemon skips inactive tabs entirely and applies renames only to the focused unlocked tab.
+`tab.rename` mutates Herdr's tab bar. If Tabby performs API work while the user is clicking between tabs, the tab bar can shift or re-render during navigation. Mitigation: remove the continuously polling daemon from normal operation; each trigger runs one short refresh, inspects only the tab focused after a short delay, applies at most one rename, and exits.
 
 ## Plugin trust and installation risk
 
@@ -28,6 +28,6 @@ Herdr plugins run as normal unsandboxed user code. Mitigation: local linking fir
 
 Herdr APIs may change or expose platform-specific fields differently. Mitigation: keep Herdr client isolated, include manual compatibility checks, and treat official docs as the source of truth.
 
-## Restored Herdr Sessions may not auto-start Tabby immediately
+## Restored Herdr Sessions may have stale labels until a trigger fires
 
-Herdr 0.7.3 has documented plugin lifecycle hooks for creation/focus events, but no documented Herdr Session-start, server-started, or autostart daemon hook. If Herdr restores a session without emitting the `workspace.created` or `tab.created` hooks Tabby uses, the daemon may not start until explicit user action or later lifecycle activity. Mitigation: document the limitation, support `tabby install --start` for the current Herdr Session, keep the manual `start` action for recovery, and keep a draft upstream Herdr autostart/session-start request in `docs/design/upstream-herdr-autostart-issue.md`. Filing that upstream issue is recommended but not blocking for Tabby's implementation.
+Herdr 0.7.3 has documented plugin lifecycle hooks for creation/focus events, but no documented Herdr Session-start or server-started hook. If Herdr restores a session without emitting one of Tabby's accepted Refresh Triggers, labels may remain stale until focus/creation activity or the manual refresh action. Mitigation: document the freshness tradeoff and keep Navigation Stability higher priority than always-current labels.

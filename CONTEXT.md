@@ -1,6 +1,6 @@
 # Herdr Tab Auto-Renamer
 
-This context describes a Herdr plugin that keeps tab labels useful by deriving them from the focused tab's meaningful foreground activity, falling back to that tab's focused pane working directory name. Tabby only auto-renames the currently focused Herdr tab; inactive tabs keep their last label until focused again so the tab bar stays stable during navigation.
+This context describes a Herdr plugin that keeps tab labels useful by deriving them from the focused tab's meaningful foreground activity, falling back to that tab's focused pane working directory name. Tabby prioritizes mouse tab navigation over label freshness; automatic labels may lag rather than disturbing clicks in the tab bar.
 
 ## Language
 
@@ -17,7 +17,7 @@ The final path component of the focused pane's current working directory, used o
 _Avoid_: full path, cwd label
 
 **Manually Locked Tab**:
-A Herdr tab whose user-facing label changed outside the plugin's own rename operation, so the plugin must stop auto-renaming it. Manual locks persist across plugin or daemon restarts until an explicit unlock mechanism removes them.
+A Herdr tab whose user-facing label changed outside the plugin's own rename operation after Tabby has established a plugin-label baseline, so the plugin must stop auto-renaming it. Manual locks persist across plugin runs until an explicit unlock mechanism removes them.
 _Avoid_: manual rename, ignored tab, disabled tab
 
 **Unlock Action**:
@@ -25,12 +25,24 @@ A user-invoked plugin action that removes one or more Manually Locked Tabs from 
 _Avoid_: reset, auto-unlock
 
 **Stable Label Candidate**:
-A Tab Label Candidate that has survived the plugin's anti-flapping checks and is safe to apply with `tab.rename` to the currently focused unlocked tab. The initial policy is polling every 500 ms, requiring two consecutive observations, and keeping the last Significant Command for a 2 second grace period before falling back to Working Directory Basename.
+A Tab Label Candidate considered safe to apply with `tab.rename` to the currently focused unlocked tab. In the One-Shot Refresh design, the short stabilization delay happens before inspection and Tabby applies at most one candidate from the focused tab before exiting.
 _Avoid_: immediate label, debounced title
 
 **Inactive Tab**:
-A Herdr tab that Herdr does not currently report as focused. Tabby does not inspect processes or apply renames to Inactive Tabs during the daemon loop; their last visible label is preserved until the tab becomes focused.
+A Herdr tab that Herdr does not currently report as focused. Tabby does not inspect processes or apply renames to Inactive Tabs during a One-Shot Refresh; their last visible label is preserved until a later refresh sees them focused.
 _Avoid_: background tab, hidden tab
+
+**Navigation Stability**:
+The user-facing guarantee that clicking or otherwise navigating between Herdr tabs must not be disrupted by Tabby's automatic label updates. Navigation Stability is more important than immediate label freshness.
+_Avoid_: click workaround, UI quirk, placebo fix
+
+**Refresh Trigger**:
+A discrete Herdr navigation or lifecycle event, or an explicit user action, that permits Tabby to evaluate whether the focused tab label should change. Accepted Refresh Triggers are tab focus, workspace focus, tab creation, workspace creation, and manual refresh.
+_Avoid_: polling signal, output event, every tick
+
+**One-Shot Refresh**:
+A bounded automatic label refresh attempt started by a Refresh Trigger. It may wait briefly for the focused tab to settle, inspect the focused tab, and apply at most one automatic label update before ending.
+_Avoid_: daemon loop, background polling, continuous refresh
 
 **Focused Pane**:
 The pane within the focused tab that Herdr reports as focused. If no pane in the focused tab is reported as focused, the plugin may use the first listed pane only for Working Directory Basename fallback.
@@ -49,5 +61,5 @@ A running Herdr server context identified by the socket that plugin commands use
 _Avoid_: terminal session, shell session
 
 **Tabby Session Daemon**:
-A long-running Tabby process responsible for keeping tab labels updated within one Herdr Session. There should be at most one active Tabby Session Daemon per Herdr Session.
-_Avoid_: plugin action process, background job
+A legacy long-running Tabby process from the superseded polling design. Current Tabby behavior should use short One-Shot Refresh processes instead of starting a Tabby Session Daemon.
+_Avoid_: current refresh process, plugin action process

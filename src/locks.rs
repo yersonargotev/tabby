@@ -71,6 +71,8 @@ impl ManualLock {
 pub struct LockStore {
     version: u8,
     locks: BTreeMap<String, ManualLock>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    last_plugin_labels: BTreeMap<String, String>,
 }
 
 impl Default for LockStore {
@@ -78,6 +80,7 @@ impl Default for LockStore {
         Self {
             version: 1,
             locks: BTreeMap::new(),
+            last_plugin_labels: BTreeMap::new(),
         }
     }
 }
@@ -122,6 +125,24 @@ impl LockStore {
 
     pub fn is_locked(&self, tab_id: &str) -> bool {
         self.locks.contains_key(tab_id)
+    }
+
+    pub fn last_plugin_label(&self, tab_id: &str) -> Option<&str> {
+        self.last_plugin_labels.get(tab_id).map(String::as_str)
+    }
+
+    pub fn record_plugin_label(
+        &mut self,
+        tab_id: impl Into<String>,
+        label: impl Into<String>,
+    ) -> bool {
+        let tab_id = tab_id.into();
+        let label = label.into();
+        if self.last_plugin_labels.get(&tab_id) == Some(&label) {
+            return false;
+        }
+        self.last_plugin_labels.insert(tab_id, label);
+        true
     }
 
     pub fn unlock_tab(&mut self, tab_id: &str) -> bool {

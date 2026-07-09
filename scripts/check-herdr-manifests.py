@@ -94,8 +94,17 @@ def main() -> int:
                 f"{RELEASE_MANIFEST} has {release.get(key)!r}"
             )
 
+    expected_actions = {"refresh", "unlock-focused", "unlock-all"}
     dev_actions = action_map(dev)
     release_actions = action_map(release)
+    if set(dev_actions) != expected_actions:
+        errors.append(
+            f"dev action ids must be {sorted(expected_actions)}, got {sorted(dev_actions)}"
+        )
+    if set(release_actions) != expected_actions:
+        errors.append(
+            f"release action ids must be {sorted(expected_actions)}, got {sorted(release_actions)}"
+        )
     if set(dev_actions) != set(release_actions):
         errors.append(
             "action ids differ: "
@@ -121,10 +130,10 @@ def main() -> int:
             action_id,
             dev_command,
             release_command,
-            ["ensure-started"] if action_id == "start" else None,
+            ["refresh"] if action_id == "refresh" else None,
         )
 
-    expected_events = {"workspace.created", "tab.created"}
+    expected_events = {"workspace.created", "workspace.focused", "tab.created", "tab.focused"}
     dev_events = event_map(dev)
     release_events = event_map(release)
     if set(dev_events) != expected_events:
@@ -158,7 +167,7 @@ def main() -> int:
             event_name,
             dev_command,
             release_command,
-            ["ensure-started"],
+            ["refresh"],
         )
 
     if errors:

@@ -83,3 +83,7 @@ Implement Tabby startup as an explicit, idempotent per Herdr Session flow:
   - Repeated Herdr `start` action invocations remain idempotent.
   - `workspace.created` and `tab.created` hooks start a Tabby Session Daemon after the previous daemon is stopped.
   - Restarting the sandboxed Herdr server with restored state does not start a Tabby Session Daemon without a new creation event, so the documented restored-session limitation holds.
+
+## 2026-07-08 update
+
+This plan was implemented for the earlier daemon-startup design, then superseded by ADR 0008 after real usage showed the long-running polling daemon could still interfere with mouse tab navigation. The current accepted contract removes `ensure-started` and `install --start`; manifests run `tabby refresh` as a short One-Shot Refresh from focus/creation events instead of starting a permanent daemon.
