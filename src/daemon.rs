@@ -14,12 +14,12 @@ use crate::herdr_client::{
 };
 use crate::labeler::{LabelCandidate, LabelPolicy};
 use crate::locks::{
-    LockStore, LockStoreError, ManualLockDecision, detect_manual_lock, unlock_all_at_path,
-    unlock_focused_tab_at_path,
+    LockStore, LockStoreError, ManualLockDecision, detect_manual_lock, is_default_tab_label,
+    unlock_all_at_path, unlock_focused_tab_at_path,
 };
 use crate::paths::{StatePathError, lock_store_path_from_runtime};
 use crate::stability::{StabilityDecision, StabilityPolicy, StabilityState};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::thread;
@@ -35,6 +35,7 @@ pub struct DaemonState {
     locks: LockStore,
     label_policy: LabelPolicy,
     stability_policy: StabilityPolicy,
+    default_labeled_tabs: BTreeSet<String>,
     locks_dirty: bool,
 }
 
@@ -51,6 +52,7 @@ impl DaemonState {
             locks,
             label_policy: LabelPolicy::default(),
             stability_policy: StabilityPolicy::default(),
+            default_labeled_tabs: BTreeSet::new(),
             locks_dirty: false,
         }
     }
@@ -79,6 +81,20 @@ impl DaemonState {
         let dirty = self.locks_dirty;
         self.locks_dirty = false;
         dirty
+    }
+
+    fn note_effective_automatic_label(
+        &mut self,
+        tab_id: &str,
+        tab_number: Option<u64>,
+        action: &TabTickAction,
+    ) {
+        if action
+            .effective_automatic_label()
+            .is_some_and(|label| !is_default_tab_label(label, tab_number))
+        {
+            self.default_labeled_tabs.remove(tab_id);
+        }
     }
 }
 
@@ -186,6 +202,15 @@ pub enum TabTickAction {
     Renamed { from: String, to: String },
 }
 
+impl TabTickAction {
+    fn effective_automatic_label(&self) -> Option<&str> {
+        match self {
+            Self::Renamed { to, .. } | Self::SkippedAlreadyCurrent { label: to } => Some(to),
+            _ => None,
+        }
+    }
+}
+
 fn skipped_tab_report(tab: TabInfo, action: TabTickAction) -> TabTickReport {
     TabTickReport {
         tab_id: tab.tab_id,
@@ -207,10 +232,13 @@ where
     C: HerdrApi,
 {
     let tabs = herdr.list_tabs()?;
+    retain_runtime_state_for_present_tabs(state, &tabs);
     let panes = herdr.list_panes()?;
     let mut reports = Vec::with_capacity(tabs.len());
 
     for tab in tabs {
+        reconcile_reused_tab_id(state, &tab);
+
         if state.locks.is_locked(&tab.tab_id) {
             reports.push(skipped_tab_report(tab, TabTickAction::SkippedLocked));
             continue;
@@ -254,6 +282,7 @@ where
 
         let raw_candidate_label = candidate.label().to_string();
         let tab_id = tab.tab_id;
+        let tab_number = tab.number;
         let current_label = tab.label;
         let persisted_plugin_label = state.locks.last_plugin_label(&tab_id).map(str::to_string);
         let runtime = state
@@ -337,6 +366,8 @@ where
             }
         };
 
+        state.note_effective_automatic_label(&tab_id, tab_number, &action);
+
         reports.push(TabTickReport {
             tab_id,
             current_label,
@@ -413,10 +444,17 @@ where
         return Ok(None);
     }
 
-    let Some(tab) = herdr.list_tabs()?.into_iter().find(|tab| tab.focused) else {
+    let tabs = herdr.list_tabs()?;
+    retain_runtime_state_for_present_tabs(&mut state.runtime, &tabs);
+    let Some(tab) = tabs.into_iter().find(|tab| tab.focused) else {
         state.pending_rename = None;
         return Ok(Some(TickReport { tabs: Vec::new() }));
     };
+
+    if reconcile_reused_tab_id(&mut state.runtime, &tab) {
+        state.pending_rename = None;
+        return Ok(None);
+    }
 
     if tab.tab_id != pending.tab_id
         || tab.label == pending.label
@@ -470,6 +508,7 @@ where
     state.pending_rename = None;
     let raw_candidate_label = candidate.label().to_string();
     let tab_id = tab.tab_id;
+    let tab_number = tab.number;
     let current_label = tab.label;
     let persisted_plugin_label = state
         .runtime
@@ -539,6 +578,10 @@ where
         }
     };
 
+    state
+        .runtime
+        .note_effective_automatic_label(&tab_id, tab_number, &action);
+
     if store_changed {
         state.runtime.locks.save(lock_store_path)?;
     }
@@ -583,12 +626,15 @@ where
         return Ok((TickReport { tabs: Vec::new() }, false));
     };
 
+    let mut store_changed =
+        locks.discard_tab_state_for_default_label(&tab.tab_id, &tab.label, tab.number);
+
     if locks.is_locked(&tab.tab_id) {
         return Ok((
             TickReport {
                 tabs: vec![skipped_tab_report(tab, TabTickAction::SkippedLocked)],
             },
-            false,
+            store_changed,
         ));
     }
 
@@ -598,7 +644,7 @@ where
             TickReport {
                 tabs: vec![skipped_tab_report(tab, TabTickAction::SkippedNoPane)],
             },
-            false,
+            store_changed,
         ));
     };
     let pane = selection.pane;
@@ -626,14 +672,13 @@ where
                     action: TabTickAction::SkippedNoCandidate,
                 }],
             },
-            false,
+            store_changed,
         ));
     };
 
     let candidate_label = candidate.label().to_string();
     let tab_id = tab.tab_id;
     let current_label = tab.label;
-    let mut store_changed = false;
     let action = if let ManualLockDecision::Lock { label } = detect_manual_lock(
         &current_label,
         locks.last_plugin_label(&tab_id),
@@ -672,6 +717,37 @@ where
         },
         store_changed,
     ))
+}
+
+fn reconcile_reused_tab_id(state: &mut DaemonState, tab: &TabInfo) -> bool {
+    if !is_default_tab_label(&tab.label, tab.number) {
+        state.default_labeled_tabs.remove(&tab.tab_id);
+        return false;
+    }
+
+    if !state.default_labeled_tabs.insert(tab.tab_id.clone()) {
+        return false;
+    }
+
+    let discarded_persisted_state = state.locks.discard_tab_state(&tab.tab_id);
+    state.tabs.remove(&tab.tab_id);
+    if discarded_persisted_state {
+        state.mark_locks_dirty();
+    }
+    true
+}
+
+fn retain_runtime_state_for_present_tabs(state: &mut DaemonState, tabs: &[TabInfo]) {
+    let present_tab_ids = tabs
+        .iter()
+        .map(|tab| tab.tab_id.as_str())
+        .collect::<BTreeSet<_>>();
+    state
+        .tabs
+        .retain(|tab_id, _| present_tab_ids.contains(tab_id.as_str()));
+    state
+        .default_labeled_tabs
+        .retain(|tab_id| present_tab_ids.contains(tab_id.as_str()));
 }
 
 pub fn run_one_shot_refresh_from_env() -> Result<String, RuntimeError> {
@@ -1185,6 +1261,218 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_reused_tab_id_with_default_label_discards_stale_lock_state() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut store = LockStore::default();
+        store.record_plugin_label("w1:t1", "nvim");
+        store.lock_tab("w1:t1", Some("custom".to_string()));
+        store.save(&lock_path).expect("save stale lock state");
+        let mut reused_tab = tab("w1:t1", "1", true);
+        reused_tab.number = Some(1);
+        let mut herdr = FakeHerdr::new(
+            vec![reused_tab],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]));
+        let mut state = HybridRefresherState::load(&lock_path).expect("load stale lock state");
+
+        let first = hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("first observation of reused tab id");
+        let second = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("stable observation of reused tab id");
+        let persisted = LockStore::load(&lock_path).expect("reload reconciled lock store");
+
+        assert_eq!(
+            first.tabs[0].action,
+            TabTickAction::DeferredUnstable {
+                candidate_label: "codex".to_string()
+            }
+        );
+        assert_eq!(
+            second.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "1".to_string(),
+                to: "codex".to_string()
+            }
+        );
+        assert!(!persisted.is_locked("w1:t1"));
+        assert_eq!(persisted.last_plugin_label("w1:t1"), Some("codex"));
+    }
+
+    #[test]
+    fn hybrid_reused_tab_id_discards_in_memory_plugin_baseline() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut state = HybridRefresherState::new(DaemonState::default());
+
+        hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("first observation of original tab");
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("rename original tab");
+
+        herdr.set_tab_label("w1:t1", "1");
+        herdr.tabs[0].number = Some(1);
+        herdr.set_process_info(process("w1:p1", "codex", &["codex"]));
+        herdr.renames.clear();
+
+        let first_reused = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(1000),
+        )
+        .expect("first observation of reused tab id");
+        let second_reused = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(1500),
+        )
+        .expect("stable observation of reused tab id");
+
+        assert_eq!(
+            first_reused.tabs[0].action,
+            TabTickAction::DeferredUnstable {
+                candidate_label: "codex".to_string()
+            }
+        );
+        assert_eq!(
+            second_reused.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "1".to_string(),
+                to: "codex".to_string()
+            }
+        );
+        assert!(!state.runtime.locks().is_locked("w1:t1"));
+    }
+
+    #[test]
+    fn hybrid_reused_tab_id_resets_pending_stability_observation() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]));
+        let mut state = HybridRefresherState::new(DaemonState::default());
+
+        hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("pending observation for original tab");
+        herdr.set_tab_label("w1:t1", "1");
+        herdr.tabs[0].number = Some(1);
+
+        let first_reused = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("first observation of reused tab id");
+        let second_reused = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(1000),
+        )
+        .expect("stable observation of reused tab id");
+
+        assert_eq!(
+            first_reused.tabs[0].action,
+            TabTickAction::DeferredUnstable {
+                candidate_label: "codex".to_string()
+            }
+        );
+        assert_eq!(
+            second_reused.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "1".to_string(),
+                to: "codex".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn hybrid_prunes_lifecycle_marker_before_default_labeled_id_is_reused() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut original_tab = tab("w1:t1", "1", true);
+        original_tab.number = Some(1);
+        let mut herdr = FakeHerdr::new(
+            vec![original_tab],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]));
+        let mut state = HybridRefresherState::new(DaemonState::default());
+
+        hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("pending observation for original default-labeled tab");
+        herdr.tabs.clear();
+        herdr.panes.clear();
+        hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("observe original tab disappearance");
+
+        let mut reused_tab = tab("w1:t1", "1", true);
+        reused_tab.number = Some(1);
+        herdr.tabs.push(reused_tab);
+        herdr.panes.push(pane("w1:p1", "w1:t1", true, "tabby"));
+
+        let first_reused = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(1000),
+        )
+        .expect("first observation of reused tab id");
+        let second_reused = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(1500),
+        )
+        .expect("stable observation of reused tab id");
+
+        assert_eq!(
+            first_reused.tabs[0].action,
+            TabTickAction::DeferredUnstable {
+                candidate_label: "codex".to_string()
+            }
+        );
+        assert_eq!(
+            second_reused.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "1".to_string(),
+                to: "codex".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn hybrid_inactive_tabs_are_not_inspected_or_renamed() {
         let temp_dir = TestTempDir::new();
         let lock_path = temp_dir.path().join("locks.json");
@@ -1514,6 +1802,35 @@ mod tests {
             herdr.renames,
             vec![("w1:t1".to_string(), "codex".to_string())]
         );
+    }
+
+    #[test]
+    fn one_shot_reused_tab_id_with_default_label_discards_stale_baseline() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let mut store = LockStore::default();
+        store.record_plugin_label("w1:t1", "nvim");
+        store.save(&lock_path).expect("save stale plugin baseline");
+        let mut reused_tab = tab("w1:t1", "1", true);
+        reused_tab.number = Some(1);
+        let mut herdr = FakeHerdr::new(
+            vec![reused_tab],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]));
+
+        let report = refresh_once(&mut herdr, &lock_path).expect("refresh reused tab id");
+        let persisted = LockStore::load(&lock_path).expect("reload reconciled lock store");
+
+        assert_eq!(
+            report.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "1".to_string(),
+                to: "codex".to_string()
+            }
+        );
+        assert!(!persisted.is_locked("w1:t1"));
+        assert_eq!(persisted.last_plugin_label("w1:t1"), Some("codex"));
     }
 
     #[test]
