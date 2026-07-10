@@ -18,6 +18,7 @@ _Avoid_: full path, cwd label
 
 **Manually Locked Tab**:
 A Herdr tab whose user-facing label changed outside the plugin's own rename operation after Tabby has established a plugin-label baseline, so the plugin must stop auto-renaming it. Manual locks persist across plugin runs until an explicit unlock mechanism removes them.
+Herdr may reuse a `tab_id` after tab or workspace churn. When a tab's visible label exactly matches its reported tab number, Tabby treats that default numeric label as a fresh tab lifecycle, discards persisted lock/baseline state for the reused ID, and resumes automatic naming. Other numeric labels remain eligible for manual locking.
 _Avoid_: manual rename, ignored tab, disabled tab
 
 **Unlock Action**:

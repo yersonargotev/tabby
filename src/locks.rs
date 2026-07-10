@@ -1,10 +1,10 @@
 //! Persistent Manually Locked Tab state.
 //!
-//! Locks are plugin-owned state, not user-editable configuration. The v1 identity
-//! is Herdr's `tab_id`; whether those IDs are stable across Herdr restarts remains
-//! an open design decision. For safety, this module does not implicitly clean up
-//! stale IDs and never auto-unlocks: explicit unlock operations are the only way
-//! to remove a lock.
+//! Locks are plugin-owned state, not user-editable configuration. The v1 store is
+//! keyed by Herdr's `tab_id`, but those IDs can be reused after tab or workspace
+//! churn. A label that exactly matches Herdr's reported tab number marks a fresh
+//! lifecycle and discards stale state for that ID. Otherwise locks remain until an
+//! explicit unlock operation removes them.
 
 use crate::herdr_client::{HerdrApi, HerdrError};
 use crate::labeler::LabelCandidate;
@@ -19,6 +19,12 @@ use std::path::{Path, PathBuf};
 pub enum ManualLockDecision {
     AutoManaged,
     Lock { label: String },
+}
+
+pub fn is_default_tab_label(current_label: &str, tab_number: Option<u64>) -> bool {
+    tab_number
+        .map(|number| number.to_string())
+        .is_some_and(|number| number == current_label)
 }
 
 pub fn detect_manual_lock(
@@ -143,6 +149,25 @@ impl LockStore {
         }
         self.last_plugin_labels.insert(tab_id, label);
         true
+    }
+
+    pub fn discard_tab_state_for_default_label(
+        &mut self,
+        tab_id: &str,
+        current_label: &str,
+        tab_number: Option<u64>,
+    ) -> bool {
+        if !is_default_tab_label(current_label, tab_number) {
+            return false;
+        }
+
+        self.discard_tab_state(tab_id)
+    }
+
+    pub(crate) fn discard_tab_state(&mut self, tab_id: &str) -> bool {
+        let removed_lock = self.locks.remove(tab_id).is_some();
+        let removed_baseline = self.last_plugin_labels.remove(tab_id).is_some();
+        removed_lock || removed_baseline
     }
 
     pub fn unlock_tab(&mut self, tab_id: &str) -> bool {
@@ -366,6 +391,32 @@ mod tests {
         );
 
         assert_eq!(decision, ManualLockDecision::AutoManaged);
+    }
+
+    #[test]
+    fn default_numeric_label_discards_state_for_reused_tab_id() {
+        let mut store = LockStore::default();
+        store.record_plugin_label("w2:t1", "nvim");
+        store.lock_tab("w2:t1", Some("custom".to_string()));
+
+        let changed = store.discard_tab_state_for_default_label("w2:t1", "1", Some(1));
+
+        assert!(changed);
+        assert!(!store.is_locked("w2:t1"));
+        assert_eq!(store.last_plugin_label("w2:t1"), None);
+    }
+
+    #[test]
+    fn non_default_numeric_label_preserves_manual_state() {
+        let mut store = LockStore::default();
+        store.record_plugin_label("w2:t2", "nvim");
+        store.lock_tab("w2:t2", Some("1".to_string()));
+
+        let changed = store.discard_tab_state_for_default_label("w2:t2", "1", Some(2));
+
+        assert!(!changed);
+        assert!(store.is_locked("w2:t2"));
+        assert_eq!(store.last_plugin_label("w2:t2"), Some("nvim"));
     }
 
     #[test]
