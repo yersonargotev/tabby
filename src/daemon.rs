@@ -83,6 +83,13 @@ impl DaemonState {
         dirty
     }
 
+    fn replace_persisted_locks(&mut self, locks: LockStore) {
+        for (tab_id, runtime) in &mut self.tabs {
+            runtime.last_plugin_label = locks.last_plugin_label(tab_id).map(str::to_string);
+        }
+        self.locks = locks;
+    }
+
     fn note_effective_automatic_label(
         &mut self,
         tab_id: &str,
@@ -126,6 +133,7 @@ pub struct HybridRefresherState {
     quiet_until: Option<Instant>,
     focus_generation: u64,
     pending_rename: Option<PendingRename>,
+    last_observed_lock_store: Option<LockStore>,
 }
 
 impl HybridRefresherState {
@@ -135,11 +143,15 @@ impl HybridRefresherState {
             quiet_until: None,
             focus_generation: 0,
             pending_rename: None,
+            last_observed_lock_store: None,
         }
     }
 
     pub fn load(lock_store_path: impl AsRef<Path>) -> Result<Self, DaemonError> {
-        Ok(Self::new(DaemonState::load(lock_store_path)?))
+        let locks = LockStore::load(lock_store_path)?;
+        let mut state = Self::new(DaemonState::new(locks.clone()));
+        state.last_observed_lock_store = Some(locks);
+        Ok(state)
     }
 
     pub fn note_focus_or_create_event(&mut self, observed_at: Instant) {
@@ -161,6 +173,19 @@ impl HybridRefresherState {
         self.quiet_until
             .filter(|quiet_until| observed_at < *quiet_until)
             .unwrap_or(observed_at)
+    }
+
+    fn sync_external_lock_store(&mut self, path: &Path) -> Result<(), LockStoreError> {
+        let persisted = LockStore::load(path)?;
+        if self
+            .last_observed_lock_store
+            .as_ref()
+            .is_some_and(|last_observed| last_observed != &persisted)
+        {
+            self.runtime.replace_persisted_locks(persisted.clone());
+        }
+        self.last_observed_lock_store = Some(persisted);
+        Ok(())
     }
 }
 
@@ -413,13 +438,17 @@ where
         return Ok(quiet_window_tick());
     }
 
-    if state.pending_rename.is_some()
+    state.sync_external_lock_store(lock_store_path)?;
+
+    let report = if state.pending_rename.is_some()
         && let Some(report) = revalidate_pending_rename(herdr, state, lock_store_path, observed_at)?
     {
-        return Ok(report);
-    }
-
-    tick_and_save_locks(herdr, &mut state.runtime, lock_store_path, observed_at)
+        report
+    } else {
+        tick_and_save_locks(herdr, &mut state.runtime, lock_store_path, observed_at)?
+    };
+    state.sync_external_lock_store(lock_store_path)?;
+    Ok(report)
 }
 
 fn quiet_window_tick() -> TickReport {
@@ -1556,6 +1585,48 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_refresher_observes_unlock_all_from_another_process() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let start = Instant::now();
+        let mut store = LockStore::default();
+        store.record_plugin_label("w1:t1", "codex");
+        store.lock_tab("w1:t1", Some("my custom label".to_string()));
+        store.save(&lock_path).expect("save manually locked tab");
+        let mut state = HybridRefresherState::load(&lock_path).expect("load refresher state");
+        unlock_all_at_path(&lock_path).expect("unlock all from action process");
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "my custom label", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]));
+
+        let first = hybrid_tick_and_save_locks(&mut herdr, &mut state, &lock_path, start)
+            .expect("first refresh after unlock all");
+        let second = hybrid_tick_and_save_locks(
+            &mut herdr,
+            &mut state,
+            &lock_path,
+            start + Duration::from_millis(500),
+        )
+        .expect("stable refresh after unlock all");
+
+        assert_eq!(
+            first.tabs[0].action,
+            TabTickAction::DeferredUnstable {
+                candidate_label: "codex".to_string()
+            }
+        );
+        assert_eq!(
+            second.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "my custom label".to_string(),
+                to: "codex".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn manual_label_change_creates_persistent_lock() {
         let temp_dir = TestTempDir::new();
         let lock_path = temp_dir.path().join("locks.json");
@@ -1802,6 +1873,95 @@ mod tests {
             herdr.renames,
             vec![("w1:t1".to_string(), "codex".to_string())]
         );
+    }
+
+    #[test]
+    fn one_shot_refresh_resumes_automatic_naming_after_unlock_all() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let mut store = LockStore::default();
+        store.record_plugin_label("w1:t1", "codex");
+        store.lock_tab("w1:t1", Some("my custom label".to_string()));
+        store.save(&lock_path).expect("save manually locked tab");
+        unlock_all_at_path(&lock_path).expect("unlock all tabs");
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "my custom label", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]));
+
+        let report = refresh_once(&mut herdr, &lock_path).expect("refresh after unlock all");
+        let persisted = LockStore::load(&lock_path).expect("reload lock store");
+
+        assert_eq!(
+            report.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "my custom label".to_string(),
+                to: "codex".to_string()
+            }
+        );
+        assert!(!persisted.is_locked("w1:t1"));
+        assert_eq!(persisted.last_plugin_label("w1:t1"), Some("codex"));
+    }
+
+    #[test]
+    fn one_shot_default_label_does_not_relock_after_unlock_all() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let mut store = LockStore::default();
+        store.record_plugin_label("w1:t2", "nvim");
+        store.lock_tab("w1:t2", Some("2".to_string()));
+        store.save(&lock_path).expect("save manually locked tab");
+        unlock_all_at_path(&lock_path).expect("unlock all tabs");
+        let mut focused_tab = tab("w1:t2", "2", true);
+        focused_tab.number = Some(2);
+        let mut herdr = FakeHerdr::new(
+            vec![focused_tab],
+            vec![pane("w1:p2", "w1:t2", true, "tabby")],
+        )
+        .with_process_info(process("w1:p2", "codex", &["codex"]));
+
+        let report = refresh_once(&mut herdr, &lock_path).expect("refresh after unlock all");
+        let persisted = LockStore::load(&lock_path).expect("reload lock store");
+
+        assert_eq!(
+            report.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "2".to_string(),
+                to: "codex".to_string()
+            }
+        );
+        assert!(!persisted.is_locked("w1:t2"));
+        assert_eq!(persisted.last_plugin_label("w1:t2"), Some("codex"));
+    }
+
+    #[test]
+    fn one_shot_refresh_resumes_automatic_naming_after_unlock_focused() {
+        let temp_dir = TestTempDir::new();
+        let lock_path = temp_dir.path().join("locks.json");
+        let mut store = LockStore::default();
+        store.record_plugin_label("w1:t1", "codex");
+        store.lock_tab("w1:t1", Some("my custom label".to_string()));
+        store.save(&lock_path).expect("save manually locked tab");
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "my custom label", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "codex", &["codex"]));
+        unlock_focused_tab_at_path(&lock_path, &mut herdr).expect("unlock focused tab");
+
+        let report = refresh_once(&mut herdr, &lock_path).expect("refresh after focused unlock");
+        let persisted = LockStore::load(&lock_path).expect("reload lock store");
+
+        assert_eq!(
+            report.tabs[0].action,
+            TabTickAction::Renamed {
+                from: "my custom label".to_string(),
+                to: "codex".to_string()
+            }
+        );
+        assert!(!persisted.is_locked("w1:t1"));
+        assert_eq!(persisted.last_plugin_label("w1:t1"), Some("codex"));
     }
 
     #[test]

@@ -165,17 +165,28 @@ impl LockStore {
     }
 
     pub(crate) fn discard_tab_state(&mut self, tab_id: &str) -> bool {
-        let removed_lock = self.locks.remove(tab_id).is_some();
+        let removed_lock = self.remove_locked_tab_state(tab_id);
         let removed_baseline = self.last_plugin_labels.remove(tab_id).is_some();
         removed_lock || removed_baseline
     }
 
     pub fn unlock_tab(&mut self, tab_id: &str) -> bool {
-        self.locks.remove(tab_id).is_some()
+        self.remove_locked_tab_state(tab_id)
+    }
+
+    fn remove_locked_tab_state(&mut self, tab_id: &str) -> bool {
+        let removed = self.locks.remove(tab_id).is_some();
+        if removed {
+            self.last_plugin_labels.remove(tab_id);
+        }
+        removed
     }
 
     pub fn unlock_all(&mut self) {
-        self.locks.clear();
+        let locked_tab_ids = self.locks.keys().cloned().collect::<Vec<_>>();
+        for tab_id in locked_tab_ids {
+            self.remove_locked_tab_state(&tab_id);
+        }
     }
 
     pub fn locks(&self) -> impl Iterator<Item = &ManualLock> {
@@ -441,13 +452,17 @@ mod tests {
     #[test]
     fn unlock_tab_removes_only_that_lock() {
         let mut store = LockStore::default();
+        store.record_plugin_label("w1:t1", "editor");
+        store.record_plugin_label("w1:t2", "server");
         store.lock_tab("w1:t1", Some("custom one".to_string()));
         store.lock_tab("w1:t2", Some("custom two".to_string()));
 
         assert!(store.unlock_tab("w1:t1"));
 
         assert!(!store.is_locked("w1:t1"));
+        assert_eq!(store.last_plugin_label("w1:t1"), None);
         assert!(store.is_locked("w1:t2"));
+        assert_eq!(store.last_plugin_label("w1:t2"), Some("server"));
     }
 
     #[test]
@@ -530,13 +545,21 @@ mod tests {
     fn unlock_all_clears_all_locks() {
         let temp_dir = TestTempDir::new();
         let path = temp_dir.path().join("locks.json");
-        lock_tab_at_path(&path, "w1:t1", Some("editor".to_string())).expect("lock tab one");
-        lock_tab_at_path(&path, "w1:t2", Some("server".to_string())).expect("lock tab two");
+        let mut store = LockStore::default();
+        store.record_plugin_label("w1:t1", "editor");
+        store.record_plugin_label("w1:t2", "server");
+        store.record_plugin_label("w1:t3", "codex");
+        store.lock_tab("w1:t1", Some("custom one".to_string()));
+        store.lock_tab("w1:t2", Some("custom two".to_string()));
+        store.save(&path).expect("save lock store");
 
         unlock_all_at_path(&path).expect("unlock all");
         let reloaded = LockStore::load(&path).expect("reload lock store");
 
         assert!(reloaded.is_empty());
+        assert_eq!(reloaded.last_plugin_label("w1:t1"), None);
+        assert_eq!(reloaded.last_plugin_label("w1:t2"), None);
+        assert_eq!(reloaded.last_plugin_label("w1:t3"), Some("codex"));
     }
 
     #[test]

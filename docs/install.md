@@ -89,6 +89,8 @@ herdr plugin action invoke unlock-focused --plugin yersonargotev.tabby
 herdr plugin action invoke unlock-all --plugin yersonargotev.tabby
 ```
 
+Each unlock also clears the associated plugin-label baseline for the unlocked tab. This prevents the next refresh from immediately recreating the same lock, and the running Hybrid Session Refresher observes the persisted change before its next refresh outside the Focus Quiet Window.
+
 Expected successful `unlock-all` output:
 
 ```text

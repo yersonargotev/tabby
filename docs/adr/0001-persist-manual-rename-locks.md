@@ -6,6 +6,6 @@ Herdr can reuse a `tab_id` after tab or workspace churn, so the ID alone is not 
 
 ## Consequences
 
-The plugin needs a persisted lock store and an explicit unlock path so users can return a tab to auto-managed naming without deleting all plugin state by hand.
+The plugin needs a persisted lock store and an explicit unlock path so users can return a tab to auto-managed naming without deleting all plugin state by hand. Unlocking a tab removes both its Manual Lock and its plugin-label baseline; otherwise the next refresh could interpret the still-visible manual label as a new external edit and immediately recreate the lock. `unlock-all` applies this only to tabs that were locked, preserving baselines for tabs that remain auto-managed. The Hybrid Session Refresher reloads externally changed persisted lock state before each refresh outside the Focus Quiet Window so actions invoked from another process affect the running refresher.
 
 Explicitly naming tab number `N` as `N` is indistinguishable from Herdr restoring its default label, so that exact label remains auto-managed rather than manually locked.
