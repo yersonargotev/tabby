@@ -18,6 +18,8 @@ tabby install --start
 
 This is the v1 release path. Homebrew installs the `tabby` binary and the release Herdr manifest; Herdr registration remains an explicit user command. `tabby install` is intentionally idempotent: it asks Herdr to unlink any existing `yersonargotev.tabby` registration, then links the manifest shipped with the currently running Homebrew package. Plain `tabby install` remains registration-only; `tabby install --start` also ensures exactly one Hybrid Session Refresher is running for the current Herdr Session.
 
+Startup records the resolved executable target when it spawns a refresher and validates that identity against the currently running `tabby` executable. This detects Homebrew upgrades even when the stable `/opt/homebrew/bin/tabby` symlink is reused for a new Cellar version. If the current Herdr Session still has a refresher from a different local checkout or Homebrew version—or legacy metadata cannot prove its launch-time binary—`ensure-started` refuses to accept it and reports the recorded PID and paths. Stop only that reported refresher with `kill <pid>`, then rerun `tabby install --start`. Tabby does not terminate it automatically, avoiding the risk of killing an unrelated reused PID.
+
 Do not use `herdr plugin install yersonargotev/tabby` for the v1 release path. The Herdr marketplace/GitHub install path is intentionally not part of v1.
 
 ## Verify the install
@@ -106,7 +108,7 @@ The v1 release path is intentionally explicit:
 - Homebrew installs files only; there is no silent Homebrew postinstall that registers or starts the plugin.
 - `tabby install` is the separate opt-in registration step. It is a small wrapper around `herdr plugin unlink yersonargotev.tabby` followed by `herdr plugin link <current package>/share/tabby`; add `--start` to start the current session refresher explicitly.
 - Automatic label refreshes come from one long-running Hybrid Session Refresher per Herdr Session; duplicate prevention is keyed by the Herdr socket identity.
-- Tabby does not silently auto-update. Updates happen through Homebrew, for example `brew upgrade tabby`; run `tabby install` after upgrades so Herdr stops pointing at any old Homebrew Cellar path that cleanup removed.
+- Tabby does not silently auto-update. Updates happen through Homebrew, for example `brew upgrade tabby`; run `tabby install --start` after upgrades so Herdr points at the current Homebrew Cellar path and startup verifies that the current session refresher uses the same binary.
 - Tabby stores its lock state as `locks.json` in Herdr's plugin-owned state/config directory. You can inspect that directory with:
 
 ```sh
