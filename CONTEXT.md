@@ -22,7 +22,7 @@ Herdr may reuse a `tab_id` after tab or workspace churn. When a tab's visible la
 _Avoid_: manual rename, ignored tab, disabled tab
 
 **Unlock Action**:
-A user-invoked plugin action that removes one or more Manually Locked Tabs from the persisted lock store so automatic naming can resume. The expected actions are unlock focused tab and unlock all tabs.
+A user-invoked plugin action that removes one or more Manually Locked Tabs and their associated plugin-label baselines from the persisted lock store so automatic naming can resume without immediately recreating the same lock. Baselines for tabs that were not locked remain intact. The Hybrid Session Refresher observes these persisted changes before its next refresh outside the Focus Quiet Window. The expected actions are unlock focused tab and unlock all tabs.
 _Avoid_: reset, auto-unlock
 
 **Stable Label Candidate**:

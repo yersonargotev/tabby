@@ -56,8 +56,8 @@ Usage: tabby <refresh|start|ensure-started|install [--start]|unlock-focused|unlo
 | `tabby ensure-started` | Ensure exactly one Hybrid Session Refresher is running for the current Herdr Session. |
 | `tabby install` | Refresh Herdr registration for the current Homebrew-installed package; it does not start the refresher. |
 | `tabby install --start` | Refresh registration and ensure the current Herdr Session Refresher is running. |
-| `tabby unlock-focused` | Clear the manual lock for the focused Herdr tab. |
-| `tabby unlock-all` | Clear all persisted manual locks. |
+| `tabby unlock-focused` | Clear the manual lock and plugin-label baseline for the focused Herdr tab so automatic naming resumes. |
+| `tabby unlock-all` | Clear all persisted manual locks and their associated plugin-label baselines so automatic naming resumes. |
 
 ## Local development
 
