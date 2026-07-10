@@ -6,14 +6,15 @@ pub mod locks;
 pub mod paths;
 pub mod stability;
 pub mod startup;
+pub mod status;
 
 use std::fmt;
 
-pub const USAGE: &str =
-    "Usage: tabby <refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>";
+pub const USAGE: &str = "Usage: tabby <status|refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    Status,
     Refresh,
     Start,
     EnsureStarted,
@@ -50,6 +51,7 @@ pub enum CommandError {
     Runtime(daemon::RuntimeError),
     Install(install::InstallError),
     Startup(startup::StartupError),
+    Status(status::StatusError),
 }
 
 impl fmt::Display for CommandError {
@@ -58,6 +60,7 @@ impl fmt::Display for CommandError {
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Install(error) => write!(formatter, "install failed: {error}"),
             Self::Startup(error) => write!(formatter, "startup failed: {error}"),
+            Self::Status(error) => write!(formatter, "status failed: {error}"),
         }
     }
 }
@@ -68,6 +71,7 @@ impl std::error::Error for CommandError {
             Self::Runtime(error) => Some(error),
             Self::Install(error) => Some(error),
             Self::Startup(error) => Some(error),
+            Self::Status(error) => Some(error),
         }
     }
 }
@@ -87,6 +91,12 @@ impl From<install::InstallError> for CommandError {
 impl From<startup::StartupError> for CommandError {
     fn from(error: startup::StartupError) -> Self {
         Self::Startup(error)
+    }
+}
+
+impl From<status::StatusError> for CommandError {
+    fn from(error: status::StatusError) -> Self {
+        Self::Status(error)
     }
 }
 
@@ -115,11 +125,12 @@ where
             }
             Ok(Command::Install { start })
         }
-        "refresh" | "start" | "ensure-started" | "unlock-focused" | "unlock-all" => {
+        "status" | "refresh" | "start" | "ensure-started" | "unlock-focused" | "unlock-all" => {
             if let Some(argument) = args.next() {
                 return Err(CliError::UnexpectedArgument { command, argument });
             }
             match command.as_str() {
+                "status" => Ok(Command::Status),
                 "refresh" => Ok(Command::Refresh),
                 "start" => Ok(Command::Start),
                 "ensure-started" => Ok(Command::EnsureStarted),
@@ -135,6 +146,7 @@ where
 
 pub fn run_stub(command: Command) -> CommandOutcome {
     let message = match command {
+        Command::Status => "tabby status runtime: use run_command for read-only diagnostics",
         Command::Refresh => "tabby refresh runtime: use run_command for a one-shot label refresh",
         Command::Start => {
             "tabby start runtime: use run_command to start the hybrid session refresher"
@@ -157,6 +169,7 @@ pub fn run_stub(command: Command) -> CommandOutcome {
 
 pub fn run_command(command: Command) -> Result<String, CommandError> {
     match command {
+        Command::Status => status::run_from_env().map_err(CommandError::from),
         Command::Refresh => daemon::run_one_shot_refresh_from_env().map_err(CommandError::from),
         Command::Start => {
             daemon::run_hybrid_refresher_from_env()?;
@@ -184,6 +197,7 @@ mod tests {
 
     #[test]
     fn parses_refresh_start_and_ensure_started_commands() {
+        assert_eq!(parse_command(["status"]), Ok(Command::Status));
         assert_eq!(parse_command(["refresh"]), Ok(Command::Refresh));
         assert_eq!(parse_command(["start"]), Ok(Command::Start));
         assert_eq!(
