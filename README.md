@@ -47,11 +47,12 @@ Project vocabulary and domain rules live in [`CONTEXT.md`](CONTEXT.md).
 ## Commands
 
 ```text
-Usage: tabby <refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>
+Usage: tabby <status|refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>
 ```
 
 | Command | Purpose |
 | --- | --- |
+| `tabby status` | Inspect the current Herdr Session, plugin registration, Hybrid Session Refresher, focused Tab Label Candidate, locks, baselines, and recent plugin-action failures without changing state. |
 | `tabby refresh` | Wait briefly, inspect the focused Herdr tab, apply at most one label refresh, and exit. |
 | `tabby start` | Run the Hybrid Session Refresher in the foreground for the current Herdr Session. |
 | `tabby ensure-started` | Ensure exactly one Hybrid Session Refresher is running for the current Herdr Session. |
@@ -59,6 +60,8 @@ Usage: tabby <refresh|start|ensure-started|install [--start]|unlock-focused|unlo
 | `tabby install --start` | Refresh registration and ensure the current Herdr Session Refresher is running. |
 | `tabby unlock-focused` | Clear the manual lock and plugin-label baseline for the focused Herdr tab so automatic naming resumes. |
 | `tabby unlock-all` | Clear all persisted manual locks and their associated plugin-label baselines so automatic naming resumes. |
+
+Run `tabby status` first when labels are not updating. Its warnings distinguish a missing or disabled registration, a stopped or mismatched refresher, a numeric focused Manually Locked Tab, a suspicious focused-tab baseline, and recent failed or lock-skipped plugin actions. The command is read-only; suggested fixes are printed separately and run only when you choose them.
 
 ## Local development
 

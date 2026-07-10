@@ -117,7 +117,7 @@ pub fn session_key_for_socket_path(path: &Path) -> String {
     format!("v1-{:016x}", fnv1a64(path.to_string_lossy().as_bytes()))
 }
 
-fn resolve_socket_from_env() -> Result<SessionSocket, StartupError> {
+pub(crate) fn resolve_socket_from_env() -> Result<SessionSocket, StartupError> {
     resolve_socket_with_env(std::env::var_os(HERDR_SOCKET_PATH_ENV), herdr_status_json)
 }
 
@@ -148,7 +148,7 @@ fn herdr_status_socket_path(status: &serde_json::Value) -> Option<&str> {
         .filter(|socket| !socket.is_empty())
 }
 
-fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
+pub(crate) fn state_base_from_runtime() -> Result<PathBuf, StartupError> {
     resolve_state_base_with(RuntimeStateInputs::from_env(), || {
         herdr_plugin_config_dir(PLUGIN_ID).map_err(StartupError::from)
     })
@@ -235,8 +235,26 @@ where
     metadata.session_key == socket.session_key && runtime.process_appears_to_be_tabby(metadata.pid)
 }
 
-fn binary_identity(path: &Path) -> PathBuf {
+pub(crate) fn binary_identity(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub(crate) fn read_refresher_metadata(
+    state_base: &Path,
+    socket: &SessionSocket,
+) -> Result<Option<RefresherMetadata>, StartupError> {
+    read_metadata_if_present(
+        &state_base
+            .join(REFRESHERS_DIR_NAME)
+            .join(format!("{}.json", socket.session_key)),
+    )
+}
+
+pub(crate) fn metadata_process_is_live(
+    metadata: &RefresherMetadata,
+    socket: &SessionSocket,
+) -> bool {
+    metadata.session_key == socket.session_key && process_appears_to_be_tabby(metadata.pid)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -33,7 +33,7 @@ tabby --help
 Expected output:
 
 ```text
-Usage: tabby <refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>
+Usage: tabby <status|refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>
 ```
 
 Check Homebrew's install prefix:
@@ -72,6 +72,14 @@ The important checks are:
 - `plugin_root` is under Homebrew's current `tabby` Cellar version, ending in `share/tabby`.
 - actions run `../../bin/tabby`, so Herdr invokes the binary installed by the same Homebrew package.
 - the `start` action runs `tabby ensure-started`; creation event hooks also run `ensure-started`; focus events are handled inside the running refresher, not by manifest hooks.
+
+For a single read-only diagnostic covering these checks plus runtime state, run:
+
+```sh
+tabby status
+```
+
+The report names the targeted Herdr Session and socket; shows the registered manifest and resolved command paths; checks the recorded refresher PID, version, binary, and socket; shows the focused workspace/tab/pane and current Tab Label Candidate; summarizes Manually Locked Tabs; and highlights suspicious focused-tab baselines or recent failed/lock-skipped plugin actions. It never starts, stops, unlocks, or renames anything. Any recovery command appears only under `Suggested fixes`.
 
 ## Use Tabby in Herdr
 
