@@ -29,7 +29,7 @@ unsafe extern "C" {
 
 const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
 const REFRESHERS_DIR_NAME: &str = "refreshers";
-const METADATA_SCHEMA_VERSION: u8 = 1;
+const METADATA_SCHEMA_VERSION: u8 = 2;
 const REFRESHER_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn ensure_started_from_env() -> Result<String, StartupError> {
@@ -59,7 +59,19 @@ where
     if let Some(metadata) = read_metadata_if_present(&metadata_path)?
         && metadata_is_live_for_socket(&metadata, socket, runtime)
     {
-        return Ok(EnsureStartedOutcome::AlreadyRunning { pid: metadata.pid });
+        let existing_binary = metadata.binary_path.as_deref().map(PathBuf::from);
+        let requested_binary = binary_identity(binary_path);
+        if metadata.schema_version == METADATA_SCHEMA_VERSION
+            && existing_binary.as_deref() == Some(requested_binary.as_path())
+        {
+            return Ok(EnsureStartedOutcome::AlreadyRunning { pid: metadata.pid });
+        }
+
+        return Err(StartupError::RefresherBinaryMismatch {
+            pid: metadata.pid,
+            existing_binary,
+            requested_binary,
+        });
     }
 
     let child = runtime.spawn_refresher(binary_path, &socket.socket_path)?;
@@ -70,7 +82,7 @@ where
         socket_path: socket.socket_path.to_string_lossy().to_string(),
         started_at: unix_timestamp_secs(),
         tabby_version: env!("CARGO_PKG_VERSION").to_string(),
-        binary_path: Some(binary_path.to_string_lossy().to_string()),
+        binary_path: Some(binary_identity(binary_path).to_string_lossy().to_string()),
     };
     write_metadata(&metadata_path, &metadata)?;
     Ok(EnsureStartedOutcome::Started { pid: child.pid })
@@ -220,9 +232,11 @@ pub fn metadata_is_live_for_socket<R>(
 where
     R: StartupRuntime,
 {
-    metadata.schema_version == METADATA_SCHEMA_VERSION
-        && metadata.session_key == socket.session_key
-        && runtime.process_appears_to_be_tabby(metadata.pid)
+    metadata.session_key == socket.session_key && runtime.process_appears_to_be_tabby(metadata.pid)
+}
+
+fn binary_identity(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +480,11 @@ pub enum StartupError {
     MetadataJson(serde_json::Error),
     Io(io::Error),
     RefresherLockBusy(PathBuf),
+    RefresherBinaryMismatch {
+        pid: u32,
+        existing_binary: Option<PathBuf>,
+        requested_binary: PathBuf,
+    },
     SpawnRefresher(io::Error),
     StatePath(StatePathError),
 }
@@ -535,6 +554,21 @@ impl fmt::Display for StartupError {
                 "Tabby Session Refresher startup lock `{}` is still held; refusing to remove a live lock and risk duplicate Tabby Session Refreshers",
                 path.display()
             ),
+            Self::RefresherBinaryMismatch {
+                pid,
+                existing_binary,
+                requested_binary,
+            } => {
+                let existing_binary = existing_binary
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unknown; metadata has no binary_path>".to_string());
+                write!(
+                    formatter,
+                    "Hybrid Session Refresher pid {pid} for this Herdr Session is already running from `{existing_binary}`, but the current executable is `{}`; refusing to leave a different binary active. Stop only that recorded refresher with `kill {pid}`, then rerun `tabby ensure-started` or `tabby install --start`",
+                    requested_binary.display()
+                )
+            }
             Self::SpawnRefresher(error) => {
                 write!(formatter, "failed to spawn detached `tabby start`: {error}")
             }
@@ -560,6 +594,7 @@ impl std::error::Error for StartupError {
             | Self::RelativeSocketPath(_)
             | Self::MissingSocketPath
             | Self::RefresherLockBusy(_)
+            | Self::RefresherBinaryMismatch { .. }
             | Self::HerdrStatusFailed { .. }
             | Self::EmptyStateBase { .. }
             | Self::RelativeStateBase { .. }
@@ -778,6 +813,161 @@ mod tests {
     }
 
     #[test]
+    fn ensure_started_refuses_live_refresher_from_different_binary() {
+        let temp_dir = TestTempDir::new();
+        let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
+        let metadata_path = write_test_metadata_with_binary(
+            temp_dir.path(),
+            &socket,
+            123,
+            Some(Path::new("/tmp/old-tabby")),
+        );
+        let mut runtime = FakeStartupRuntime::default().with_live_tabby_pid(123);
+
+        let error = ensure_started_with(
+            &socket,
+            temp_dir.path(),
+            Path::new("/tmp/current-tabby"),
+            &mut runtime,
+        )
+        .expect_err("different live binary must be reported");
+        let message = error.to_string();
+
+        assert!(matches!(
+            error,
+            StartupError::RefresherBinaryMismatch {
+                pid: 123,
+                existing_binary: Some(existing_binary),
+                requested_binary,
+            } if existing_binary == Path::new("/tmp/old-tabby")
+                && requested_binary == Path::new("/tmp/current-tabby")
+        ));
+        assert!(message.contains("pid 123"));
+        assert!(message.contains("/tmp/old-tabby"));
+        assert!(message.contains("/tmp/current-tabby"));
+        assert!(message.contains("kill 123"));
+        assert!(message.contains("tabby install --start"));
+        assert!(runtime.spawns.is_empty());
+        assert!(metadata_path.exists());
+    }
+
+    #[test]
+    fn ensure_started_refuses_live_refresher_without_binary_metadata() {
+        let temp_dir = TestTempDir::new();
+        let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
+        write_test_metadata_with_binary(temp_dir.path(), &socket, 123, None);
+        let mut runtime = FakeStartupRuntime::default().with_live_tabby_pid(123);
+
+        let error = ensure_started_with(
+            &socket,
+            temp_dir.path(),
+            Path::new("/tmp/current-tabby"),
+            &mut runtime,
+        )
+        .expect_err("unverifiable live binary must be reported");
+
+        assert!(matches!(
+            error,
+            StartupError::RefresherBinaryMismatch {
+                pid: 123,
+                existing_binary: None,
+                ..
+            }
+        ));
+        assert!(runtime.spawns.is_empty());
+    }
+
+    #[test]
+    fn ensure_started_refuses_live_refresher_with_legacy_metadata_schema() {
+        let temp_dir = TestTempDir::new();
+        let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
+        write_test_metadata_with_schema_and_binary(
+            temp_dir.path(),
+            &socket,
+            123,
+            1,
+            Some(Path::new("/tmp/current-tabby")),
+        );
+        let mut runtime = FakeStartupRuntime::default().with_live_tabby_pid(123);
+
+        let error = ensure_started_with(
+            &socket,
+            temp_dir.path(),
+            Path::new("/tmp/current-tabby"),
+            &mut runtime,
+        )
+        .expect_err("legacy metadata cannot prove the launch-time binary identity");
+
+        assert!(matches!(
+            error,
+            StartupError::RefresherBinaryMismatch { pid: 123, .. }
+        ));
+        assert!(runtime.spawns.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_started_accepts_same_binary_through_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TestTempDir::new();
+        let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
+        let binary_path = temp_dir.path().join("tabby-real");
+        let symlink_path = temp_dir.path().join("tabby-link");
+        fs::write(&binary_path, "binary placeholder").expect("binary placeholder");
+        symlink(&binary_path, &symlink_path).expect("binary symlink");
+        write_test_metadata_with_binary(temp_dir.path(), &socket, 123, Some(&symlink_path));
+        let mut runtime = FakeStartupRuntime::default().with_live_tabby_pid(123);
+
+        let outcome = ensure_started_with(&socket, temp_dir.path(), &binary_path, &mut runtime)
+            .expect("same canonical binary");
+
+        assert_eq!(outcome, EnsureStartedOutcome::AlreadyRunning { pid: 123 });
+        assert!(runtime.spawns.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_started_refuses_refresher_after_binary_symlink_retargets() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TestTempDir::new();
+        let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
+        let old_binary_path = temp_dir.path().join("Cellar/tabby/old/bin/tabby");
+        let current_binary_path = temp_dir.path().join("Cellar/tabby/current/bin/tabby");
+        let symlink_path = temp_dir.path().join("bin/tabby");
+        fs::create_dir_all(old_binary_path.parent().expect("old binary parent"))
+            .expect("old binary parent");
+        fs::create_dir_all(current_binary_path.parent().expect("current binary parent"))
+            .expect("current binary parent");
+        fs::create_dir_all(symlink_path.parent().expect("symlink parent")).expect("symlink parent");
+        fs::write(&old_binary_path, "old binary").expect("old binary");
+        fs::write(&current_binary_path, "current binary").expect("current binary");
+        symlink(&old_binary_path, &symlink_path).expect("old binary symlink");
+        write_test_metadata_with_binary(temp_dir.path(), &socket, 123, Some(&symlink_path));
+
+        fs::remove_file(&symlink_path).expect("remove old binary symlink");
+        symlink(&current_binary_path, &symlink_path).expect("current binary symlink");
+        let old_binary_identity = binary_identity(&old_binary_path);
+        let current_binary_identity = binary_identity(&current_binary_path);
+        let mut runtime = FakeStartupRuntime::default().with_live_tabby_pid(123);
+
+        let error = ensure_started_with(&socket, temp_dir.path(), &symlink_path, &mut runtime)
+            .expect_err("retargeted binary symlink must expose the stale refresher");
+
+        assert!(matches!(
+            error,
+            StartupError::RefresherBinaryMismatch {
+                pid: 123,
+                existing_binary: Some(existing_binary),
+                requested_binary,
+            } if existing_binary == old_binary_identity
+                && requested_binary == current_binary_identity
+        ));
+        assert!(runtime.spawns.is_empty());
+    }
+
+    #[test]
     fn stale_metadata_is_replaced_and_spawns_refresher() {
         let temp_dir = TestTempDir::new();
         let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
@@ -910,18 +1100,45 @@ sleep 30
     }
 
     fn write_test_metadata(state_base: &Path, socket: &SessionSocket, pid: u32) -> PathBuf {
+        write_test_metadata_with_binary(state_base, socket, pid, Some(Path::new("/tmp/tabby")))
+    }
+
+    fn write_test_metadata_with_binary(
+        state_base: &Path,
+        socket: &SessionSocket,
+        pid: u32,
+        binary_path: Option<&Path>,
+    ) -> PathBuf {
+        write_test_metadata_with_schema_and_binary(
+            state_base,
+            socket,
+            pid,
+            METADATA_SCHEMA_VERSION,
+            binary_path,
+        )
+    }
+
+    fn write_test_metadata_with_schema_and_binary(
+        state_base: &Path,
+        socket: &SessionSocket,
+        pid: u32,
+        schema_version: u8,
+        binary_path: Option<&Path>,
+    ) -> PathBuf {
         let path = metadata_path_for(state_base, socket);
         fs::create_dir_all(path.parent().expect("metadata parent")).expect("refresher dir");
         write_metadata(
             &path,
             &RefresherMetadata {
-                schema_version: METADATA_SCHEMA_VERSION,
+                schema_version,
                 pid,
                 session_key: socket.session_key.clone(),
                 socket_path: socket.socket_path.to_string_lossy().to_string(),
                 started_at: 1,
                 tabby_version: "test".to_string(),
-                binary_path: Some("/tmp/tabby".to_string()),
+                binary_path: binary_path
+                    .map(binary_identity)
+                    .map(|path| path.to_string_lossy().to_string()),
             },
         )
         .expect("metadata");
