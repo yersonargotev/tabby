@@ -69,6 +69,10 @@ _Avoid_: process_info call, ps lookup
 A running Herdr server context identified by the socket that plugin commands use to inspect and rename tabs. Tabby's automatic behavior is scoped to one Herdr Session at a time.
 _Avoid_: terminal session, shell session
 
+**Session-Scoped Tab State**:
+Persistent Manually Locked Tabs and plugin-label baselines that belong to exactly one Herdr Session. Tab identities are meaningful only within that session; the same `tab_id` in another session refers to unrelated state and must never inherit its locks or baselines.
+_Avoid_: global tab state, shared lock store
+
 **Tabby Session Daemon**:
 A legacy long-running Tabby process from the superseded pre-hybrid polling design. Use Hybrid Session Refresher for current behavior.
 _Avoid_: current refresh process, plugin action process
