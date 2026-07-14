@@ -42,15 +42,75 @@ The user-facing guarantee that clicking or otherwise navigating between Herdr ta
 _Avoid_: click workaround, UI quirk, placebo fix
 
 **Focus Quiet Window**:
-A short interval after a Herdr tab or workspace focus change during which the Hybrid Session Refresher must not call any Herdr API, including `tab.list`, `pane.list`, `pane.process_info`, or `tab.rename`. The window resets on each new focus change; the accepted default is 1000 ms.
+A 1000 ms interval after a Herdr focus trigger during which the Hybrid Session Refresher must not call any Herdr API, including `tab.list`, `pane.list`, `pane.process_info`, or `tab.rename`. Every delivered focus trigger resets the window, even when it is stale, replayed, or apparently redundant; after the window, Tabby evaluates the current focus rather than trusting the trigger payload.
 _Avoid_: debounce, delay, cooldown
 
 **Refresh Trigger**:
 A discrete Herdr navigation or lifecycle event, or an explicit user action, that permits Tabby to evaluate whether the focused tab label should change. Accepted Refresh Triggers are tab focus, workspace focus, tab creation, workspace creation, and manual refresh.
 _Avoid_: polling signal, output event, every tick
 
+**Zero Recurring Idle Work**:
+The end-to-end resource guarantee that an idle Tabby installation performs no periodic work attributable to Tabby, including incremental work inside Herdr caused by Tabby's subscriptions. A compatibility mode that permits recurring upstream subscription work does not satisfy this guarantee and must be explicitly accepted.
+_Avoid_: Tabby-only idle, approximately idle, passive client
+
+**Idle-Compliant Subscription**:
+A Herdr event subscription that performs no recurring work while idle and wakes only for a matching event, connection closure, or server shutdown. Herdr must declare this capability explicitly; its version alone is not evidence of compliance.
+_Avoid_: polling subscription, version-compatible subscription, idle-ish stream
+
+**Session Startup Capability**:
+An explicit Herdr guarantee that Tabby receives a session-scoped startup request for every newly started or restored Herdr Session, without enumerating sessions or polling for their existence. Herdr 0.7.3 does not provide this guarantee; its creation events and explicit start actions provide only opted-in best-effort compatibility for sessions that become active after restoration.
+_Avoid_: inferred startup, global session scan, restored-session guarantee
+
+**Subscriber Startup Gate**:
+The single session-scoped arbitration boundary through which every automatic or explicit startup request must pass. It establishes at most one Tabby subscriber for the Herdr Session and never treats the request source itself as proof that no subscriber already owns the session.
+_Avoid_: startup hook ownership, direct subscriber spawn, global supervisor
+
+**Subscriber Lease**:
+An exclusive session-scoped ownership claim held continuously by the live Tabby subscriber and released automatically when that process ends. The lease, rather than a PID or metadata timestamp, is the authority that prevents two subscribers from owning the same Herdr Session; contradictory metadata while the lease is held is an unknown-owner condition that fails closed.
+_Avoid_: heartbeat, PID lock, startup lock
+
+**Subscriber Runtime Identity**:
+The diagnostic identity associated with a Subscriber Lease: canonical Herdr Session identity; PID, operating-system process-start time, boot-session identity, and random launch identifier; plus the lossless canonical executable path and SHA-256 of its launch-time bytes. It detects stale records, PID reuse, system restart, and binary replacement but does not replace the lease as proof of liveness or authorize PID-only termination.
+_Avoid_: PID identity, metadata liveness, process-name match
+
+**Subscriber Readiness**:
+The point at which a newly created subscriber has accepted its Subscriber Lease, validated the Herdr Session, completed subscription negotiation, and can safely be published as that session's live owner. A spawned process that has not confirmed Subscriber Readiness is not a live subscriber and must not leave authoritative ownership metadata behind.
+_Avoid_: process spawned, PID recorded, optimistic startup
+
+**Cooperative Subscriber Handoff**:
+An explicit replacement in which the current subscriber validates a session-scoped control request, cancels unfinished evaluation, releases its Herdr connections and Subscriber Lease, and allows Subscriber Startup Gate to start the requested binary only after confirming there is no remaining owner. Ordinary lifecycle hooks may report that a replacement is needed but never initiate one or forcibly terminate a PID.
+_Avoid_: automatic upgrade, kill-and-restart, overlapping replacement
+
+**Recoverable Subscriber Failure**:
+A loss of the event or RPC transport that invalidates the current evaluation and permits a bounded attempt to restore both connections for the same Herdr Session. It is distinct from an application-level failure involving one tab or pane.
+_Avoid_: retryable rename, any error, permanent disconnect
+
+**Transient Evaluation Failure**:
+An application-level failure confined to the current One-Shot Refresh, such as a tab, pane, or rename target disappearing while the underlying Herdr transports remain healthy. It ends that attempt and returns the subscriber to Idle without reconnecting or creating a recovery timer.
+_Avoid_: subscriber failure, fatal RPC, retry loop
+
+**Terminal Subscriber Fault**:
+A deterministic contradiction in session identity, ownership, protocol, or required capability that cannot become valid by repeating the same connection attempt. The subscriber fails closed and requires an explicit corrected condition or action rather than automatic retry.
+_Avoid_: transient disconnect, recoverable error, silent stop
+
+**Recovery Episode**:
+One bounded attempt to restore a subscriber after a Recoverable Subscriber Failure. It may reconnect and renegotiate the Herdr transports but may not inspect tabs or rename them; successful resubscription starts a fresh One-Shot Refresh, while repeated short-lived connections consume the same recovery budget.
+_Avoid_: reconnect loop, background retry, recovery polling
+
+**Recovery Paused**:
+A degraded, timer-free subscriber state entered when a Recovery Episode exhausts its bounded work without proving that the Herdr Session is gone. It retains the Subscriber Lease and may wake only for an explicit recovery request or an operating-system notification concerning the session socket.
+_Avoid_: retry exhausted exit, periodic reconnect, healthy idle
+
+**Session Definitively Gone**:
+A terminal Herdr Session condition proven either by an authenticated session-close notification or by transport loss together with direct observation that the canonical session socket was removed. EOF alone, an unresponsive server, or an existing but unusable socket is insufficient proof and must not be converted into a liveness timer.
+_Avoid_: disconnected session, retry exhausted, socket timeout
+
+**Subscriber Conformance Mode**:
+The negotiated resource and lifecycle contract under which a subscriber runs. Strict mode requires explicit Idle-Compliant Subscription, Session Startup Capability, and a compatible event contract; Herdr 0.7.3 compatibility requires persistent opt-in and must always report both recurring upstream idle work and incomplete restored-session coverage.
+_Avoid_: automatic fallback, version-based compliance, transparent compatibility
+
 **One-Shot Refresh**:
-A bounded automatic label refresh attempt started by a Refresh Trigger. It may wait briefly for the focused tab to settle, inspect the focused tab, and apply at most one automatic label update before ending.
+A bounded automatic label refresh attempt started by a Refresh Trigger. After the Focus Quiet Window, it takes at most three samples at a 500 ms cadence and requires two consecutive equal candidates before revalidation. A newer focus trigger invalidates the attempt; otherwise, a successful rename must complete within 2.5 seconds of the focus change that produced the last trigger when Herdr remains responsive. The attempt applies at most one automatic label update and ends without a rename when the candidate does not stabilize within its sample bound.
 _Avoid_: daemon loop, background polling, continuous refresh
 
 **Focused Pane**:
