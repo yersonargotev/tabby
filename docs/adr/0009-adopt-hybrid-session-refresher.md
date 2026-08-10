@@ -2,7 +2,7 @@
 
 Tabby will replace the one-shot-only default from ADR 0008 with a Hybrid Session Refresher: one long-running process per Herdr Session that restores automatic label freshness while keeping the navigation protections learned from the click-interference bug.
 
-Status: Accepted. Supersedes ADR 0008 for normal automatic behavior. Preserves ADR 0007's focused-tab-only rule.
+Status: Superseded by ADR 0010. Superseded ADR 0008 for normal automatic behavior and preserved ADR 0007's focused-tab-only rule.
 
 ## Context
 
