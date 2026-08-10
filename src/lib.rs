@@ -1,10 +1,10 @@
-pub mod daemon;
 pub mod herdr_client;
 pub mod install;
 pub mod labeler;
 pub mod locks;
 pub mod paths;
 pub mod refresh_decision;
+pub mod refresh_executor;
 pub mod session_runtime;
 pub mod stability;
 pub mod startup;
@@ -353,8 +353,8 @@ mod tests {
     #[test]
     fn rejects_unknown_commands() {
         assert_eq!(
-            parse_command(["daemon"]),
-            Err(CliError::UnknownCommand("daemon".to_string()))
+            parse_command(["unknown"]),
+            Err(CliError::UnknownCommand("unknown".to_string()))
         );
         assert_eq!(
             parse_command(["rename-now"]),

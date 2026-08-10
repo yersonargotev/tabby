@@ -15,6 +15,13 @@ pub const EVALUATION_DEADLINE: Duration = Duration::from_millis(2500);
 pub const MAX_EVALUATION_SAMPLES: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedProcess {
+    pub name: String,
+    pub argv: Option<Vec<String>>,
+    pub cmdline: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefreshObservation {
     /// Lossless Session Identity encoded by the runtime for comparison and
     /// diagnostics; it is not a tab identifier.
@@ -26,7 +33,7 @@ pub struct RefreshObservation {
     pub pane_revision: Option<u64>,
     pub visible_label: String,
     pub working_directory: Option<String>,
-    pub significant_command: Option<String>,
+    pub foreground_processes: Vec<ObservedProcess>,
     pub candidate: Option<LabelCandidate>,
     pub manually_locked: bool,
     pub automatic_label_baseline: Option<String>,
@@ -304,7 +311,15 @@ mod tests {
             pane_revision: Some(7),
             visible_label: visible_label.to_string(),
             working_directory: Some("/Users/me/dev/tabby".to_string()),
-            significant_command: candidate.map(str::to_string),
+            foreground_processes: candidate
+                .map(|name| {
+                    vec![ObservedProcess {
+                        name: name.to_string(),
+                        argv: None,
+                        cmdline: None,
+                    }]
+                })
+                .unwrap_or_default(),
             candidate: candidate.map(LabelCandidate::significant_command),
             manually_locked: false,
             automatic_label_baseline: None,

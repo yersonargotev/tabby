@@ -42,7 +42,8 @@ Proposed files/modules for a single Rust crate:
 
 - `src/main.rs` — CLI entrypoint and command dispatch.
 - `src/session_runtime.rs` — lifecycle, Startup Gate, lease, control ingress, scheduling, handoff, and effects.
-- `src/daemon.rs` — bounded One-Shot Refresh decision/execution.
+- `src/refresh_decision.rs` — pure bounded One-Shot Refresh policy with no Herdr or persistence I/O.
+- `src/refresh_executor.rs` — Herdr and Session-Scoped Tab State effect adapter for Refresh Decisions.
 - `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client and DTOs.
 - `src/process_inspector.rs` — wrapper around `pane.process_info`; failure returns no Significant Command and allows cwd fallback.
 - `src/labeler.rs` — Label Policy and candidate derivation.

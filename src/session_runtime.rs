@@ -2,9 +2,9 @@
 
 mod unix;
 
-use crate::daemon::{self, DaemonError, OneShotRefreshState};
 use crate::herdr_client::{HerdrClient, UnixSocketTransport};
 use crate::paths::HERDR_PLUGIN_STATE_DIR_ENV;
+use crate::refresh_executor::{self, OneShotRefreshState, RefreshExecutionError};
 use crate::startup::SessionSocket;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -964,7 +964,8 @@ fn run_owned_session(
     let _lease = acquire_runtime_lease(&paths.lifetime_lease, &launch.socket.session_key)?;
 
     let tab_state = crate::locks::SessionTabStateStore::open(launch.state_base, launch.socket)?;
-    let mut refresher_state = OneShotRefreshState::new(daemon::DaemonState::default());
+    let mut refresher_state =
+        OneShotRefreshState::new(refresh_executor::RefreshExecutorState::default());
     let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)?;
     let (trigger_tx, trigger_rx) = trigger_mailbox();
     let binary_identity = crate::startup::binary_identity(launch.binary_path)
@@ -991,7 +992,9 @@ fn run_owned_session(
         binary_path: binary_identity,
         last_evaluation_unix_ms: None,
         last_failure: None,
-        next_periodic_unix_ms: Some(unix_time_after(daemon::DEFAULT_SESSION_REFRESH_INTERVAL)),
+        next_periodic_unix_ms: Some(unix_time_after(
+            refresh_executor::DEFAULT_SESSION_REFRESH_INTERVAL,
+        )),
     };
     write_metadata(&paths.metadata, &metadata)?;
     let mut artifacts = RuntimeArtifacts {
@@ -1107,7 +1110,7 @@ fn run_runtime_loop(
     // to an already Ready owner, which remains recovery-only below.
     let initial_now = Instant::now();
     state.note_refresh_trigger(initial_now);
-    let mut next_tick_at = Some(initial_now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+    let mut next_tick_at = Some(initial_now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
 
     loop {
         let trigger = triggers.recv_until(next_tick_at);
@@ -1120,22 +1123,23 @@ fn run_runtime_loop(
                     let result: Result<(), SessionRuntimeError> = (|| match command.mutation {
                         RuntimeMutation::PrepareHandoff { .. } => Ok(()),
                         RuntimeMutation::UnlockFocused => {
-                            if let Some(observation) =
-                                herdr.observe_focused_tab().map_err(DaemonError::Herdr)?
+                            if let Some(observation) = herdr
+                                .observe_focused_tab()
+                                .map_err(RefreshExecutionError::Herdr)?
                             {
                                 tab_state
                                     .mutate(|state| state.unlock_tab(&observation.tab.tab_id))?;
                             }
                             let now = Instant::now();
                             state.note_refresh_trigger(now);
-                            next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                            next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
                             Ok(())
                         }
                         RuntimeMutation::UnlockAll => {
                             tab_state.mutate(crate::locks::SessionTabState::unlock_all)?;
                             let now = Instant::now();
                             state.note_refresh_trigger(now);
-                            next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                            next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
                             Ok(())
                         }
                         RuntimeMutation::RepairStateDiscard => {
@@ -1143,7 +1147,7 @@ fn run_runtime_loop(
                                 .repair_discard(crate::locks::RepairConfirmation::confirmed())?;
                             let now = Instant::now();
                             state.note_refresh_trigger(now);
-                            next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                            next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
                             Ok(())
                         }
                     })();
@@ -1162,28 +1166,28 @@ fn run_runtime_loop(
                 RuntimeControlEvent::Trigger(_) => {
                     let now = Instant::now();
                     state.note_refresh_trigger(now);
-                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                    next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
                     continue;
                 }
             }
         }
 
         let now = Instant::now();
-        match daemon::execute_one_shot(herdr, state, tab_state, now) {
+        match refresh_executor::execute_one_shot(herdr, state, tab_state, now) {
             Ok(_) => {
                 metadata.last_evaluation_unix_ms = Some(unix_time_after(Duration::ZERO));
                 metadata.last_failure = None;
             }
             Err(error) if error.proves_session_stop() => return Ok(()),
-            Err(error @ DaemonError::Herdr(_)) => {
+            Err(error @ RefreshExecutionError::Herdr(_)) => {
                 // Ambiguous transport/application failures end this evaluation only.
                 metadata.last_failure = Some(error.to_string());
             }
             Err(error) => return Err(error.into()),
         }
-        next_tick_at = state
-            .next_sample_at()
-            .or(Some(now + daemon::DEFAULT_SESSION_REFRESH_INTERVAL));
+        next_tick_at = state.next_sample_at().or(Some(
+            now + refresh_executor::DEFAULT_SESSION_REFRESH_INTERVAL,
+        ));
         metadata.next_periodic_unix_ms = next_tick_at
             .map(|next| unix_time_after(next.saturating_duration_since(Instant::now())));
         write_metadata(metadata_path, metadata)?;
@@ -1521,7 +1525,7 @@ pub enum SessionRuntimeError {
     StatePath(crate::paths::StatePathError),
     SessionTabState(crate::locks::SessionTabStateError),
     Startup(crate::startup::StartupError),
-    Daemon(DaemonError),
+    RefreshExecution(RefreshExecutionError),
     StartupGateBusy(PathBuf),
     AlreadyOwned(String),
     SpawnRuntime(io::Error),
@@ -1550,7 +1554,9 @@ impl fmt::Display for SessionRuntimeError {
                 )
             }
             Self::Startup(error) => write!(formatter, "session runtime startup failed: {error}"),
-            Self::Daemon(error) => write!(formatter, "session runtime evaluation failed: {error}"),
+            Self::RefreshExecution(error) => {
+                write!(formatter, "session runtime evaluation failed: {error}")
+            }
             Self::StartupGateBusy(path) => write!(
                 formatter,
                 "Session Runtime startup gate `{}` is busy",
@@ -1639,9 +1645,9 @@ impl From<crate::startup::StartupError> for SessionRuntimeError {
     }
 }
 
-impl From<DaemonError> for SessionRuntimeError {
-    fn from(error: DaemonError) -> Self {
-        Self::Daemon(error)
+impl From<RefreshExecutionError> for SessionRuntimeError {
+    fn from(error: RefreshExecutionError) -> Self {
+        Self::RefreshExecution(error)
     }
 }
 

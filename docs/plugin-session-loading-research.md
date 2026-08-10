@@ -1,7 +1,7 @@
 # Plugin Session Loading Research
 
 Date: 2026-07-08
-Status: research input; design accepted in `docs/adr/0006-start-daemons-through-ensure-started.md` and implementation plan in `docs/design/plugin-session-loading-plan.md`.
+Status: Historical, non-normative research input. Its design was superseded by [ADR 0010](adr/0010-adopt-session-owned-runtime-for-herdr-0.8.md); current behavior is defined by `CONTEXT.md` and ADR 0010.
 
 ## Goal
 

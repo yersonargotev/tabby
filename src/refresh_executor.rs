@@ -13,7 +13,9 @@ use crate::labeler::LabelPolicy;
 use crate::locks::{
     RenameIntentReconciliation, SessionTabStateError, SessionTabStateStore, TabLifecycleEvidence,
 };
-use crate::refresh_decision::{RefreshDecision, RefreshDecisionState, RefreshObservation};
+use crate::refresh_decision::{
+    ObservedProcess, RefreshDecision, RefreshDecisionState, RefreshObservation,
+};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -22,7 +24,7 @@ pub const DEFAULT_SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_FOCUS_QUIET_WINDOW: Duration = crate::refresh_decision::FOCUS_QUIET_WINDOW;
 
 #[derive(Debug, Default)]
-pub struct DaemonState {
+pub struct RefreshExecutorState {
     label_policy: LabelPolicy,
 }
 
@@ -37,7 +39,7 @@ pub fn execute_one_shot<C>(
     state: &mut OneShotRefreshState,
     tab_state: &SessionTabStateStore,
     observed_at: Instant,
-) -> Result<TickReport, DaemonError>
+) -> Result<TickReport, RefreshExecutionError>
 where
     C: HerdrApi,
 {
@@ -57,11 +59,11 @@ where
 
 fn evaluate_focused_sample<C>(
     herdr: &mut C,
-    runtime: &mut DaemonState,
+    runtime: &mut RefreshExecutorState,
     decision_state: &mut RefreshDecisionState,
     tab_state: &SessionTabStateStore,
     observed_at: Instant,
-) -> Result<TickReport, DaemonError>
+) -> Result<TickReport, RefreshExecutionError>
 where
     C: HerdrApi,
 {
@@ -128,11 +130,20 @@ where
             pane_id: pane.pane_id.clone(),
             pane_revision: pane.revision,
             visible_label: current_label.clone(),
-            working_directory: pane.cwd.clone(),
-            significant_command: process_info
+            working_directory: observation.working_directory,
+            foreground_processes: process_info
                 .as_ref()
-                .and_then(|info| info.foreground_processes.first())
-                .map(|process| process.name.clone()),
+                .map(|info| {
+                    info.foreground_processes
+                        .iter()
+                        .map(|process| ObservedProcess {
+                            name: process.name.clone(),
+                            argv: process.argv.clone(),
+                            cmdline: process.cmdline.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             candidate,
             manually_locked: false,
             automatic_label_baseline: persisted_plugin_label,
@@ -186,7 +197,7 @@ where
             }
         }
         RefreshDecision::Fault { diagnostic } => {
-            return Err(DaemonError::DecisionFault(diagnostic));
+            return Err(RefreshExecutionError::DecisionFault(diagnostic));
         }
         RefreshDecision::WaitUntil(_) | RefreshDecision::Observe | RefreshDecision::Stop => {
             unreachable!("sample decision returned scheduler action")
@@ -212,7 +223,7 @@ fn revalidate_focused_candidate<C>(
     expected_label: &str,
     expected_candidate: &str,
     expected_lifecycle: &TabLifecycleEvidence,
-) -> Result<bool, DaemonError>
+) -> Result<bool, RefreshExecutionError>
 where
     C: HerdrApi,
 {
@@ -247,12 +258,12 @@ fn lifecycle_evidence(tab: &TabInfo, pane: &crate::herdr_client::PaneInfo) -> Ta
 
 #[derive(Debug)]
 pub struct OneShotRefreshState {
-    runtime: DaemonState,
+    runtime: RefreshExecutorState,
     decision: RefreshDecisionState,
 }
 
 impl OneShotRefreshState {
-    pub fn new(runtime: DaemonState) -> Self {
+    pub fn new(runtime: RefreshExecutorState) -> Self {
         Self {
             runtime,
             decision: RefreshDecisionState::new(crate::stability::StabilityPolicy::default()),
@@ -321,13 +332,13 @@ fn skipped_tab_report(tab: TabInfo, action: TabTickAction) -> TabTickReport {
 }
 
 #[derive(Debug)]
-pub enum DaemonError {
+pub enum RefreshExecutionError {
     Herdr(HerdrError),
     SessionTabState(SessionTabStateError),
     DecisionFault(String),
 }
 
-impl fmt::Display for DaemonError {
+impl fmt::Display for RefreshExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Herdr(error) => write!(formatter, "refresher Herdr operation failed: {error}"),
@@ -341,7 +352,7 @@ impl fmt::Display for DaemonError {
     }
 }
 
-impl DaemonError {
+impl RefreshExecutionError {
     pub fn proves_session_stop(&self) -> bool {
         matches!(
             self,
@@ -354,7 +365,7 @@ impl DaemonError {
     }
 }
 
-impl std::error::Error for DaemonError {
+impl std::error::Error for RefreshExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Herdr(error) => Some(error),
@@ -364,13 +375,13 @@ impl std::error::Error for DaemonError {
     }
 }
 
-impl From<HerdrError> for DaemonError {
+impl From<HerdrError> for RefreshExecutionError {
     fn from(error: HerdrError) -> Self {
         Self::Herdr(error)
     }
 }
 
-impl From<SessionTabStateError> for DaemonError {
+impl From<SessionTabStateError> for RefreshExecutionError {
     fn from(error: SessionTabStateError) -> Self {
         Self::SessionTabState(error)
     }
@@ -402,7 +413,7 @@ mod tests {
             vec![pane("w1:p1", "w1:t1", true, "tabby")],
         )
         .with_process_info(process("w1:p1", "nvim", &["nvim"]));
-        let mut state = OneShotRefreshState::new(DaemonState::default());
+        let mut state = OneShotRefreshState::new(RefreshExecutorState::default());
 
         let first =
             execute_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
@@ -455,7 +466,7 @@ mod tests {
             vec![pane("w1:p1", "w1:t1", true, "tabby")],
         )
         .with_process_info(process("w1:p1", "nvim", &["nvim"]));
-        let mut state = OneShotRefreshState::new(DaemonState::default());
+        let mut state = OneShotRefreshState::new(RefreshExecutorState::default());
 
         execute_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
         herdr.set_process_info(process("w1:p1", "codex", &["codex"]));
@@ -496,7 +507,7 @@ mod tests {
         replacement_pane.revision = Some(2);
         let mut herdr = FakeHerdr::new(vec![original_tab.clone()], vec![original_pane.clone()])
             .with_process_info(process("w1:p1", "nvim", &["nvim"]));
-        let mut state = OneShotRefreshState::new(DaemonState::default());
+        let mut state = OneShotRefreshState::new(RefreshExecutorState::default());
 
         execute_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
         herdr = herdr.with_observation_sequence(vec![
