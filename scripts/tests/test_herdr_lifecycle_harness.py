@@ -36,6 +36,7 @@ class HarnessPlanTests(unittest.TestCase):
         )
 
         plan = json.loads(completed.stdout)
+        self.assertEqual(plan["transcript_schema_version"], 1)
         self.assertEqual([case["name"] for case in plan["cases"]], ["default", "named"])
         self.assertEqual(plan["cases"][0]["herdr_session_args"], [])
         self.assertEqual(

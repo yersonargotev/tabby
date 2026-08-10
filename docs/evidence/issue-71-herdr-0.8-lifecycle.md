@@ -8,7 +8,7 @@ Result: passed
 
 The run used `scripts/herdr_lifecycle_harness.py`. It created one temporary root under `/tmp` and redirected `HOME`, every XDG root, `TMPDIR`, and `HERDR_CONFIG_PATH` beneath it. It removed inherited Herdr socket and plugin-state variables before starting either session. Cleanup stopped both isolated servers and removed only that validated temporary root.
 
-The harness supports `--plan --root <path>` so its full environment and default/named command topology can be inspected without starting a process. A normal live run writes a sanitized JSONL transcript to `.scratch/herdr-lifecycle-transcript.jsonl`; sandbox and repository paths are replaced with `<sandbox>` and `<repo>`. The successful run summarized here is checked in as [`issue-71-herdr-0.8-lifecycle.jsonl`](issue-71-herdr-0.8-lifecycle.jsonl).
+The harness supports `--plan --root <path>` so its full environment and default/named command topology can be inspected without starting a process. A normal live run writes a schema-versioned, sanitized JSONL transcript to `.scratch/herdr-lifecycle-transcript.jsonl`; sandbox and repository paths are replaced with `<sandbox>` and `<repo>`. The successful schema version 1 run summarized here is checked in as [`issue-71-herdr-0.8-lifecycle.jsonl`](issue-71-herdr-0.8-lifecycle.jsonl).
 
 ## Real-runtime observations
 
@@ -39,6 +39,8 @@ The real harness intentionally does not corrupt protocol traffic or persisted by
 
 | Contract | Test evidence |
 | --- | --- |
+| Zero Herdr work during Focus Quiet Window | `focus_quiet_window_performs_no_herdr_work` counts zero focused observations, process inspections, and renames at 999 ms |
+| Latest focus is the only rename target | `latest_focus_trigger_is_the_only_tab_that_can_rename` supersedes an earlier sampled focus and records only the new tab's rename |
 | Proven stop vs timeout/no-listener | `refresh_executor` transport classification and `session_runtime` loop behavior |
 | Disappearing/reused target | `one_shot_revalidation_rejects_a_reused_lifecycle_before_rename` |
 | Rename target/source/default/manual reconciliation | `locks::tests::automatic_rename_intent_*` and `locks::tests::reconciliation_*` |

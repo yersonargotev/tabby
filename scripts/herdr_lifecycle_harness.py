@@ -18,12 +18,13 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TABBY = REPO_ROOT / "target" / "debug" / "tabby"
 PLUGIN_ID = "yersonargotev.tabby"
+TRANSCRIPT_SCHEMA_VERSION = 1
 READY_RE = re.compile(
     r"Session Runtime: Ready pid=(?P<pid>\d+).*\n"
     r"Session Runtime details: launch_id=(?P<launch>\S+).*"
@@ -67,6 +68,7 @@ def plan(root: Path) -> Dict[str, Any]:
     }
     return {
         "root": str(root),
+        "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
         "environment": visible_environment,
         "removed_inherited_herdr_variables": sorted(
             name for name in os.environ if name.startswith("HERDR_")
@@ -118,6 +120,7 @@ class Recorder:
     ) -> None:
         self.records.append(
             {
+                "schema_version": TRANSCRIPT_SCHEMA_VERSION,
                 "at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "case": case,
                 "step": step,
@@ -132,6 +135,7 @@ class Recorder:
     def assertion(self, case: str, step: str, detail: str) -> None:
         self.records.append(
             {
+                "schema_version": TRANSCRIPT_SCHEMA_VERSION,
                 "at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "case": case,
                 "step": step,
@@ -439,7 +443,7 @@ def runtime_after_evaluation(case: SessionCase, previous: Optional[int]) -> Opti
 
 def exercise_focused_process_and_manual_lock(
     case: SessionCase,
-) -> Tuple[str, str]:
+) -> str:
     created = case.herdr(
         "create-focused-workspace",
         "workspace",
@@ -479,7 +483,7 @@ def exercise_focused_process_and_manual_lock(
         "manual-lock",
         "manual label became a persisted lock and blocked a later periodic overwrite",
     )
-    return pane_id, tab_id
+    return tab_id
 
 
 def exercise_client_detach(case: SessionCase, owner: ReadyRuntime) -> ReadyRuntime:
@@ -563,10 +567,26 @@ def exercise_release_handoff(
         raise HarnessFailure("release manifest did not resolve the packaged binary")
     if "cooperative handoff" not in completed.stdout:
         raise HarnessFailure("release install did not report cooperative handoff")
+    evaluation_before_action = replacement.last_evaluation_unix_ms
+    case.herdr(
+        "release-manifest-action",
+        "plugin",
+        "action",
+        "invoke",
+        "refresh",
+        "--plugin",
+        PLUGIN_ID,
+    )
+    wait_for(
+        "release manifest refresh action",
+        4.0,
+        lambda: runtime_after_evaluation(case, evaluation_before_action),
+    )
+    case.herdr("release-manifest-action-log", "plugin", "log", "list")
     case.recorder.assertion(
         case.name,
         "release-manifest-handoff",
-        "plain install linked ../../bin/tabby and replaced the prior owner cooperatively",
+        "plain install linked ../../bin/tabby, replaced the prior owner cooperatively, and a Herdr action executed through the release manifest",
     )
     return replacement
 
@@ -629,7 +649,7 @@ def run_live(output: Path) -> None:
             exercise_trigger_burst(case, owners[case.name])
             owners[case.name] = exercise_quiet_and_periodic(case)
 
-        _, default_tab_id = exercise_focused_process_and_manual_lock(default)
+        default_tab_id = exercise_focused_process_and_manual_lock(default)
         named_created = named.herdr(
             "create-focused-workspace",
             "workspace",
@@ -702,7 +722,12 @@ def run_live(output: Path) -> None:
                     case.stop_server("cleanup-stop")
             except Exception as error:
                 recorder.records.append(
-                    {"case": case.name, "step": "cleanup-stop", "error": str(error)}
+                    {
+                        "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+                        "case": case.name,
+                        "step": "cleanup-stop",
+                        "error": str(error),
+                    }
                 )
         write_records(output, recorder.records)
         require_descendant(root, Path("/tmp"))

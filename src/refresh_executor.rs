@@ -402,6 +402,81 @@ mod tests {
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn focus_quiet_window_performs_no_herdr_work() {
+        let temp_dir = TestTempDir::new();
+        let socket = crate::startup::SessionSocket::resolve(temp_dir.path().join("session.sock"))
+            .expect("session socket");
+        let tab_state = SessionTabStateStore::open(temp_dir.path(), &socket).expect("tab state");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]));
+        let mut state = OneShotRefreshState::new(RefreshExecutorState::default());
+        state.note_refresh_trigger(start);
+
+        execute_one_shot(
+            &mut herdr,
+            &mut state,
+            &tab_state,
+            start + Duration::from_millis(999),
+        )
+        .expect("quiet tick");
+
+        assert_eq!(herdr.observation_calls, 0);
+        assert!(herdr.process_info_calls.is_empty());
+        assert!(herdr.renames.is_empty());
+    }
+
+    #[test]
+    fn latest_focus_trigger_is_the_only_tab_that_can_rename() {
+        let temp_dir = TestTempDir::new();
+        let socket = crate::startup::SessionSocket::resolve(temp_dir.path().join("session.sock"))
+            .expect("session socket");
+        let tab_state = SessionTabStateStore::open(temp_dir.path(), &socket).expect("tab state");
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "old-a", true), tab("w1:t2", "old-b", false)],
+            vec![
+                pane("w1:p1", "w1:t1", true, "tabby"),
+                pane("w1:p2", "w1:t2", false, "tabby"),
+            ],
+        )
+        .with_process_info(process("w1:p1", "nvim", &["nvim"]))
+        .with_process_info(process("w1:p2", "codex", &["codex"]));
+        let mut state = OneShotRefreshState::new(RefreshExecutorState::default());
+
+        execute_one_shot(&mut herdr, &mut state, &tab_state, start)
+            .expect("sample before newer focus");
+        herdr.tabs[0].focused = false;
+        herdr.tabs[1].focused = true;
+        herdr.panes[0].focused = false;
+        herdr.panes[1].focused = true;
+        state.note_refresh_trigger(start + Duration::from_millis(100));
+
+        execute_one_shot(
+            &mut herdr,
+            &mut state,
+            &tab_state,
+            start + Duration::from_millis(1100),
+        )
+        .expect("latest focus first sample");
+        execute_one_shot(
+            &mut herdr,
+            &mut state,
+            &tab_state,
+            start + Duration::from_millis(1600),
+        )
+        .expect("latest focus stable sample");
+
+        assert_eq!(
+            herdr.renames,
+            vec![("w1:t2".to_string(), "codex".to_string())]
+        );
+    }
+
+    #[test]
     fn focused_one_shot_requires_two_samples_then_records_intent_before_rename() {
         let temp_dir = TestTempDir::new();
         let socket = crate::startup::SessionSocket::resolve(temp_dir.path().join("session.sock"))
@@ -547,6 +622,7 @@ mod tests {
         panes: Vec<PaneInfo>,
         process_infos: BTreeMap<String, PaneProcessInfo>,
         observation_sequence: Vec<crate::herdr_client::FocusedTabObservation>,
+        observation_calls: usize,
         process_info_calls: Vec<String>,
         renames: Vec<(String, String)>,
     }
@@ -558,6 +634,7 @@ mod tests {
                 panes,
                 process_infos: BTreeMap::new(),
                 observation_sequence: Vec::new(),
+                observation_calls: 0,
                 process_info_calls: Vec::new(),
                 renames: Vec::new(),
             }
@@ -593,6 +670,7 @@ mod tests {
         fn observe_focused_tab(
             &mut self,
         ) -> Result<Option<crate::herdr_client::FocusedTabObservation>, HerdrError> {
+            self.observation_calls += 1;
             if !self.observation_sequence.is_empty() {
                 return Ok(Some(self.observation_sequence.remove(0)));
             }
