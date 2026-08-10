@@ -34,7 +34,6 @@ const STARTUP_GATE_NAME: &str = "startup.lock";
 const RUNTIME_LEASE_NAME: &str = "runtime.lease";
 const CONTROL_SCHEMA_VERSION: u8 = 1;
 const RUNTIME_METADATA_SCHEMA_VERSION: u8 = 1;
-const STARTUP_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_LEASE_WAIT: Duration = Duration::from_secs(1);
 const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(1);
@@ -414,9 +413,8 @@ pub fn ensure_ready_owner_from_env(trigger: RefreshTrigger) -> Result<String, Se
             owner.pid
         ),
         EnsureRuntimeOutcome::Busy => {
-            return Err(SessionRuntimeError::StartupGateBusy(
-                RuntimePaths::for_launch(&launch).startup_gate,
-            ));
+            "Tabby Session Runtime startup gate is busy; another hook is ensuring readiness"
+                .to_string()
         }
         EnsureRuntimeOutcome::TimedOut => {
             return Err(SessionRuntimeError::Readiness(
@@ -546,13 +544,13 @@ pub fn repair_session_state_from_env() -> Result<String, SessionRuntimeError> {
             )?;
         }
         RuntimeInspection::Absent => {
-            crate::locks::SessionTabStateStore::open(&state_base, &socket)?
+            crate::locks::SessionTabStateStore::open_for_repair(&state_base, &socket)?
                 .repair_discard(crate::locks::RepairConfirmation::confirmed())?;
         }
         RuntimeInspection::Faulted {
             lease_held: false, ..
         } => {
-            crate::locks::SessionTabStateStore::open(&state_base, &socket)?
+            crate::locks::SessionTabStateStore::open_for_repair(&state_base, &socket)?
                 .repair_discard(crate::locks::RepairConfirmation::confirmed())?;
         }
         RuntimeInspection::Starting { .. }
@@ -759,16 +757,10 @@ impl SessionRuntimeAdapter for SystemSessionRuntimeAdapter {
         }
         ensure_private_directory(parent)?;
 
-        let deadline = Instant::now() + STARTUP_GATE_TIMEOUT;
-        loop {
-            if let Some(lease) = LifetimeLease::try_acquire(path)? {
-                return Ok(Box::new(lease));
-            }
-            if Instant::now() >= deadline {
-                return Err(SessionRuntimeError::StartupGateBusy(path.to_path_buf()));
-            }
-            thread::park_timeout(Duration::from_millis(25));
-        }
+        LifetimeLease::try_acquire(path)?.map_or_else(
+            || Err(SessionRuntimeError::StartupGateBusy(path.to_path_buf())),
+            |lease| Ok(Box::new(lease) as Box<dyn StartupGateGuard>),
+        )
     }
 
     fn signal_ready_owner(
@@ -1177,7 +1169,7 @@ fn run_runtime_loop(
         }
 
         let now = Instant::now();
-        match daemon::evaluate_one_shot(herdr, state, tab_state, now) {
+        match daemon::execute_one_shot(herdr, state, tab_state, now) {
             Ok(_) => {
                 metadata.last_evaluation_unix_ms = Some(unix_time_after(Duration::ZERO));
                 metadata.last_failure = None;
@@ -2114,6 +2106,41 @@ mod tests {
                 || matches!(second, EnsureRuntimeOutcome::Busy)
         );
 
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn a_busy_system_startup_gate_returns_to_the_hook_without_waiting() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-busy-system-gate-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        let _held_gate = LifetimeLease::try_acquire(&paths.startup_gate)
+            .expect("acquire gate")
+            .expect("gate available");
+        let mut adapter = SystemSessionRuntimeAdapter::default();
+        let started_at = Instant::now();
+
+        let error = match adapter.acquire_startup_gate(&paths.startup_gate) {
+            Ok(_) => panic!("second hook must see a busy gate"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, SessionRuntimeError::StartupGateBusy(_)));
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "a concurrent hook must return Busy promptly"
+        );
         fs::remove_dir_all(&state_base).expect("remove state base");
     }
 

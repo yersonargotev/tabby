@@ -4,7 +4,7 @@ Status: Accepted. Supersedes ADR 0009 and replaces ADR 0006's registration-only 
 
 ## Context
 
-The Hybrid Session Refresher restored label freshness by combining a persistent `events.subscribe` connection with five-second observation. It survives a client detach because it is detached from the invoking terminal, but it treats stream and RPC failures as generic process errors, leaves stale startup metadata, and has no guaranteed restart path when Herdr restores a session.
+The prior long-running refresher restored label freshness by combining a persistent `events.subscribe` connection with five-second observation. It survives a client detach because it is detached from the invoking terminal, but it treats stream and RPC failures as generic process errors, leaves stale startup metadata, and has no guaranteed restart path when Herdr restores a session.
 
 Herdr 0.8.0, protocol 19, provides two better lifecycle inputs: a plugin `[[startup]]` hook for newly started and restored sessions, and `[[events]] pane.focused` hooks for focus ingress. It also provides `session.snapshot` for a coherent view of workspaces, tabs, panes, and focus. A persistent `events.subscribe` connection remains an inferior ingress because the verified implementation polls upstream every 100 ms and does not remove the need for periodic foreground-process observation.
 
@@ -47,7 +47,7 @@ The architecture will use deep modules with these responsibilities:
 
 ## Considered Options
 
-- Keep the Hybrid Session Refresher and persistent subscription. This preserves current implementation shape but retains unnecessary upstream polling and does not solve restore ownership or session-scoped state.
+- Keep the prior long-running refresher and persistent subscription. This preserves its implementation shape but retains unnecessary upstream polling and does not solve restore ownership or session-scoped state.
 - Use only focus hooks and one-shot refreshes. This removes recurring work but knowingly leaves labels stale when foreground activity changes without focus.
 - Run a global supervisor across all Herdr Sessions. This improves crash recovery latency but adds cross-session discovery, lifecycle, and ownership complexity outside Herdr's plugin model.
 - Preserve Herdr 0.7.x compatibility modes. This increases branches and testing burden for a contract that is no longer the installed baseline.
@@ -58,4 +58,4 @@ Tabby can state detach, stop, and restore behavior precisely and can recover res
 
 Continuous foreground freshness intentionally costs one bounded evaluation cycle every five seconds per Ready Session Runtime. Runtime crashes are not recovered until another supported hook or manual action occurs. Stopped-session state may remain on disk until explicitly forgotten. Installation now has the side effect of starting or cooperatively replacing the current runtime.
 
-This decision requires replacing the current startup metadata model, persistent subscription ingress, plugin manifests, global lock store, duplicated refresh orchestration, install contract, status projections, and normative Hybrid Session Refresher documentation.
+This decision replaces the former startup metadata model, persistent subscription ingress, plugin manifests, shared cross-session state, duplicated refresh orchestration, install contract, status projections, and predecessor documentation.

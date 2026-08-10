@@ -1,4 +1,4 @@
-//! Herdr tab auto-renaming orchestration.
+//! Refresh execution adapter for Herdr and session-scoped state.
 //!
 //! The normal runtime path is the Session Runtime: one long-running
 //! process per Herdr Session that receives Refresh Triggers, observes only the
@@ -9,33 +9,30 @@
 #[cfg(test)]
 use crate::herdr_client::PaneInfo;
 use crate::herdr_client::{HerdrApi, HerdrError, TabInfo};
-use crate::labeler::{LabelCandidate, LabelPolicy};
+use crate::labeler::LabelPolicy;
 use crate::locks::{
-    ManualLockDecision, RenameIntentReconciliation, SessionTabStateError, SessionTabStateStore,
-    TabLifecycleEvidence, detect_manual_lock,
+    RenameIntentReconciliation, SessionTabStateError, SessionTabStateStore, TabLifecycleEvidence,
 };
-use crate::stability::{DEFAULT_POLL_INTERVAL, StabilityDecision, StabilityPolicy, StabilityState};
-use std::collections::BTreeMap;
+use crate::refresh_decision::{RefreshDecision, RefreshDecisionState, RefreshObservation};
 use std::fmt;
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_FOCUS_QUIET_WINDOW: Duration = Duration::from_millis(1000);
 pub const DEFAULT_SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// Compatibility re-export while the runtime imports its scheduling interval.
+pub const DEFAULT_FOCUS_QUIET_WINDOW: Duration = crate::refresh_decision::FOCUS_QUIET_WINDOW;
 
 #[derive(Debug, Default)]
 pub struct DaemonState {
-    tabs: BTreeMap<String, TabRuntimeState>,
     label_policy: LabelPolicy,
-    stability_policy: StabilityPolicy,
 }
 
-/// Executes at most one bounded sample of the focused-tab decision flow.
+/// Executes the effects for at most one decision step.
 ///
 /// Session Runtime owns scheduling: it calls this at the quiet-window end and
 /// at `OneShotRefreshState::next_sample_at()` until the evaluation completes.
 /// The only mutation performed by this path is preceded by a durable,
 /// session-scoped Automatic Rename Intent.
-pub fn evaluate_one_shot<C>(
+pub fn execute_one_shot<C>(
     herdr: &mut C,
     state: &mut OneShotRefreshState,
     tab_state: &SessionTabStateStore,
@@ -44,42 +41,24 @@ pub fn evaluate_one_shot<C>(
 where
     C: HerdrApi,
 {
-    if state.is_quiet(observed_at) {
-        return Ok(quiet_window_tick());
+    match state.decision.next(observed_at) {
+        RefreshDecision::WaitUntil(_) => Ok(quiet_window_tick()),
+        RefreshDecision::Stop => Ok(TickReport { tabs: Vec::new() }),
+        RefreshDecision::Observe => evaluate_focused_sample(
+            herdr,
+            &mut state.runtime,
+            &mut state.decision,
+            tab_state,
+            observed_at,
+        ),
+        decision => unreachable!("scheduler returned non-scheduling decision: {decision:?}"),
     }
-    state.quiet_until = None;
-    if state.evaluation.is_none() {
-        state.begin_evaluation(observed_at);
-    }
-
-    let Some(evaluation) = state.evaluation else {
-        return Ok(quiet_window_tick());
-    };
-    if observed_at >= evaluation.deadline || evaluation.generation != state.trigger_generation {
-        state.complete_evaluation();
-        return Ok(TickReport { tabs: Vec::new() });
-    }
-
-    let report = evaluate_focused_sample(herdr, &mut state.runtime, tab_state, observed_at)?;
-    let completed = report.tabs.is_empty()
-        || report
-            .tabs
-            .iter()
-            .all(|tab| !matches!(tab.action, TabTickAction::DeferredUnstable { .. }));
-    let exhausted = state.evaluation.as_mut().is_some_and(|evaluation| {
-        evaluation.samples_taken = evaluation.samples_taken.saturating_add(1);
-        evaluation.last_sample_at = Some(observed_at);
-        evaluation.samples_taken >= DEFAULT_MAX_EVALUATION_SAMPLES
-    });
-    if completed || exhausted {
-        state.complete_evaluation();
-    }
-    Ok(report)
 }
 
 fn evaluate_focused_sample<C>(
     herdr: &mut C,
     runtime: &mut DaemonState,
+    decision_state: &mut RefreshDecisionState,
     tab_state: &SessionTabStateStore,
     observed_at: Instant,
 ) -> Result<TickReport, DaemonError>
@@ -87,6 +66,7 @@ where
     C: HerdrApi,
 {
     let Some(observation) = herdr.observe_focused_tab()? else {
+        decision_state.stop();
         return Ok(TickReport { tabs: Vec::new() });
     };
     let tab = observation.tab;
@@ -95,9 +75,10 @@ where
 
     match tab_state.reconcile_automatic_rename_intent(&tab.tab_id, &tab.label, &lifecycle)? {
         RenameIntentReconciliation::ReusedTab => {
-            runtime.tabs.remove(&tab.tab_id);
+            decision_state.reset_tab(&tab.tab_id);
         }
         RenameIntentReconciliation::PreservedManualIntent { label } => {
+            decision_state.stop();
             return Ok(TickReport {
                 tabs: vec![skipped_tab_report(
                     tab,
@@ -113,6 +94,7 @@ where
     }
 
     if tab_state.read(|state| state.is_locked(&tab.tab_id))? {
+        decision_state.stop();
         return Ok(TickReport {
             tabs: vec![skipped_tab_report(tab, TabTickAction::SkippedLocked)],
         });
@@ -126,73 +108,61 @@ where
     } else {
         (None, None)
     };
-    let Some(candidate) = runtime
+    let candidate = runtime
         .label_policy
-        .candidate_for_pane(&pane, process_info.as_ref())
-    else {
-        return Ok(TickReport {
-            tabs: vec![TabTickReport {
-                tab_id: tab.tab_id,
-                current_label: tab.label,
-                selected_pane_id: Some(pane.pane_id),
-                raw_candidate_label: None,
-                stable_candidate_label: None,
-                process_info_error,
-                action: TabTickAction::SkippedNoCandidate,
-            }],
-        });
-    };
+        .candidate_for_pane(&pane, process_info.as_ref());
 
-    let raw_candidate_label = candidate.label().to_string();
+    let raw_candidate_label = candidate
+        .as_ref()
+        .map(|candidate| candidate.label().to_string());
     let tab_id = tab.tab_id;
     let current_label = tab.label;
     let persisted_plugin_label =
         tab_state.read(|state| state.last_plugin_label(&tab_id).map(str::to_string))?;
-    let tab_runtime = runtime
-        .tabs
-        .entry(tab_id.clone())
-        .or_insert_with(|| TabRuntimeState::new(runtime.stability_policy));
-    let stability_decision = tab_runtime.stability.observe(candidate, observed_at);
-    let stable_label = stable_label_from_decision(&stability_decision).map(str::to_string);
-    let stable_candidate = stable_label
-        .as_ref()
-        .map(|label| LabelCandidate::working_directory_basename(label.clone()));
-
-    if let ManualLockDecision::Lock { label } = detect_manual_lock(
-        &current_label,
-        tab_runtime
-            .last_plugin_label
-            .as_deref()
-            .or(persisted_plugin_label.as_deref()),
-        stable_candidate.as_ref(),
-    ) {
-        tab_state.mutate(|state| state.lock_tab(tab_id.clone(), Some(label.clone())))?;
-        return Ok(TickReport {
-            tabs: vec![TabTickReport {
-                tab_id,
-                current_label,
-                selected_pane_id: Some(pane.pane_id),
-                raw_candidate_label: Some(raw_candidate_label),
-                stable_candidate_label: stable_label,
-                process_info_error,
-                action: TabTickAction::SkippedManualLockCreated {
-                    locked_label: label,
-                },
-            }],
-        });
-    }
-
-    let action = match stability_decision {
-        StabilityDecision::Pending => TabTickAction::DeferredUnstable {
-            candidate_label: raw_candidate_label.clone(),
+    let pure_decision = decision_state.decide_observation(
+        RefreshObservation {
+            session_identity: tab_state.session_identity().identity_hex(),
+            workspace_id: tab.workspace_id.clone(),
+            tab_id: tab_id.clone(),
+            tab_number: tab.number,
+            pane_id: pane.pane_id.clone(),
+            pane_revision: pane.revision,
+            visible_label: current_label.clone(),
+            working_directory: pane.cwd.clone(),
+            significant_command: process_info
+                .as_ref()
+                .and_then(|info| info.foreground_processes.first())
+                .map(|process| process.name.clone()),
+            candidate,
+            manually_locked: false,
+            automatic_label_baseline: persisted_plugin_label,
         },
-        StabilityDecision::Rename { label } | StabilityDecision::NoOp { label } => {
-            if label == current_label {
-                tab_state
-                    .mutate(|state| state.record_plugin_label(tab_id.clone(), label.clone()))?;
-                tab_runtime.last_plugin_label = Some(label.clone());
-                TabTickAction::SkippedAlreadyCurrent { label }
-            } else if revalidate_focused_candidate(
+        observed_at,
+    );
+    let stable_label = match &pure_decision {
+        RefreshDecision::RecordBaseline { label } | RefreshDecision::Rename { label } => {
+            Some(label.clone())
+        }
+        _ => None,
+    };
+    let action = match pure_decision {
+        RefreshDecision::SkipNoCandidate => TabTickAction::SkippedNoCandidate,
+        RefreshDecision::SkipLocked => TabTickAction::SkippedLocked,
+        RefreshDecision::CreateManualLock { label } => {
+            tab_state.mutate(|state| state.lock_tab(tab_id.clone(), Some(label.clone())))?;
+            TabTickAction::SkippedManualLockCreated {
+                locked_label: label,
+            }
+        }
+        RefreshDecision::Defer { candidate_label } => {
+            TabTickAction::DeferredUnstable { candidate_label }
+        }
+        RefreshDecision::RecordBaseline { label } => {
+            tab_state.mutate(|state| state.record_plugin_label(tab_id.clone(), label.clone()))?;
+            TabTickAction::SkippedAlreadyCurrent { label }
+        }
+        RefreshDecision::Rename { label } => {
+            if revalidate_focused_candidate(
                 herdr,
                 tab_state,
                 &tab_id,
@@ -207,7 +177,6 @@ where
                     lifecycle,
                 )?;
                 herdr.rename_tab(&tab_id, &label)?;
-                tab_runtime.last_plugin_label = Some(label.clone());
                 TabTickAction::Renamed {
                     from: current_label.clone(),
                     to: label,
@@ -216,13 +185,19 @@ where
                 TabTickAction::SkippedFocusChanged
             }
         }
+        RefreshDecision::Fault { diagnostic } => {
+            return Err(DaemonError::DecisionFault(diagnostic));
+        }
+        RefreshDecision::WaitUntil(_) | RefreshDecision::Observe | RefreshDecision::Stop => {
+            unreachable!("sample decision returned scheduler action")
+        }
     };
     Ok(TickReport {
         tabs: vec![TabTickReport {
             tab_id,
             current_label,
             selected_pane_id: Some(pane.pane_id),
-            raw_candidate_label: Some(raw_candidate_label),
+            raw_candidate_label,
             stable_candidate_label: stable_label,
             process_info_error,
             action,
@@ -270,71 +245,22 @@ fn lifecycle_evidence(tab: &TabInfo, pane: &crate::herdr_client::PaneInfo) -> Ta
     )
 }
 
-impl DaemonState {
-    fn reset_stability_for_next_evaluation(&mut self) {
-        for runtime in self.tabs.values_mut() {
-            runtime.stability = StabilityState::new(self.stability_policy);
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct TabRuntimeState {
-    stability: StabilityState,
-    last_plugin_label: Option<String>,
-}
-
-impl TabRuntimeState {
-    fn new(stability_policy: StabilityPolicy) -> Self {
-        Self {
-            stability: StabilityState::new(stability_policy),
-            last_plugin_label: None,
-        }
-    }
-}
-
-pub const DEFAULT_MAX_EVALUATION_SAMPLES: u8 = 3;
-pub const DEFAULT_EVALUATION_DEADLINE: Duration = Duration::from_millis(2500);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OneShotEvaluation {
-    generation: u64,
-    deadline: Instant,
-    samples_taken: u8,
-    last_sample_at: Option<Instant>,
-}
-
 #[derive(Debug)]
 pub struct OneShotRefreshState {
     runtime: DaemonState,
-    quiet_until: Option<Instant>,
-    trigger_deadline: Option<Instant>,
-    trigger_generation: u64,
-    evaluation: Option<OneShotEvaluation>,
+    decision: RefreshDecisionState,
 }
 
 impl OneShotRefreshState {
     pub fn new(runtime: DaemonState) -> Self {
         Self {
             runtime,
-            quiet_until: None,
-            trigger_deadline: None,
-            trigger_generation: 0,
-            evaluation: None,
+            decision: RefreshDecisionState::new(crate::stability::StabilityPolicy::default()),
         }
     }
 
     pub fn note_refresh_trigger(&mut self, observed_at: Instant) {
-        self.trigger_generation = self.trigger_generation.saturating_add(1);
-        self.quiet_until = Some(observed_at + DEFAULT_FOCUS_QUIET_WINDOW);
-        self.trigger_deadline = Some(observed_at + DEFAULT_EVALUATION_DEADLINE);
-        self.evaluation = None;
-        self.runtime.reset_stability_for_next_evaluation();
-    }
-
-    fn is_quiet(&self, observed_at: Instant) -> bool {
-        self.quiet_until
-            .is_some_and(|quiet_until| observed_at < quiet_until)
+        self.decision.note_trigger(observed_at);
     }
 
     pub fn poll_interval(&self) -> Duration {
@@ -344,38 +270,7 @@ impl OneShotRefreshState {
     /// Returns the earliest time when the current bounded evaluation needs
     /// another sample. The Session Runtime owns waiting and trigger delivery.
     pub fn next_sample_at(&self) -> Option<Instant> {
-        if let Some(quiet_until) = self.quiet_until {
-            return Some(quiet_until);
-        }
-
-        self.evaluation.and_then(|evaluation| {
-            (evaluation.samples_taken < DEFAULT_MAX_EVALUATION_SAMPLES)
-                .then(|| {
-                    evaluation
-                        .last_sample_at
-                        .map(|at| at + DEFAULT_POLL_INTERVAL)
-                })
-                .flatten()
-        })
-    }
-
-    fn begin_evaluation(&mut self, observed_at: Instant) {
-        self.evaluation = Some(OneShotEvaluation {
-            generation: self.trigger_generation,
-            deadline: self
-                .trigger_deadline
-                .take()
-                .unwrap_or(observed_at + DEFAULT_EVALUATION_DEADLINE),
-            samples_taken: 0,
-            last_sample_at: None,
-        });
-        self.runtime.reset_stability_for_next_evaluation();
-    }
-
-    fn complete_evaluation(&mut self) {
-        self.evaluation = None;
-        self.trigger_deadline = None;
-        self.runtime.reset_stability_for_next_evaluation();
+        self.decision.next_sample_at()
     }
 }
 
@@ -425,17 +320,11 @@ fn skipped_tab_report(tab: TabInfo, action: TabTickAction) -> TabTickReport {
     }
 }
 
-fn stable_label_from_decision(decision: &StabilityDecision) -> Option<&str> {
-    match decision {
-        StabilityDecision::Pending => None,
-        StabilityDecision::Rename { label } | StabilityDecision::NoOp { label } => Some(label),
-    }
-}
-
 #[derive(Debug)]
 pub enum DaemonError {
     Herdr(HerdrError),
     SessionTabState(SessionTabStateError),
+    DecisionFault(String),
 }
 
 impl fmt::Display for DaemonError {
@@ -444,6 +333,9 @@ impl fmt::Display for DaemonError {
             Self::Herdr(error) => write!(formatter, "refresher Herdr operation failed: {error}"),
             Self::SessionTabState(error) => {
                 write!(formatter, "session tab state operation failed: {error}")
+            }
+            Self::DecisionFault(diagnostic) => {
+                write!(formatter, "refresh decision fault: {diagnostic}")
             }
         }
     }
@@ -467,6 +359,7 @@ impl std::error::Error for DaemonError {
         match self {
             Self::Herdr(error) => Some(error),
             Self::SessionTabState(error) => Some(error),
+            Self::DecisionFault(_) => None,
         }
     }
 }
@@ -512,7 +405,7 @@ mod tests {
         let mut state = OneShotRefreshState::new(DaemonState::default());
 
         let first =
-            evaluate_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
+            execute_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
 
         assert_eq!(
             first.tabs[0].action,
@@ -526,7 +419,7 @@ mod tests {
         );
         assert!(herdr.renames.is_empty());
 
-        let second = evaluate_one_shot(
+        let second = execute_one_shot(
             &mut herdr,
             &mut state,
             &tab_state,
@@ -564,9 +457,9 @@ mod tests {
         .with_process_info(process("w1:p1", "nvim", &["nvim"]));
         let mut state = OneShotRefreshState::new(DaemonState::default());
 
-        evaluate_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
+        execute_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
         herdr.set_process_info(process("w1:p1", "codex", &["codex"]));
-        evaluate_one_shot(
+        execute_one_shot(
             &mut herdr,
             &mut state,
             &tab_state,
@@ -574,7 +467,7 @@ mod tests {
         )
         .expect("second sample");
         herdr.set_process_info(process("w1:p1", "nvim", &["nvim"]));
-        let third = evaluate_one_shot(
+        let third = execute_one_shot(
             &mut herdr,
             &mut state,
             &tab_state,
@@ -605,7 +498,7 @@ mod tests {
             .with_process_info(process("w1:p1", "nvim", &["nvim"]));
         let mut state = OneShotRefreshState::new(DaemonState::default());
 
-        evaluate_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
+        execute_one_shot(&mut herdr, &mut state, &tab_state, start).expect("first sample");
         herdr = herdr.with_observation_sequence(vec![
             crate::herdr_client::FocusedTabObservation {
                 tab: original_tab.clone(),
@@ -619,7 +512,7 @@ mod tests {
             },
         ]);
 
-        let report = evaluate_one_shot(
+        let report = execute_one_shot(
             &mut herdr,
             &mut state,
             &tab_state,

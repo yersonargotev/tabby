@@ -71,7 +71,7 @@ _Avoid_: reattach, process continuation, Client Detach
 
 **Session Runtime**:
 The single live Tabby owner associated with one running Herdr Session. It holds the Session Runtime Lease, coordinates automatic refresh activity and manual intent for only that session, and becomes Ready only after validating the session and opening its local control endpoint. Its externally diagnosable states are Absent, Starting, Ready, and Faulted.
-_Avoid_: Session Subscriber, Hybrid Session Refresher, Tabby Session Daemon
+_Avoid_: legacy runtime terminology
 
 **Startup Gate**:
 The short-lived session-scoped arbitration through which every startup request passes. It either discovers a Ready Session Runtime or starts one and waits for readiness; a spawned PID or metadata record alone is not proof of ownership.
@@ -123,7 +123,7 @@ _Avoid_: terminal session, shell session
 
 **Session-Scoped Tab State**:
 Persistent Manually Locked Tabs, Automatic Label Baselines, and unresolved Automatic Rename Intents that belong to exactly one validated Session Identity. Tab identities are meaningful only within that session; the same `tab_id` in another session refers to unrelated state and must never inherit its state. Pending evaluations, samples, triggers, quiet windows, and deadlines do not survive Session Restore.
-_Avoid_: global tab state, shared lock store
+_Avoid_: state shared across sessions
 
 **Forget Session Action**:
 An explicit user action that removes retained Session-Scoped Tab State for one validated Session Identity. Tabby does not infer permanent deletion from Session Stop and does not expire stopped-session state automatically.

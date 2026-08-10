@@ -1,6 +1,6 @@
 # Start Tabby Session Daemons through idempotent ensure-started
 
-Status: Superseded by ADR 0008 for normal CLI/manifest behavior.
+Status: Superseded by [ADR 0010](0010-adopt-session-owned-runtime-for-herdr-0.8.md). This is a historical record of the pre-Herdr-0.8 startup contract and is not normative.
 
 Tabby will not launch a long-running daemon implicitly from plain `tabby install`; install remains plugin registration/relink only. Herdr Session startup is explicit with `tabby install --start`, and all normal startup paths—the Herdr `start` action, manifest lifecycle hooks, and install-time startup—must converge on `tabby ensure-started`, which locks and validates one Tabby Session Daemon per Herdr Session before spawning the lower-level `tabby start` loop.
 

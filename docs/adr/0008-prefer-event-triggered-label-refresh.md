@@ -1,6 +1,6 @@
 # Prefer event-triggered label refresh
 
-Status: Superseded by ADR 0009 for normal automatic behavior.
+Status: Superseded by ADR 0009, which is itself superseded by [ADR 0010](0010-adopt-session-owned-runtime-for-herdr-0.8.md). This is a historical record and is not normative.
 
 Tabby will move away from a continuously polling daemon as the primary source of automatic label updates. Navigation Stability is more important than label freshness, so Tabby should update labels from explicit Herdr lifecycle/navigation triggers such as tab focus, tab creation, or workspace focus, with any needed stabilization happening after the trigger instead of through constant 500 ms UI-touching polling.
 

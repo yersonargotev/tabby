@@ -1,6 +1,6 @@
 # Plugin Session Loading Implementation Plan
 
-Status: implemented in `7e78988`; verification notes below.
+Status: Superseded by [ADR 0010](../adr/0010-adopt-session-owned-runtime-for-herdr-0.8.md). This is a historical implementation record for the pre-Herdr-0.8 startup model and is not normative.
 
 ## Final recommendation
 
@@ -86,4 +86,4 @@ Implement Tabby startup as an explicit, idempotent per Herdr Session flow:
 
 ## 2026-07-08 update
 
-This plan was implemented for the earlier daemon-startup design, then superseded by ADR 0008 after real usage showed the long-running polling daemon could still interfere with mouse tab navigation. The current accepted contract removes `ensure-started` and `install --start`; manifests run `tabby refresh` as a short One-Shot Refresh from focus/creation events instead of starting a permanent daemon.
+This plan was implemented for the earlier daemon-startup design and is retained only as historical evidence. ADR 0010 defines the current Session Runtime contract: Herdr 0.8 startup/focus hooks cross a Startup Gate, the owner receives short control signals, and installation ensures or cooperatively hands off that owner.

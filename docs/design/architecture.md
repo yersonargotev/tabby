@@ -64,7 +64,7 @@ Tabby prioritizes Navigation Stability while retaining five-second focused-tab f
 
 ## Manual lock semantics
 
-Manual locks persist across plugin runs. Users unlock explicitly with `unlock-focused` or `unlock-all`; there is no implicit auto-unlock in v1. The refresher and one-shot refresh path both respect persisted locks before inspecting panes or renaming.
+Manual locks persist across plugin runs. Users unlock explicitly with `unlock-focused` or `unlock-all`; there is no implicit auto-unlock in v1. The Session Runtime respects persisted locks before inspecting panes or renaming.
 
 ## Distribution model
 
@@ -86,7 +86,7 @@ Use unit tests for the pure behavior first:
 - ignored shell/wrapper behavior;
 - anti-flapping state transitions;
 - manual lock detection;
-- unlock actions over a temporary lock store.
+- session-scoped state mutations over a temporary state directory.
 
 Then add integration/manual verification against Herdr on macOS:
 

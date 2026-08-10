@@ -1,5 +1,7 @@
 # Persist manual rename locks across restarts
 
+Status: Partially superseded by [ADR 0010](0010-adopt-session-owned-runtime-for-herdr-0.8.md). Manual-intent priority remains accepted; the global lock-store and refresher mechanics described below are historical and not normative.
+
 Manual tab renames should create Manually Locked Tabs that survive plugin or daemon restarts. This is more stateful than in-memory session locks, but it protects intentional names after Herdr or the plugin restarts and makes manual user intent stronger than automatic naming.
 
 Herdr can reuse a `tab_id` after tab or workspace churn, so the ID alone is not a durable tab identity. Tabby treats a visible label that exactly matches Herdr's reported tab number as the default label of a fresh tab lifecycle. On the first observation of that default-labeled lifecycle it discards the reused ID's persisted lock and plugin-label baseline, resets matching in-memory refresher state, and resumes automatic naming. The refresher prunes runtime state and lifecycle markers when an ID disappears from Herdr's tab list so later reuse starts cleanly. A numeric label that does not match the reported tab number is preserved as possible manual intent.

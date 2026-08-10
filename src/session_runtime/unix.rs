@@ -111,30 +111,34 @@ pub(crate) fn bind_private_listener(
 }
 
 pub(crate) fn ensure_private_directory(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "private runtime path `{}` is not a real directory",
-                    path.display()
-                ),
-            ));
+    loop {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "private runtime path `{}` is not a real directory",
+                        path.display()
+                    ),
+                ));
+            }
+            Ok(metadata) if metadata.uid() != unsafe { libc::geteuid() } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "private runtime path `{}` is not owned by the current user",
+                        path.display()
+                    ),
+                ));
+            }
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::create_dir(path) {
+                Ok(()) => continue,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            },
+            Err(error) => return Err(error),
         }
-        Ok(metadata) if metadata.uid() != unsafe { libc::geteuid() } => {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "private runtime path `{}` is not owned by the current user",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(path)?;
-        }
-        Err(error) => return Err(error),
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
@@ -267,6 +271,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -418,5 +424,29 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn concurrent_runtime_hooks_can_create_the_same_private_directory() {
+        for attempt in 0..32 {
+            let directory = TempDir::new();
+            let path = directory.path.join(format!("shared-{attempt}"));
+            let barrier = Arc::new(Barrier::new(2));
+            let mut callers = Vec::new();
+            for _ in 0..2 {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                callers.push(thread::spawn(move || {
+                    barrier.wait();
+                    ensure_private_directory(&path)
+                }));
+            }
+            for caller in callers {
+                caller
+                    .join()
+                    .expect("private-directory caller did not panic")
+                    .expect("concurrent private-directory creation succeeds");
+            }
+        }
     }
 }

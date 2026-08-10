@@ -413,6 +413,7 @@ pub enum RenameIntentReconciliation {
 pub struct SessionTabStateStore {
     path: PathBuf,
     session: SessionSocket,
+    legacy_evidence_path: Option<PathBuf>,
 }
 
 /// A non-mutating diagnostic projection of one session's retained state.
@@ -498,11 +499,28 @@ impl SessionTabStateStore {
         session: &SessionSocket,
     ) -> Result<Self, SessionTabStateError> {
         let path = session_tab_state_path(state_base, &session.session_key)?;
+        let legacy_evidence_path = legacy_lock_store_path(&path)?;
+        ensure_no_legacy_global_evidence(&legacy_evidence_path)?;
         ensure_private_state_directory(
             path.parent()
                 .ok_or_else(|| SessionTabStateError::RelativePath(path.clone()))?,
         )?;
-        Self::at_path(path, session)
+        Self::at_path_with_legacy_evidence(path, session, Some(legacy_evidence_path))
+    }
+
+    /// Opens the selected state only for an explicit repair action. Runtime
+    /// evaluation must use `open`, which rejects identity-less legacy evidence.
+    pub fn open_for_repair(
+        state_base: impl AsRef<Path>,
+        session: &SessionSocket,
+    ) -> Result<Self, SessionTabStateError> {
+        let path = session_tab_state_path(state_base, &session.session_key)?;
+        let legacy_evidence_path = legacy_lock_store_path(&path)?;
+        ensure_private_state_directory(
+            path.parent()
+                .ok_or_else(|| SessionTabStateError::RelativePath(path.clone()))?,
+        )?;
+        Self::at_path_with_legacy_evidence(path, session, Some(legacy_evidence_path))
     }
 
     /// Uses an explicit absolute path, primarily for dependency-injected test
@@ -515,14 +533,16 @@ impl SessionTabStateStore {
         if !path.is_absolute() {
             return Err(SessionTabStateError::RelativePath(path));
         }
-        Ok(Self {
-            path,
-            session: session.clone(),
-        })
+        Self::at_path_with_legacy_evidence(path, session, None)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns the validated Session Identity this state store belongs to.
+    pub fn session_identity(&self) -> &SessionSocket {
+        &self.session
     }
 
     pub fn read<R>(
@@ -630,6 +650,9 @@ impl SessionTabStateStore {
     }
 
     fn load_locked(&self) -> Result<SessionTabState, SessionTabStateError> {
+        if let Some(legacy_evidence_path) = &self.legacy_evidence_path {
+            ensure_no_legacy_global_evidence(legacy_evidence_path)?;
+        }
         match read_session_state_bytes(&self.path) {
             Ok(contents) => {
                 let state: SessionTabState = serde_json::from_slice(&contents)?;
@@ -642,6 +665,21 @@ impl SessionTabStateStore {
             Err(error) => Err(error.into()),
         }
     }
+
+    fn at_path_with_legacy_evidence(
+        path: PathBuf,
+        session: &SessionSocket,
+        legacy_evidence_path: Option<PathBuf>,
+    ) -> Result<Self, SessionTabStateError> {
+        if !path.is_absolute() {
+            return Err(SessionTabStateError::RelativePath(path));
+        }
+        Ok(Self {
+            path,
+            session: session.clone(),
+            legacy_evidence_path,
+        })
+    }
 }
 
 fn legacy_lock_store_path(state_path: &Path) -> Result<PathBuf, SessionTabStateError> {
@@ -651,6 +689,16 @@ fn legacy_lock_store_path(state_path: &Path) -> Result<PathBuf, SessionTabStateE
         .and_then(Path::parent)
         .ok_or_else(|| SessionTabStateError::RelativePath(state_path.to_path_buf()))?;
     Ok(state_base.join("locks.json"))
+}
+
+fn ensure_no_legacy_global_evidence(path: &Path) -> Result<(), SessionTabStateError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(SessionTabStateError::LegacyGlobalEvidence {
+            path: path.to_path_buf(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Proof that a user explicitly authorized discarding invalid persisted state.
@@ -692,6 +740,9 @@ pub enum SessionTabStateError {
         requested_session_key: String,
         persisted_session_key: String,
     },
+    LegacyGlobalEvidence {
+        path: PathBuf,
+    },
     UnresolvedRenameIntent {
         tab_id: String,
     },
@@ -721,6 +772,11 @@ impl fmt::Display for SessionTabStateError {
                 formatter,
                 "session tab state for `{persisted_session_key}` does not belong to requested Session Identity `{requested_session_key}`"
             ),
+            Self::LegacyGlobalEvidence { path } => write!(
+                formatter,
+                "identity-less legacy lock evidence at `{}` requires `tabby repair-state --discard`",
+                path.display()
+            ),
             Self::UnresolvedRenameIntent { tab_id } => write!(
                 formatter,
                 "tab `{tab_id}` has an unresolved Automatic Rename Intent"
@@ -738,6 +794,7 @@ impl std::error::Error for SessionTabStateError {
             Self::RelativePath(_)
             | Self::UnsupportedVersion(_)
             | Self::IdentityMismatch { .. }
+            | Self::LegacyGlobalEvidence { .. }
             | Self::UnresolvedRenameIntent { .. } => None,
         }
     }
@@ -1251,12 +1308,28 @@ mod tests {
                 if diagnostic.contains("identity-less")
         ));
 
-        let store = SessionTabStateStore::open(temp_dir.path(), &session).expect("open state");
-        let outcome = store
+        let error = SessionTabStateStore::open(temp_dir.path(), &session)
+            .expect_err("runtime state must fail closed before mutation");
+        assert!(matches!(
+            error,
+            SessionTabStateError::LegacyGlobalEvidence { .. }
+        ));
+
+        let repair_store = SessionTabStateStore::open_for_repair(temp_dir.path(), &session)
+            .expect("repair access remains available");
+        let outcome = repair_store
             .repair_discard(RepairConfirmation::confirmed())
             .expect("archive legacy evidence");
         assert!(matches!(outcome, RepairDiscardOutcome::Repaired { .. }));
         assert!(!legacy_path.exists());
+        let store = SessionTabStateStore::open(temp_dir.path(), &session)
+            .expect("open succeeds after explicit repair");
+        assert_eq!(
+            store
+                .read(SessionTabState::lock_count)
+                .expect("read repaired state"),
+            0
+        );
         assert_eq!(
             SessionTabStateStore::inspect_read_only(temp_dir.path(), &session),
             SessionTabStateInspection::Valid {

@@ -4,6 +4,7 @@ pub mod install;
 pub mod labeler;
 pub mod locks;
 pub mod paths;
+pub mod refresh_decision;
 pub mod session_runtime;
 pub mod stability;
 pub mod startup;
