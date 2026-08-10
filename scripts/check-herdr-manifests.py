@@ -24,7 +24,7 @@ def parse_value(raw: str) -> Any:
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
-    manifest: dict[str, Any] = {"actions": [], "events": []}
+    manifest: dict[str, Any] = {"actions": [], "events": [], "startup": []}
     current_section: dict[str, Any] | None = None
 
     for line_number, line in enumerate(path.read_text().splitlines(), start=1):
@@ -38,6 +38,10 @@ def load_manifest(path: Path) -> dict[str, Any]:
         if stripped == "[[events]]":
             current_section = {}
             manifest["events"].append(current_section)
+            continue
+        if stripped == "[[startup]]":
+            current_section = {}
+            manifest["startup"].append(current_section)
             continue
         if "=" not in stripped:
             raise ValueError(f"{path}:{line_number}: unsupported TOML line: {line!r}")
@@ -87,12 +91,68 @@ def main() -> int:
     release = load_manifest(RELEASE_MANIFEST)
     errors: list[str] = []
 
+    allowed_top_level_keys = {
+        "id",
+        "name",
+        "version",
+        "min_herdr_version",
+        "description",
+        "platforms",
+        "actions",
+        "events",
+        "startup",
+    }
+    for manifest_path, manifest in [(DEV_MANIFEST, dev), (RELEASE_MANIFEST, release)]:
+        extra_keys = set(manifest) - allowed_top_level_keys
+        if extra_keys:
+            errors.append(
+                f"{manifest_path} has unsupported top-level keys: {sorted(extra_keys)}"
+            )
+
     for key in ["id", "name", "version", "min_herdr_version", "platforms"]:
         if dev.get(key) != release.get(key):
             errors.append(
                 f"{key} differs: {DEV_MANIFEST} has {dev.get(key)!r}, "
                 f"{RELEASE_MANIFEST} has {release.get(key)!r}"
             )
+
+    if dev.get("min_herdr_version") != "0.8.0":
+        errors.append(
+            f"{DEV_MANIFEST} min_herdr_version must be '0.8.0', "
+            f"got {dev.get('min_herdr_version')!r}"
+        )
+
+    for manifest_path, startup_commands in [
+        (DEV_MANIFEST, dev.get("startup", [])),
+        (RELEASE_MANIFEST, release.get("startup", [])),
+    ]:
+        if len(startup_commands) != 1:
+            errors.append(
+                f"{manifest_path} must declare exactly one startup command, "
+                f"got {len(startup_commands)}"
+            )
+
+    dev_startup = dev.get("startup", [])
+    release_startup = release.get("startup", [])
+    if len(dev_startup) == len(release_startup) == 1:
+        for manifest_path, startup in [
+            (DEV_MANIFEST, dev_startup[0]),
+            (RELEASE_MANIFEST, release_startup[0]),
+        ]:
+            extra_keys = set(startup) - {"command"}
+            if extra_keys:
+                errors.append(
+                    f"startup command in {manifest_path} has unsupported keys: "
+                    f"{sorted(extra_keys)}"
+                )
+        check_command_pair(
+            errors,
+            "startup",
+            "default",
+            dev_startup[0].get("command", []),
+            release_startup[0].get("command", []),
+            ["ensure-started"],
+        )
 
     expected_actions = {"start", "refresh", "unlock-focused", "unlock-all"}
     dev_actions = action_map(dev)
@@ -135,7 +195,7 @@ def main() -> int:
             else (["refresh"] if action_id == "refresh" else None),
         )
 
-    expected_events = {"workspace.created", "tab.created"}
+    expected_events = {"pane.focused", "workspace.created", "tab.created"}
     dev_events = event_map(dev)
     release_events = event_map(release)
     if set(dev_events) != expected_events:
@@ -163,13 +223,18 @@ def main() -> int:
 
         dev_command = dev_event.get("command", [])
         release_command = release_event.get("command", [])
+        expected_args = (
+            ["signal-focus"]
+            if event_name == "pane.focused"
+            else ["signal-created"]
+        )
         check_command_pair(
             errors,
             "event",
             event_name,
             dev_command,
             release_command,
-            ["ensure-started"],
+            expected_args,
         )
 
     if errors:

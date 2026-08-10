@@ -9,8 +9,7 @@
 //! design decision documented in `docs/design/open-decisions.md`.
 
 use crate::herdr_client::{
-    HYBRID_REFRESHER_SUBSCRIPTIONS, HerdrApi, HerdrClient, HerdrError, HerdrEventStream, PaneInfo,
-    TabInfo, UnixSocketTransport,
+    HerdrApi, HerdrClient, HerdrError, PaneInfo, TabInfo, UnixSocketTransport,
 };
 use crate::labeler::{LabelCandidate, LabelPolicy};
 use crate::locks::{
@@ -167,12 +166,6 @@ impl HybridRefresherState {
 
     pub fn poll_interval(&self) -> Duration {
         DEFAULT_HYBRID_IDLE_POLL_INTERVAL
-    }
-
-    fn next_tick_after_quiet(&self, observed_at: Instant) -> Instant {
-        self.quiet_until
-            .filter(|quiet_until| observed_at < *quiet_until)
-            .unwrap_or(observed_at)
     }
 
     fn sync_external_lock_store(&mut self, path: &Path) -> Result<(), LockStoreError> {
@@ -788,77 +781,6 @@ pub fn run_one_shot_refresh_from_env() -> Result<String, RuntimeError> {
     Ok(format!("tabby refresh: {report:?}"))
 }
 
-pub fn run_hybrid_refresher_from_env() -> Result<(), RuntimeError> {
-    let lock_store_path = lock_store_path_from_runtime()?;
-    let transport = UnixSocketTransport::from_env()?;
-    let socket_path = transport.socket_path().to_path_buf();
-    let mut client = HerdrClient::new(transport);
-    let mut events = HerdrEventStream::subscribe(&socket_path, HYBRID_REFRESHER_SUBSCRIPTIONS)?;
-    run_hybrid_refresher_loop(&mut client, &mut events, lock_store_path)?;
-    Ok(())
-}
-
-pub trait RefresherEvents {
-    fn next_event_timeout(&mut self, timeout: Duration) -> Result<Option<String>, DaemonError>;
-}
-
-impl RefresherEvents for HerdrEventStream {
-    fn next_event_timeout(&mut self, timeout: Duration) -> Result<Option<String>, DaemonError> {
-        HerdrEventStream::next_event_timeout(self, timeout)
-            .map(|event| event.map(|event| event.event))
-            .map_err(DaemonError::from)
-    }
-}
-
-pub fn run_hybrid_refresher_loop<C, E>(
-    herdr: &mut C,
-    events: &mut E,
-    lock_store_path: impl AsRef<Path>,
-) -> Result<(), DaemonError>
-where
-    C: HerdrApi,
-    E: RefresherEvents,
-{
-    let lock_store_path = lock_store_path.as_ref();
-    let mut state = HybridRefresherState::load(lock_store_path)?;
-    let now = Instant::now();
-    state.note_focus_or_create_event(now);
-    let mut next_tick_at = state.next_tick_after_quiet(now);
-
-    loop {
-        let now = Instant::now();
-        if now >= next_tick_at {
-            let _ = hybrid_tick_and_save_locks(herdr, &mut state, lock_store_path, now)?;
-            next_tick_at = now + state.poll_interval();
-        }
-
-        let timeout = next_tick_at.saturating_duration_since(Instant::now());
-        if let Some(event) = events.next_event_timeout(timeout)?
-            && is_refresher_quiet_event(&event)
-        {
-            let now = Instant::now();
-            state.note_focus_or_create_event(now);
-            next_tick_at = state.next_tick_after_quiet(now);
-        }
-    }
-}
-
-fn is_refresher_quiet_event(event: &str) -> bool {
-    matches!(
-        event,
-        "tab_focused"
-            | "workspace_focused"
-            | "tab_created"
-            | "workspace_created"
-            | "pane_focused"
-            | "tab.focused"
-            | "workspace.focused"
-            | "tab.created"
-            | "workspace.created"
-            | "pane.focused"
-    )
-}
-
 pub fn unlock_focused_from_env() -> Result<String, RuntimeError> {
     let lock_store_path = lock_store_path_from_runtime()?;
     let transport = UnixSocketTransport::from_env()?;
@@ -928,6 +850,19 @@ impl fmt::Display for DaemonError {
                 write!(formatter, "refresher lock store operation failed: {error}")
             }
         }
+    }
+}
+
+impl DaemonError {
+    pub fn proves_session_stop(&self) -> bool {
+        matches!(
+            self,
+            Self::Herdr(HerdrError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                )
+        )
     }
 }
 

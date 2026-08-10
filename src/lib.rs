@@ -4,20 +4,24 @@ pub mod install;
 pub mod labeler;
 pub mod locks;
 pub mod paths;
+pub mod session_runtime;
 pub mod stability;
 pub mod startup;
 pub mod status;
 
 use std::fmt;
 
-pub const USAGE: &str = "Usage: tabby <status|refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>";
+pub const USAGE: &str = "Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install [--start]|unlock-focused|unlock-all>";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Status,
     Refresh,
     Start,
     EnsureStarted,
+    SignalFocus,
+    SignalCreated,
+    Runtime { launch_id: String },
     Install { start: bool },
     UnlockFocused,
     UnlockAll,
@@ -51,6 +55,7 @@ pub enum CommandError {
     Runtime(daemon::RuntimeError),
     Install(install::InstallError),
     Startup(startup::StartupError),
+    SessionRuntime(session_runtime::SessionRuntimeError),
     Status(status::StatusError),
 }
 
@@ -60,6 +65,7 @@ impl fmt::Display for CommandError {
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Install(error) => write!(formatter, "install failed: {error}"),
             Self::Startup(error) => write!(formatter, "startup failed: {error}"),
+            Self::SessionRuntime(error) => write!(formatter, "session runtime failed: {error}"),
             Self::Status(error) => write!(formatter, "status failed: {error}"),
         }
     }
@@ -71,6 +77,7 @@ impl std::error::Error for CommandError {
             Self::Runtime(error) => Some(error),
             Self::Install(error) => Some(error),
             Self::Startup(error) => Some(error),
+            Self::SessionRuntime(error) => Some(error),
             Self::Status(error) => Some(error),
         }
     }
@@ -91,6 +98,12 @@ impl From<install::InstallError> for CommandError {
 impl From<startup::StartupError> for CommandError {
     fn from(error: startup::StartupError) -> Self {
         Self::Startup(error)
+    }
+}
+
+impl From<session_runtime::SessionRuntimeError> for CommandError {
+    fn from(error: session_runtime::SessionRuntimeError) -> Self {
+        Self::SessionRuntime(error)
     }
 }
 
@@ -125,7 +138,28 @@ where
             }
             Ok(Command::Install { start })
         }
-        "status" | "refresh" | "start" | "ensure-started" | "unlock-focused" | "unlock-all" => {
+        "runtime" => {
+            let flag = args.next().ok_or_else(|| CliError::UnexpectedArgument {
+                command: command.clone(),
+                argument: "<missing --launch-id>".to_string(),
+            })?;
+            if flag != "--launch-id" {
+                return Err(CliError::UnexpectedArgument {
+                    command,
+                    argument: flag,
+                });
+            }
+            let launch_id = args.next().ok_or_else(|| CliError::UnexpectedArgument {
+                command: command.clone(),
+                argument: "<missing launch id>".to_string(),
+            })?;
+            if let Some(argument) = args.next() {
+                return Err(CliError::UnexpectedArgument { command, argument });
+            }
+            Ok(Command::Runtime { launch_id })
+        }
+        "status" | "refresh" | "start" | "ensure-started" | "signal-focus" | "signal-created"
+        | "unlock-focused" | "unlock-all" => {
             if let Some(argument) = args.next() {
                 return Err(CliError::UnexpectedArgument { command, argument });
             }
@@ -134,6 +168,8 @@ where
                 "refresh" => Ok(Command::Refresh),
                 "start" => Ok(Command::Start),
                 "ensure-started" => Ok(Command::EnsureStarted),
+                "signal-focus" => Ok(Command::SignalFocus),
+                "signal-created" => Ok(Command::SignalCreated),
                 "unlock-focused" => Ok(Command::UnlockFocused),
                 "unlock-all" => Ok(Command::UnlockAll),
                 _ => unreachable!(),
@@ -149,11 +185,14 @@ pub fn run_stub(command: Command) -> CommandOutcome {
         Command::Status => "tabby status runtime: use run_command for read-only diagnostics",
         Command::Refresh => "tabby refresh runtime: use run_command for a one-shot label refresh",
         Command::Start => {
-            "tabby start runtime: use run_command to start the hybrid session refresher"
+            "tabby start runtime: use run_command to ensure one Ready Session Runtime"
         }
         Command::EnsureStarted => {
-            "tabby ensure-started runtime: use run_command to start one Tabby Session Refresher"
+            "tabby ensure-started runtime: use run_command to ensure one Ready Session Runtime"
         }
+        Command::SignalFocus => "tabby signal-focus runtime: deliver a focus trigger",
+        Command::SignalCreated => "tabby signal-created runtime: deliver a creation trigger",
+        Command::Runtime { .. } => "tabby internal Session Runtime",
         Command::Install { .. } => {
             "tabby install runtime: use run_command to relink the Herdr plugin"
         }
@@ -171,15 +210,27 @@ pub fn run_command(command: Command) -> Result<String, CommandError> {
     match command {
         Command::Status => status::run_from_env().map_err(CommandError::from),
         Command::Refresh => daemon::run_one_shot_refresh_from_env().map_err(CommandError::from),
-        Command::Start => {
-            daemon::run_hybrid_refresher_from_env()?;
-            Ok("tabby refresher stopped".to_string())
+        Command::Start | Command::EnsureStarted => {
+            session_runtime::ensure_ready_owner_from_env(session_runtime::RefreshTrigger::Startup)
+                .map_err(CommandError::from)
         }
-        Command::EnsureStarted => startup::ensure_started_from_env().map_err(CommandError::from),
+        Command::SignalFocus => {
+            session_runtime::ensure_ready_owner_from_env(session_runtime::RefreshTrigger::Focus)
+                .map_err(CommandError::from)
+        }
+        Command::SignalCreated => {
+            session_runtime::ensure_ready_owner_from_env(session_runtime::RefreshTrigger::Creation)
+                .map_err(CommandError::from)
+        }
+        Command::Runtime { launch_id } => {
+            session_runtime::run_owned_session_from_env(launch_id).map_err(CommandError::from)
+        }
         Command::Install { start } => {
             let install_message = install::relink_from_current_exe()?;
             if start {
-                let startup_message = startup::ensure_started_from_env()?;
+                let startup_message = session_runtime::ensure_ready_owner_from_env(
+                    session_runtime::RefreshTrigger::Startup,
+                )?;
                 Ok(format!("{install_message}\n{startup_message}"))
             } else {
                 Ok(install_message)
@@ -203,6 +254,17 @@ mod tests {
         assert_eq!(
             parse_command(["ensure-started"]),
             Ok(Command::EnsureStarted)
+        );
+        assert_eq!(parse_command(["signal-focus"]), Ok(Command::SignalFocus));
+        assert_eq!(
+            parse_command(["signal-created"]),
+            Ok(Command::SignalCreated)
+        );
+        assert_eq!(
+            parse_command(["runtime", "--launch-id", "launch-1"]),
+            Ok(Command::Runtime {
+                launch_id: "launch-1".to_string()
+            })
         );
     }
 

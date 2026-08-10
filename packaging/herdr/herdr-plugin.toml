@@ -1,7 +1,7 @@
 id = "yersonargotev.tabby"
 name = "Tabby"
 version = "0.1.9"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.8.0"
 description = "Homebrew-installed Herdr plugin for automatic tab labels."
 platforms = ["macos"]
 
@@ -11,6 +11,9 @@ platforms = ["macos"]
 # Homebrew installs this manifest under pkgshare (share/tabby) and the binary under bin.
 # Keep the command path relative to this manifest so Herdr invokes the binary installed
 # by the same Homebrew package, not target/debug/tabby or an ambiguous PATH lookup.
+
+[[startup]]
+command = ["../../bin/tabby", "ensure-started"]
 
 [[actions]]
 id = "start"
@@ -37,9 +40,13 @@ contexts = ["workspace"]
 command = ["../../bin/tabby", "unlock-all"]
 
 [[events]]
+on = "pane.focused"
+command = ["../../bin/tabby", "signal-focus"]
+
+[[events]]
 on = "workspace.created"
-command = ["../../bin/tabby", "ensure-started"]
+command = ["../../bin/tabby", "signal-created"]
 
 [[events]]
 on = "tab.created"
-command = ["../../bin/tabby", "ensure-started"]
+command = ["../../bin/tabby", "signal-created"]

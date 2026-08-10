@@ -10,6 +10,7 @@ use crate::paths::{
     herdr_plugin_config_dir, plugin_state_dir_from_inputs, should_remove_stale_herdr_socket_path,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -19,6 +20,8 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::string::FromUtf8Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -91,6 +94,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSocket {
     pub socket_path: PathBuf,
+    pub identity_path: PathBuf,
     pub session_key: String,
 }
 
@@ -108,13 +112,32 @@ impl SessionSocket {
         let session_key = session_key_for_socket_path(&identity_path);
         Ok(Self {
             socket_path: path,
+            identity_path,
             session_key,
         })
     }
+
+    #[cfg(unix)]
+    pub fn identity_hex(&self) -> String {
+        encode_hex(self.identity_path.as_os_str().as_bytes())
+    }
 }
 
+#[cfg(unix)]
 pub fn session_key_for_socket_path(path: &Path) -> String {
-    format!("v1-{:016x}", fnv1a64(path.to_string_lossy().as_bytes()))
+    let digest = Sha256::digest(path.as_os_str().as_bytes());
+    format!("v2-{}", encode_hex(&digest))
+}
+
+#[cfg(unix)]
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 pub(crate) fn resolve_socket_from_env() -> Result<SessionSocket, StartupError> {
@@ -428,15 +451,6 @@ fn unix_timestamp_secs() -> u64 {
         .as_secs()
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateBaseSource {
     HerdrPluginStateDir,
@@ -658,7 +672,22 @@ mod tests {
 
         assert_eq!(first.session_key, second.session_key);
         assert_ne!(first.session_key, named.session_key);
-        assert!(first.session_key.starts_with("v1-"));
+        assert!(first.session_key.starts_with("v2-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_identity_keeps_non_utf8_socket_bytes_distinct() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let first = PathBuf::from(OsString::from_vec(b"/tmp/herdr-\x80.sock".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"/tmp/herdr-\x81.sock".to_vec()));
+
+        let first = SessionSocket::resolve(first).expect("first socket identity");
+        let second = SessionSocket::resolve(second).expect("second socket identity");
+
+        assert_ne!(first.session_key, second.session_key);
+        assert_ne!(first.identity_hex(), second.identity_hex());
     }
 
     #[test]

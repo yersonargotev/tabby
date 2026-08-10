@@ -1,7 +1,7 @@
 id = "yersonargotev.tabby"
 name = "Tabby"
 version = "0.1.9"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.8.0"
 description = "Local-link Herdr plugin scaffold for automatic tab labels."
 platforms = ["macos"]
 
@@ -9,6 +9,9 @@ platforms = ["macos"]
 #   cargo build
 #   herdr plugin link .
 # Herdr plugin link does not run build commands, so commands target the local debug binary.
+
+[[startup]]
+command = ["target/debug/tabby", "ensure-started"]
 
 [[actions]]
 id = "start"
@@ -35,9 +38,13 @@ contexts = ["workspace"]
 command = ["target/debug/tabby", "unlock-all"]
 
 [[events]]
+on = "pane.focused"
+command = ["target/debug/tabby", "signal-focus"]
+
+[[events]]
 on = "workspace.created"
-command = ["target/debug/tabby", "ensure-started"]
+command = ["target/debug/tabby", "signal-created"]
 
 [[events]]
 on = "tab.created"
-command = ["target/debug/tabby", "ensure-started"]
+command = ["target/debug/tabby", "signal-created"]
