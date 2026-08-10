@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -77,6 +78,16 @@ def plan(root: Path) -> Dict[str, Any]:
                 "herdr_session_args": ["--session", "tabby-lifecycle-named"],
             },
         ],
+        "scenarios": [
+            "startup-and-session-isolation",
+            "concurrent-hook-coalescing",
+            "focus-quiet-and-periodic-cadence",
+            "fixed-focus-command-and-cwd-fallback",
+            "client-attach-detach",
+            "manual-lock-stop-restore",
+            "runtime-crash-recovery",
+            "release-manifest-handoff",
+        ],
     }
 
 
@@ -93,6 +104,8 @@ class Recorder:
         self.records: List[Dict[str, Any]] = []
 
     def sanitize(self, value: str) -> str:
+        if value.startswith("PATH="):
+            return "PATH=<inherited>"
         return value.replace(str(self.root), "<sandbox>").replace(str(REPO_ROOT), "<repo>")
 
     def add(
@@ -126,6 +139,13 @@ class Recorder:
                 "result": "passed",
             }
         )
+
+
+@dataclass(frozen=True)
+class ReadyRuntime:
+    pid: int
+    launch_id: str
+    last_evaluation_unix_ms: Optional[int]
 
 
 class SessionCase:
@@ -179,6 +199,38 @@ class SessionCase:
     def herdr(self, step: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return self.run(step, self.herdr_argv(*args), check=check)
 
+    def snapshot(self, step: str) -> Dict[str, Any]:
+        completed = self.herdr(step, "api", "snapshot")
+        return json.loads(completed.stdout)["result"]["snapshot"]
+
+    def focused_tab_label(self) -> Optional[str]:
+        completed = subprocess.run(
+            self.herdr_argv("api", "snapshot"),
+            cwd=REPO_ROOT,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        snapshot = json.loads(completed.stdout)["result"]["snapshot"]
+        focused_tab_id = snapshot.get("focused_tab_id")
+        return next(
+            (
+                tab.get("label")
+                for tab in snapshot.get("tabs", [])
+                if tab.get("tab_id") == focused_tab_id
+            ),
+            None,
+        )
+
+    def wait_for_label(self, label: str, timeout: float = 12.0) -> None:
+        wait_for(
+            f"{self.name} focused tab label {label!r}",
+            timeout,
+            lambda: self.focused_tab_label() == label,
+        )
+        self.snapshot(f"label-{label}")
+
     def start_server(self, step: str) -> None:
         if self.server_process is not None and self.server_process.poll() is None:
             raise HarnessFailure(f"{self.name}: server already running")
@@ -193,7 +245,7 @@ class SessionCase:
         status = wait_for(
             f"{self.name} Herdr server readiness",
             8.0,
-            lambda: self.status_json() if self.status_json().get("server", {}).get("running") else None,
+            self.running_status,
         )
         server = status["server"]
         if server.get("version") != "0.8.0" or server.get("protocol") != 19:
@@ -215,6 +267,10 @@ class SessionCase:
             check=True,
         )
         return json.loads(completed.stdout)
+
+    def running_status(self) -> Optional[Dict[str, Any]]:
+        status = self.status_json()
+        return status if status.get("server", {}).get("running") else None
 
     def stop_server(self, step: str) -> None:
         self.herdr(step, "server", "stop", check=False)
@@ -243,7 +299,7 @@ class SessionCase:
             environment=self.tabby_environment(),
         )
 
-    def ready_runtime(self) -> Tuple[int, str, Optional[int]]:
+    def ready_runtime(self) -> ReadyRuntime:
         completed = subprocess.run(
             [str(TABBY), "status"],
             cwd=REPO_ROOT,
@@ -257,13 +313,24 @@ class SessionCase:
         if not match:
             raise HarnessFailure(f"runtime is not Ready: {completed.stdout.strip()}")
         evaluation = match.group("evaluation")
-        return (
-            int(match.group("pid")),
-            match.group("launch"),
-            None if evaluation == "<none>" else int(evaluation),
+        return ReadyRuntime(
+            pid=int(match.group("pid")),
+            launch_id=match.group("launch"),
+            last_evaluation_unix_ms=None if evaluation == "<none>" else int(evaluation),
         )
 
-    def wait_ready(self, step: str, previous_launch: Optional[str] = None) -> Tuple[int, str, Optional[int]]:
+    def tabby_status_text(self) -> str:
+        completed = subprocess.run(
+            [str(TABBY), "status"],
+            cwd=REPO_ROOT,
+            env=self.tabby_environment(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return completed.stdout
+
+    def wait_ready(self, step: str, previous_launch: Optional[str] = None) -> ReadyRuntime:
         runtime = wait_for(
             f"{self.name} Ready Session Runtime",
             8.0,
@@ -273,12 +340,12 @@ class SessionCase:
         return runtime
 
 
-def ready_if_new(case: SessionCase, previous_launch: Optional[str]) -> Optional[Tuple[int, str, Optional[int]]]:
+def ready_if_new(case: SessionCase, previous_launch: Optional[str]) -> Optional[ReadyRuntime]:
     try:
         runtime = case.ready_runtime()
     except (HarnessFailure, OSError):
         return None
-    return runtime if previous_launch is None or runtime[1] != previous_launch else None
+    return runtime if previous_launch is None or runtime.launch_id != previous_launch else None
 
 
 def wait_for(description: str, timeout: float, probe: Callable[[], Any]) -> Any:
@@ -304,14 +371,14 @@ def process_exists(pid: int) -> bool:
         return False
 
 
-def exercise_trigger_burst(case: SessionCase, owner: Tuple[int, str, Optional[int]]) -> Tuple[int, str, Optional[int]]:
+def exercise_trigger_burst(case: SessionCase, owner: ReadyRuntime) -> ReadyRuntime:
     commands = ["ensure-started", "signal-created", "refresh", "signal-focus"] * 4
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(case.tabby, f"burst-{index}", command) for index, command in enumerate(commands)]
         for future in futures:
             future.result()
     after = case.ready_runtime()
-    if after[:2] != owner[:2]:
+    if (after.pid, after.launch_id) != (owner.pid, owner.launch_id):
         raise HarnessFailure(f"{case.name}: trigger burst replaced the Ready owner")
     case.recorder.assertion(
         case.name,
@@ -321,7 +388,7 @@ def exercise_trigger_burst(case: SessionCase, owner: Tuple[int, str, Optional[in
     return after
 
 
-def exercise_quiet_and_periodic(case: SessionCase) -> Tuple[int, str, Optional[int]]:
+def exercise_quiet_and_periodic(case: SessionCase) -> ReadyRuntime:
     owner = wait_for(
         f"{case.name} initial evaluation",
         5.0,
@@ -331,21 +398,21 @@ def exercise_quiet_and_periodic(case: SessionCase) -> Tuple[int, str, Optional[i
     immediately_after = case.ready_runtime()
     time.sleep(0.75)
     during_quiet = case.ready_runtime()
-    if during_quiet[2] != immediately_after[2]:
+    if during_quiet.last_evaluation_unix_ms != immediately_after.last_evaluation_unix_ms:
         raise HarnessFailure(f"{case.name}: evaluation occurred inside the Focus Quiet Window")
     after_quiet = wait_for(
         f"{case.name} post-quiet evaluation",
         4.0,
-        lambda: runtime_after_evaluation(case, during_quiet[2]),
+        lambda: runtime_after_evaluation(case, during_quiet.last_evaluation_unix_ms),
     )
-    if after_quiet[:2] != owner[:2]:
+    if (after_quiet.pid, after_quiet.launch_id) != (owner.pid, owner.launch_id):
         raise HarnessFailure(f"{case.name}: owner changed during focus evaluation")
     periodic = wait_for(
         f"{case.name} five-second periodic evaluation",
         8.0,
-        lambda: runtime_after_evaluation(case, after_quiet[2]),
+        lambda: runtime_after_evaluation(case, after_quiet.last_evaluation_unix_ms),
     )
-    if periodic[:2] != owner[:2]:
+    if (periodic.pid, periodic.launch_id) != (owner.pid, owner.launch_id):
         raise HarnessFailure(f"{case.name}: owner changed during periodic evaluation")
     case.recorder.assertion(
         case.name,
@@ -355,14 +422,153 @@ def exercise_quiet_and_periodic(case: SessionCase) -> Tuple[int, str, Optional[i
     return periodic
 
 
-def runtime_with_evaluation(case: SessionCase) -> Optional[Tuple[int, str, Optional[int]]]:
+def runtime_with_evaluation(case: SessionCase) -> Optional[ReadyRuntime]:
     runtime = case.ready_runtime()
-    return runtime if runtime[2] is not None else None
+    return runtime if runtime.last_evaluation_unix_ms is not None else None
 
 
-def runtime_after_evaluation(case: SessionCase, previous: Optional[int]) -> Optional[Tuple[int, str, Optional[int]]]:
+def runtime_after_evaluation(case: SessionCase, previous: Optional[int]) -> Optional[ReadyRuntime]:
     runtime = case.ready_runtime()
-    return runtime if runtime[2] is not None and runtime[2] != previous else None
+    return (
+        runtime
+        if runtime.last_evaluation_unix_ms is not None
+        and runtime.last_evaluation_unix_ms != previous
+        else None
+    )
+
+
+def exercise_focused_process_and_manual_lock(
+    case: SessionCase,
+) -> Tuple[str, str]:
+    created = case.herdr(
+        "create-focused-workspace",
+        "workspace",
+        "create",
+        "--cwd",
+        str(REPO_ROOT),
+        "--focus",
+    )
+    result = json.loads(created.stdout)["result"]
+    pane_id = result["root_pane"]["pane_id"]
+    tab_id = result["tab"]["tab_id"]
+
+    case.wait_for_label(REPO_ROOT.name)
+    case.herdr("run-significant-command", "pane", "run", pane_id, "nvim", "--clean", "-u", "NONE")
+    case.wait_for_label("nvim", timeout=15.0)
+    case.herdr("leave-significant-command", "pane", "send-keys", pane_id, "esc", ":", "q", "!", "enter")
+    case.wait_for_label(REPO_ROOT.name, timeout=18.0)
+    case.recorder.assertion(
+        case.name,
+        "fixed-focus-process-change",
+        "one focused tab changed cwd fallback -> nvim -> cwd fallback without navigation",
+    )
+
+    manual_label = "manual-contract"
+    case.herdr("apply-manual-label", "tab", "rename", tab_id, manual_label)
+    wait_for(
+        f"{case.name} persisted manual lock",
+        10.0,
+        lambda: "1 Manually Locked Tabs" in case.tabby_status_text(),
+    )
+    case.tabby("inspect-manual-lock", "status")
+    time.sleep(5.5)
+    if case.focused_tab_label() != manual_label:
+        raise HarnessFailure(f"{case.name}: periodic refresh overwrote a manual label")
+    case.recorder.assertion(
+        case.name,
+        "manual-lock",
+        "manual label became a persisted lock and blocked a later periodic overwrite",
+    )
+    return pane_id, tab_id
+
+
+def exercise_client_detach(case: SessionCase, owner: ReadyRuntime) -> ReadyRuntime:
+    if shutil.which("tmux") is None:
+        raise HarnessFailure("tmux is required to exercise a real client attach/detach")
+    tmux_server = f"tabby-herdr-harness-{os.getpid()}"
+    command_environment = {
+        name: value
+        for name, value in case.environment.items()
+        if name
+        in {
+            "HOME",
+            "PATH",
+            "TMPDIR",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "HERDR_CONFIG_PATH",
+        }
+    }
+    attach_argv = [
+        "tmux",
+        "-L",
+        tmux_server,
+        "-f",
+        "/dev/null",
+        "new-session",
+        "-d",
+        "-s",
+        "client",
+        "env",
+        *[f"{name}={value}" for name, value in sorted(command_environment.items())],
+        "herdr",
+        *case.session_args,
+    ]
+    case.run("client-attach", attach_argv)
+    time.sleep(0.5)
+    case.run(
+        "client-attached",
+        ["tmux", "-L", tmux_server, "has-session", "-t", "client"],
+    )
+    before_detach = case.ready_runtime()
+    case.run(
+        "client-detach",
+        ["tmux", "-L", tmux_server, "kill-session", "-t", "client"],
+    )
+    after_detach = wait_for(
+        f"{case.name} post-detach periodic evaluation",
+        8.0,
+        lambda: runtime_after_evaluation(case, before_detach.last_evaluation_unix_ms),
+    )
+    if (after_detach.pid, after_detach.launch_id) != (owner.pid, owner.launch_id):
+        raise HarnessFailure(f"{case.name}: Client Detach replaced the Ready owner")
+    case.recorder.assertion(
+        case.name,
+        "client-detach",
+        "attached client exited; the same Ready owner continued five-second freshness",
+    )
+    return after_detach
+
+
+def exercise_release_handoff(
+    root: Path, case: SessionCase, owner: ReadyRuntime
+) -> ReadyRuntime:
+    release_root = root / "release"
+    release_binary = release_root / "bin" / "tabby"
+    release_manifest = release_root / "share" / "tabby" / "herdr-plugin.toml"
+    release_binary.parent.mkdir(parents=True)
+    release_manifest.parent.mkdir(parents=True)
+    shutil.copy2(TABBY, release_binary)
+    shutil.copy2(REPO_ROOT / "packaging" / "herdr" / "herdr-plugin.toml", release_manifest)
+
+    completed = case.run(
+        "release-install-handoff",
+        [str(release_binary), "install"],
+        environment=case.tabby_environment(),
+    )
+    replacement = case.wait_ready("release-owner-ready", owner.launch_id)
+    status = case.tabby("release-binary-status", "status")
+    if str(release_binary) not in status.stdout:
+        raise HarnessFailure("release manifest did not resolve the packaged binary")
+    if "cooperative handoff" not in completed.stdout:
+        raise HarnessFailure("release install did not report cooperative handoff")
+    case.recorder.assertion(
+        case.name,
+        "release-manifest-handoff",
+        "plain install linked ../../bin/tabby and replaced the prior owner cooperatively",
+    )
+    return replacement
 
 
 def write_records(output: Path, records: Iterable[Dict[str, Any]]) -> None:
@@ -423,25 +629,71 @@ def run_live(output: Path) -> None:
             exercise_trigger_burst(case, owners[case.name])
             owners[case.name] = exercise_quiet_and_periodic(case)
 
-        crashed_pid, crashed_launch, _ = owners["named"]
-        os.kill(crashed_pid, signal.SIGKILL)
-        wait_for("crashed named owner exit", 5.0, lambda: not process_exists(crashed_pid))
+        _, default_tab_id = exercise_focused_process_and_manual_lock(default)
+        named_created = named.herdr(
+            "create-focused-workspace",
+            "workspace",
+            "create",
+            "--cwd",
+            str(REPO_ROOT),
+            "--focus",
+        )
+        named_tab_id = json.loads(named_created.stdout)["result"]["tab"]["tab_id"]
+        named.wait_for_label(REPO_ROOT.name)
+        if default_tab_id != named_tab_id:
+            raise HarnessFailure("expected equal first tab IDs in default and named sessions")
+        state_directories = list(
+            (root / "xdg-state" / "herdr" / "plugins" / PLUGIN_ID / "session-tab-state").glob("v2-*")
+        )
+        if len(state_directories) != 2:
+            raise HarnessFailure(
+                f"expected two isolated Session-Scoped Tab State directories, got {len(state_directories)}"
+            )
+        recorder.assertion(
+            "all",
+            "equal-tab-id-isolation",
+            "equal tab IDs produced two state directories keyed by distinct Session Identities",
+        )
+
+        owners["default"] = exercise_client_detach(default, owners["default"])
+
+        crashed_owner = owners["named"]
+        os.kill(crashed_owner.pid, signal.SIGKILL)
+        wait_for(
+            "crashed named owner exit",
+            5.0,
+            lambda: not process_exists(crashed_owner.pid),
+        )
         named.tabby("recover-after-crash", "signal-created")
-        owners["named"] = named.wait_ready("ready-after-crash", crashed_launch)
+        owners["named"] = named.wait_ready(
+            "ready-after-crash", crashed_owner.launch_id
+        )
         recorder.assertion(
             "named", "runtime-crash", "supported creation hook restored a new Ready owner"
         )
 
-        stopped_pid, stopped_launch, _ = owners["default"]
+        owners["default"] = exercise_release_handoff(root, default, owners["default"])
+
+        stopped_owner = owners["default"]
         default.stop_server("session-stop")
-        wait_for("default owner lease release", 5.0, lambda: not process_exists(stopped_pid))
+        wait_for(
+            "default owner lease release",
+            5.0,
+            lambda: not process_exists(stopped_owner.pid),
+        )
         default.start_server("session-restore")
-        owners["default"] = default.wait_ready("ready-after-restore", stopped_launch)
+        owners["default"] = default.wait_ready(
+            "ready-after-restore", stopped_owner.launch_id
+        )
         wait_for("restored initial evaluation", 5.0, lambda: runtime_with_evaluation(default))
+        if default.focused_tab_label() != "manual-contract":
+            raise HarnessFailure("manual label did not survive Session Stop/Restore")
+        if "1 Manually Locked Tabs" not in default.tabby_status_text():
+            raise HarnessFailure("manual lock did not survive Session Stop/Restore")
         recorder.assertion(
             "default",
             "session-restore",
-            "startup hook created one new owner and initial evaluation followed quiet",
+            "startup hook created one new owner; initial evaluation followed quiet and retained manual intent",
         )
     finally:
         for case in reversed(cases):

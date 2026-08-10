@@ -62,6 +62,19 @@ class HarnessPlanTests(unittest.TestCase):
             plan["removed_inherited_herdr_variables"],
             ["HERDR_PLUGIN_STATE_DIR", "HERDR_SESSION", "HERDR_SOCKET_PATH"],
         )
+        self.assertEqual(
+            plan["scenarios"],
+            [
+                "startup-and-session-isolation",
+                "concurrent-hook-coalescing",
+                "focus-quiet-and-periodic-cadence",
+                "fixed-focus-command-and-cwd-fallback",
+                "client-attach-detach",
+                "manual-lock-stop-restore",
+                "runtime-crash-recovery",
+                "release-manifest-handoff",
+            ],
+        )
 
 
 if __name__ == "__main__":
