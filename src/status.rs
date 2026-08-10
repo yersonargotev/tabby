@@ -1,8 +1,9 @@
 use crate::herdr_client::{HerdrApi, HerdrClient, HerdrError, UnixSocketTransport};
 use crate::labeler::LabelPolicy;
-use crate::locks::{LockStore, LockStoreError};
-use crate::paths::{PLUGIN_ID, StatePathError, lock_store_path_from_runtime};
-use crate::startup::{self, RefresherMetadata, SessionSocket, StartupError};
+use crate::locks::{SessionTabState, SessionTabStateError, SessionTabStateStore};
+use crate::paths::{PLUGIN_ID, StatePathError};
+use crate::session_runtime::{self, RuntimeInspection, SessionRuntimeError};
+use crate::startup::{self, SessionSocket, StartupError};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -15,12 +16,6 @@ pub struct PluginRegistration {
     pub enabled: bool,
     pub manifest_path: PathBuf,
     pub command_paths: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RefresherInspection {
-    pub metadata: RefresherMetadata,
-    pub running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,9 +43,9 @@ pub struct StatusSnapshot {
     pub socket_path: PathBuf,
     pub current_binary: PathBuf,
     pub plugin: Option<PluginRegistration>,
-    pub refresher: Option<RefresherInspection>,
+    pub runtime: RuntimeInspection,
     pub focused_tab: Option<FocusedTabInspection>,
-    pub locks: LockStore,
+    pub tab_state: SessionTabState,
     pub recent_actions: Vec<RecentAction>,
 }
 
@@ -92,26 +87,7 @@ pub fn render_status(snapshot: &StatusSnapshot) -> String {
         None => lines.push(format!("Plugin: {PLUGIN_ID} is not registered")),
     }
 
-    match &snapshot.refresher {
-        Some(refresher) => {
-            let metadata = &refresher.metadata;
-            let state = if refresher.running {
-                "running"
-            } else {
-                "not running"
-            };
-            let binary = metadata.binary_path.as_deref().unwrap_or("<unknown>");
-            lines.push(format!(
-                "Refresher: {state} pid {}, {binary}, version {}",
-                metadata.pid, metadata.tabby_version
-            ));
-            lines.push(format!(
-                "Refresher metadata: session_key={} socket={} started_at={}",
-                metadata.session_key, metadata.socket_path, metadata.started_at
-            ));
-        }
-        None => lines.push("Refresher: not running (metadata not found)".to_string()),
-    }
+    render_runtime(&mut lines, &snapshot.runtime);
 
     match &snapshot.focused_tab {
         Some(tab) => {
@@ -134,10 +110,12 @@ pub fn render_status(snapshot: &StatusSnapshot) -> String {
     }
 
     lines.push(format!(
-        "Locks: {} Manually Locked Tabs",
-        snapshot.locks.len()
+        "State: {} Manually Locked Tabs, {} baselines, {} unresolved rename intents",
+        snapshot.tab_state.lock_count(),
+        snapshot.tab_state.baseline_count(),
+        snapshot.tab_state.unresolved_rename_intent_count(),
     ));
-    for lock in snapshot.locks.locks() {
+    for lock in snapshot.tab_state.locks() {
         lines.push(format!(
             "- {} label={}",
             lock.tab_id(),
@@ -182,6 +160,42 @@ pub fn render_status(snapshot: &StatusSnapshot) -> String {
     lines.join("\n")
 }
 
+fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
+    match runtime {
+        RuntimeInspection::Absent => lines.push("Session Runtime: Absent".to_string()),
+        RuntimeInspection::Starting { lease_held } => {
+            lines.push(format!("Session Runtime: Starting lease_held={lease_held}"))
+        }
+        RuntimeInspection::Ready {
+            pid,
+            launch_id,
+            version,
+            binary_path,
+            lease_held,
+            last_evaluation_unix_ms,
+            last_failure,
+            next_periodic_unix_ms,
+        } => {
+            lines.push(format!(
+                "Session Runtime: Ready pid={pid} version={version} lease_held={lease_held}"
+            ));
+            lines.push(format!(
+                "Session Runtime details: launch_id={launch_id} binary={} last_evaluation_unix_ms={} next_periodic_unix_ms={} last_failure={}",
+                binary_path.display(),
+                last_evaluation_unix_ms.map(|value| value.to_string()).unwrap_or_else(|| "<none>".to_string()),
+                next_periodic_unix_ms.map(|value| value.to_string()).unwrap_or_else(|| "<none>".to_string()),
+                last_failure.as_deref().unwrap_or("<none>"),
+            ));
+        }
+        RuntimeInspection::Faulted {
+            diagnostic,
+            lease_held,
+        } => lines.push(format!(
+            "Session Runtime: Faulted lease_held={lease_held} diagnostic={diagnostic}"
+        )),
+    }
+}
+
 fn warnings_and_fixes(snapshot: &StatusSnapshot) -> (Vec<String>, BTreeSet<String>) {
     let mut warnings = Vec::new();
     let mut fixes = BTreeSet::new();
@@ -200,83 +214,57 @@ fn warnings_and_fixes(snapshot: &StatusSnapshot) -> (Vec<String>, BTreeSet<Strin
         Some(_) => {}
     }
 
-    match &snapshot.refresher {
-        None => {
-            warnings
-                .push("Hybrid Session Refresher is not running (metadata not found)".to_string());
+    match &snapshot.runtime {
+        RuntimeInspection::Absent => {
+            warnings.push("Session Runtime is absent".to_string());
             fixes.insert("run `tabby ensure-started` for this Herdr Session".to_string());
         }
-        Some(refresher) => {
-            let metadata = &refresher.metadata;
-            if !refresher.running {
+        RuntimeInspection::Starting { .. } => {
+            warnings.push("Session Runtime is starting but not Ready".to_string());
+        }
+        RuntimeInspection::Faulted { diagnostic, .. } => {
+            warnings.push(format!("Session Runtime is Faulted: {diagnostic}"));
+            fixes.insert("run `tabby ensure-started` for this Herdr Session".to_string());
+        }
+        RuntimeInspection::Ready { binary_path, .. } => {
+            let binary_identity = startup::binary_identity(binary_path);
+            if binary_identity != snapshot.current_binary {
                 warnings.push(format!(
-                    "Hybrid Session Refresher pid {} is not running",
-                    metadata.pid
-                ));
-                fixes.insert("run `tabby ensure-started` for this Herdr Session".to_string());
-            }
-            if metadata.socket_path != snapshot.socket_path.to_string_lossy() {
-                warnings.push(format!(
-                    "refresher metadata socket {} does not match targeted socket {}",
-                    metadata.socket_path,
-                    snapshot.socket_path.display()
+                    "Session Runtime binary {} does not match current executable {}",
+                    binary_path.display(),
+                    snapshot.current_binary.display()
                 ));
             }
-            match metadata.binary_path.as_deref().map(Path::new) {
-                None => warnings.push(
-                    "refresher metadata has no binary path, so its executable cannot be verified"
-                        .to_string(),
-                ),
-                Some(binary) => {
-                    let binary_identity = startup::binary_identity(binary);
-                    if binary_identity != snapshot.current_binary {
-                        warnings.push(format!(
-                            "refresher binary {} does not match current executable {}",
-                            binary.display(),
-                            snapshot.current_binary.display()
-                        ));
-                    }
-                    if let Some(plugin) = &snapshot.plugin
-                        && !plugin.command_paths.is_empty()
-                        && !plugin
-                            .command_paths
-                            .iter()
-                            .any(|path| path == &binary_identity)
-                    {
-                        warnings.push(format!(
-                            "refresher binary {} does not match registered command {}",
-                            binary.display(),
-                            plugin
-                                .command_paths
-                                .iter()
-                                .map(|path| path.display().to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                    }
-                }
-            }
-            if warnings
-                .iter()
-                .any(|warning| warning.starts_with("refresher binary"))
+            if let Some(plugin) = &snapshot.plugin
+                && !plugin.command_paths.is_empty()
+                && !plugin
+                    .command_paths
+                    .iter()
+                    .any(|path| path == &binary_identity)
             {
-                fixes.insert(format!(
-                    "stop only recorded refresher pid {} with `kill {}`; then rerun `tabby ensure-started`",
-                    metadata.pid, metadata.pid
+                warnings.push(format!(
+                    "Session Runtime binary {} does not match registered command {}",
+                    binary_path.display(),
+                    plugin
+                        .command_paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
     }
 
     if let Some(tab) = &snapshot.focused_tab {
-        if tab.label.parse::<u64>().is_ok() && snapshot.locks.is_locked(&tab.tab_id) {
+        if tab.label.parse::<u64>().is_ok() && snapshot.tab_state.is_locked(&tab.tab_id) {
             warnings.push(format!(
                 "focused tab {} has numeric label {} and is manually locked",
                 tab.tab_id, tab.label
             ));
             fixes.insert("run `tabby unlock-focused` to clear its lock and baseline".to_string());
         }
-        if let Some(baseline) = snapshot.locks.last_plugin_label(&tab.tab_id)
+        if let Some(baseline) = snapshot.tab_state.last_plugin_label(&tab.tab_id)
             && baseline != tab.label
         {
             warnings.push(format!(
@@ -332,7 +320,6 @@ fn action_error_suffix(action: &RecentAction) -> String {
 
 fn collect_from_env() -> Result<StatusSnapshot, StatusError> {
     let socket = startup::resolve_socket_from_env()?;
-    let state_base = startup::state_base_from_runtime()?;
     let current_binary =
         startup::binary_identity(&std::env::current_exe().map_err(StatusError::CurrentExe)?);
     let plugin_list = run_herdr_json(&socket, &["plugin", "list", "--json"])?;
@@ -349,22 +336,19 @@ fn collect_from_env() -> Result<StatusSnapshot, StatusError> {
         Vec::new()
     };
 
-    let metadata = startup::read_refresher_metadata(&state_base, &socket)?;
-    let refresher = metadata.map(|metadata| RefresherInspection {
-        running: startup::metadata_process_is_live(&metadata, &socket),
-        metadata,
-    });
+    let runtime = session_runtime::inspect_runtime_from_env()?;
     let focused_tab = inspect_focused_tab(&socket)?;
-    let locks = LockStore::load(lock_store_path_from_runtime()?)?;
+    let state_base = startup::state_base_from_runtime()?;
+    let tab_state = SessionTabStateStore::open(&state_base, &socket)?.read(Clone::clone)?;
 
     Ok(StatusSnapshot {
         session_name: session_name_from_socket(&socket.socket_path),
         socket_path: socket.socket_path,
         current_binary,
         plugin,
-        refresher,
+        runtime,
         focused_tab,
-        locks,
+        tab_state,
         recent_actions,
     })
 }
@@ -381,36 +365,26 @@ fn inspect_focused_tab(
 ) -> Result<Option<FocusedTabInspection>, StatusError> {
     let transport = UnixSocketTransport::new(&socket.socket_path);
     let mut client = HerdrClient::new(transport);
-    let Some(tab) = client.list_tabs()?.into_iter().find(|tab| tab.focused) else {
+    let Some(observation) = client.observe_focused_tab()? else {
         return Ok(None);
     };
-    let panes = client.list_panes()?;
-    let pane = panes
-        .iter()
-        .find(|pane| pane.tab_id == tab.tab_id && pane.focused)
-        .or_else(|| panes.iter().find(|pane| pane.tab_id == tab.tab_id));
-    let (pane_id, cwd, candidate_label) = match pane {
-        Some(pane) => {
-            let process_info = client.pane_process_info(&pane.pane_id).ok();
-            let candidate = LabelPolicy::default()
-                .candidate_for_pane(pane, process_info.as_ref())
-                .map(|candidate| candidate.label().to_string());
-            (
-                Some(pane.pane_id.clone()),
-                pane.foreground_cwd.clone().or_else(|| pane.cwd.clone()),
-                candidate,
-            )
-        }
-        None => (None, None, None),
-    };
+    let tab = observation.tab;
+    let pane = observation.pane;
+    let process_info = pane
+        .focused
+        .then(|| client.pane_process_info(&pane.pane_id).ok())
+        .flatten();
+    let candidate_label = LabelPolicy::default()
+        .candidate_for_pane(&pane, process_info.as_ref())
+        .map(|candidate| candidate.label().to_string());
 
     Ok(Some(FocusedTabInspection {
         workspace_id: tab.workspace_id,
         tab_id: tab.tab_id,
         number: tab.number,
         label: tab.label,
-        pane_id,
-        cwd,
+        pane_id: Some(pane.pane_id),
+        cwd: observation.working_directory,
         candidate_label,
     }))
 }
@@ -555,8 +529,9 @@ pub enum StatusError {
     CurrentExe(io::Error),
     Startup(StartupError),
     StatePath(StatePathError),
-    LockStore(LockStoreError),
+    SessionTabState(SessionTabStateError),
     Herdr(HerdrError),
+    SessionRuntime(SessionRuntimeError),
     HerdrCommandIo {
         command: String,
         source: io::Error,
@@ -582,16 +557,25 @@ impl fmt::Display for StatusError {
             ),
             Self::Startup(error) => write!(
                 formatter,
-                "failed to inspect refresher startup state: {error}"
+                "failed to resolve Herdr Session runtime inputs: {error}"
             ),
             Self::StatePath(error) => {
                 write!(formatter, "failed to resolve Tabby state path: {error}")
             }
-            Self::LockStore(error) => {
-                write!(formatter, "failed to inspect Manually Locked Tabs: {error}")
+            Self::SessionTabState(error) => {
+                write!(
+                    formatter,
+                    "failed to inspect session-scoped tab state: {error}"
+                )
             }
             Self::Herdr(error) => {
                 write!(formatter, "failed to inspect focused Herdr state: {error}")
+            }
+            Self::SessionRuntime(error) => {
+                write!(
+                    formatter,
+                    "failed to inspect Session Runtime state: {error}"
+                )
             }
             Self::HerdrCommandIo { command, source } => {
                 write!(formatter, "failed to run `{command}`: {source}")
@@ -617,8 +601,9 @@ impl std::error::Error for StatusError {
             Self::CurrentExe(error) => Some(error),
             Self::Startup(error) => Some(error),
             Self::StatePath(error) => Some(error),
-            Self::LockStore(error) => Some(error),
+            Self::SessionTabState(error) => Some(error),
             Self::Herdr(error) => Some(error),
+            Self::SessionRuntime(error) => Some(error),
             Self::HerdrCommandIo { source, .. } => Some(source),
             Self::HerdrCommandJson { source, .. } => Some(source),
             Self::HerdrCommandFailed { .. } | Self::Protocol(_) => None,
@@ -638,9 +623,9 @@ impl From<StatePathError> for StatusError {
     }
 }
 
-impl From<LockStoreError> for StatusError {
-    fn from(error: LockStoreError) -> Self {
-        Self::LockStore(error)
+impl From<SessionTabStateError> for StatusError {
+    fn from(error: SessionTabStateError) -> Self {
+        Self::SessionTabState(error)
     }
 }
 
@@ -650,9 +635,18 @@ impl From<HerdrError> for StatusError {
     }
 }
 
+impl From<SessionRuntimeError> for StatusError {
+    fn from(error: SessionRuntimeError) -> Self {
+        Self::SessionRuntime(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_STATUS_STATE_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn reports_required_healthy_status_sections() {
@@ -664,25 +658,26 @@ mod tests {
         assert!(output.contains("Socket: /tmp/herdr/work.sock"));
         assert!(output.contains("Plugin: enabled, /opt/tabby/herdr-plugin.toml"));
         assert!(output.contains("Commands: /opt/tabby/bin/tabby"));
-        assert!(output.contains("Refresher: running pid 42, /opt/tabby/bin/tabby, version 0.1.8"));
+        assert!(output.contains("Session Runtime: Ready pid=42 version=0.1.10 lease_held=true"));
         assert!(output.contains("Focused tab: w1:t1 workspace=w1 number=1 label=codex"));
         assert!(output.contains("Focused pane: w1:p1 cwd=/repo candidate=codex"));
-        assert!(output.contains("Locks: 0 Manually Locked Tabs"));
+        assert!(
+            output.contains(
+                "State: 0 Manually Locked Tabs, 0 baselines, 0 unresolved rename intents"
+            )
+        );
         assert!(output.contains("Recent plugin actions: 1 inspected, no failures or lock skips"));
         assert!(output.contains("Warnings: none"));
     }
 
     #[test]
     fn reports_every_required_warning_from_injected_data() {
-        let mut locks = LockStore::default();
-        locks.lock_tab("w1:t1", Some("1".to_string()));
-        locks.record_plugin_label("w1:t1", "codex");
         let snapshot = StatusSnapshot {
             plugin: None,
-            refresher: Some(RefresherInspection {
-                metadata: metadata("/tmp/local/tabby"),
-                running: false,
-            }),
+            runtime: RuntimeInspection::Faulted {
+                diagnostic: "control endpoint is absent".to_string(),
+                lease_held: false,
+            },
             focused_tab: Some(FocusedTabInspection {
                 workspace_id: "w1".to_string(),
                 tab_id: "w1:t1".to_string(),
@@ -692,7 +687,10 @@ mod tests {
                 cwd: Some("/repo".to_string()),
                 candidate_label: Some("codex".to_string()),
             }),
-            locks,
+            tab_state: test_tab_state(|state| {
+                state.lock_tab("w1:t1", Some("1".to_string()));
+                state.record_plugin_label("w1:t1", "codex");
+            }),
             recent_actions: vec![RecentAction {
                 command: "../../bin/tabby refresh".to_string(),
                 status: "failed".to_string(),
@@ -705,8 +703,7 @@ mod tests {
         let output = render_status(&snapshot);
 
         assert!(output.contains("plugin yersonargotev.tabby is not registered"));
-        assert!(output.contains("Hybrid Session Refresher pid 42 is not running"));
-        assert!(output.contains("does not match current executable /opt/tabby/bin/tabby"));
+        assert!(output.contains("Session Runtime is Faulted: control endpoint is absent"));
         assert!(output.contains("focused tab w1:t1 has numeric label 1 and is manually locked"));
         assert!(output.contains("baseline for w1:t1 is codex but the visible label is 1"));
         assert!(output.contains("recent plugin action failed"));
@@ -715,17 +712,14 @@ mod tests {
     }
 
     #[test]
-    fn warns_when_live_refresher_does_not_match_registered_binary() {
+    fn warns_when_ready_runtime_does_not_match_registered_binary() {
         let mut snapshot = healthy_snapshot();
-        snapshot.refresher = Some(RefresherInspection {
-            metadata: metadata("/tmp/local/tabby"),
-            running: true,
-        });
+        snapshot.runtime = ready_runtime("/tmp/local/tabby");
 
         let output = render_status(&snapshot);
 
-        assert!(output.contains("does not match current executable /opt/tabby/bin/tabby"));
-        assert!(output.contains("does not match registered command /opt/tabby/bin/tabby"));
+        assert!(output.contains("Session Runtime binary /tmp/local/tabby does not match current executable /opt/tabby/bin/tabby"));
+        assert!(output.contains("Session Runtime binary /tmp/local/tabby does not match registered command /opt/tabby/bin/tabby"));
     }
 
     #[test]
@@ -752,10 +746,7 @@ mod tests {
                 manifest_path: PathBuf::from("/opt/tabby/herdr-plugin.toml"),
                 command_paths: vec![PathBuf::from("/opt/tabby/bin/tabby")],
             }),
-            refresher: Some(RefresherInspection {
-                metadata: metadata("/opt/tabby/bin/tabby"),
-                running: true,
-            }),
+            runtime: ready_runtime("/opt/tabby/bin/tabby"),
             focused_tab: Some(FocusedTabInspection {
                 workspace_id: "w1".to_string(),
                 tab_id: "w1:t1".to_string(),
@@ -765,7 +756,7 @@ mod tests {
                 cwd: Some("/repo".to_string()),
                 candidate_label: Some("codex".to_string()),
             }),
-            locks: LockStore::default(),
+            tab_state: test_tab_state(|_| {}),
             recent_actions: vec![RecentAction {
                 command: "../../bin/tabby ensure-started".to_string(),
                 status: "succeeded".to_string(),
@@ -775,15 +766,32 @@ mod tests {
         }
     }
 
-    fn metadata(binary_path: &str) -> RefresherMetadata {
-        RefresherMetadata {
-            schema_version: 2,
+    fn ready_runtime(binary_path: &str) -> RuntimeInspection {
+        RuntimeInspection::Ready {
             pid: 42,
-            session_key: "v1-test".to_string(),
-            socket_path: "/tmp/herdr/work.sock".to_string(),
-            started_at: 1,
-            tabby_version: "0.1.8".to_string(),
-            binary_path: Some(binary_path.to_string()),
+            launch_id: "launch-42".to_string(),
+            version: "0.1.10".to_string(),
+            binary_path: PathBuf::from(binary_path),
+            lease_held: true,
+            last_evaluation_unix_ms: None,
+            last_failure: None,
+            next_periodic_unix_ms: None,
         }
+    }
+
+    fn test_tab_state(mutate: impl FnOnce(&mut SessionTabState)) -> SessionTabState {
+        let socket = SessionSocket::resolve("/tmp/tabby-status-test.sock").expect("socket");
+        let id = NEXT_STATUS_STATE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "tabby-status-test-{}-{id}.json",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SessionTabStateStore::at_path(&path, &socket).expect("state store");
+        store.mutate(mutate).expect("mutate state");
+        let state = store.read(Clone::clone).expect("read state");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.lock"));
+        state
     }
 }

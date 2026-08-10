@@ -1,6 +1,6 @@
 # Tabby
 
-Tabby is a Herdr plugin that keeps tab labels meaningful. A per-session Hybrid Session Refresher keeps the focused tab fresh, prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, and falls back to the working-directory basename when no significant command is running.
+Tabby is a Herdr plugin that keeps the focused tab label meaningful within each Herdr Session. One session-owned runtime survives client detach, stops with the Herdr Session, and resumes on restore. It prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, then falls back to the working-directory basename.
 
 ## Quick path
 
@@ -8,10 +8,10 @@ Install the packaged plugin through Homebrew:
 
 ```sh
 brew install yersonargotev/tap/tabby
-tabby install --start
+tabby install
 ```
 
-Refresh the focused tab label manually when you want an immediate one-shot update:
+Request a focused-tab refresh manually:
 
 ```sh
 tabby refresh
@@ -33,35 +33,34 @@ It also avoids common shell and wrapper processes such as `zsh`, `bash`, `tmux`,
 
 ## Behavior details
 
-- Runs one Hybrid Session Refresher per Herdr Session for automatic focused-tab freshness.
-- Starts idempotently through `tabby ensure-started`, `tabby install --start`, creation hooks, or the visible `Start Tabby` action.
-- Verifies that an already-running refresher came from the current `tabby` executable. If live metadata points to a different binary (or cannot identify one), startup refuses instead of silently keeping stale local or Homebrew code active; stop the reported PID and rerun `tabby install --start`.
-- Suppresses all Herdr API calls during the 1000 ms Focus Quiet Window after focus/create events.
-- Inspects only the focused tab on a low-cadence 5 second idle interval outside the quiet window, and still requires two consecutive observations before new labels become stable.
+- Runs one lease-owned Session Runtime per Herdr Session and starts it through Herdr 0.8 lifecycle/focus hooks or any manual action.
+- Uses authenticated cooperative handoff after `tabby install`; it never treats PID metadata as ownership authority.
+- Suppresses all Herdr API calls during the 1000 ms Focus Quiet Window after a Refresh Trigger.
+- Re-evaluates only the focused tab every 5 seconds, with at most three samples at 500 ms cadence and two equal consecutive candidates before rename.
 - Leaves inactive tab labels unchanged so Tabby does not rewrite the tab bar while the user is navigating between tabs.
-- Keeps `tabby refresh` as a safe one-shot manual recovery path.
-- Treats user-edited labels as manual locks after Tabby has established a plugin label baseline, and persists those locks until an unlock action clears them.
+- Routes refresh and unlock actions through the owner so effects remain serialized.
+- Persists locks, baselines, and pre-rename intent by lossless Session Identity across stop/restore.
 
 Project vocabulary and domain rules live in [`CONTEXT.md`](CONTEXT.md).
 
 ## Commands
 
 ```text
-Usage: tabby <status|refresh|start|ensure-started|install [--start]|unlock-focused|unlock-all>
+Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install|unlock-focused|unlock-all|repair-state --discard|forget-session>
 ```
 
 | Command | Purpose |
 | --- | --- |
-| `tabby status` | Inspect the current Herdr Session, plugin registration, Hybrid Session Refresher, focused Tab Label Candidate, locks, baselines, and recent plugin-action failures without changing state. |
-| `tabby refresh` | Wait briefly, inspect the focused Herdr tab, apply at most one label refresh, and exit. |
-| `tabby start` | Run the Hybrid Session Refresher in the foreground for the current Herdr Session. |
-| `tabby ensure-started` | Ensure exactly one Hybrid Session Refresher is running for the current Herdr Session. |
-| `tabby install` | Refresh Herdr registration for the current Homebrew-installed package; it does not start the refresher. |
-| `tabby install --start` | Refresh registration and ensure the current Herdr Session Refresher is running. |
+| `tabby status` | Read authoritative runtime, session-state, registration, and focused-tab diagnostics without changing state. |
+| `tabby refresh` | Deliver a manual Refresh Trigger to the Ready Session Runtime. |
+| `tabby start` / `tabby ensure-started` | Cross the Startup Gate and ensure exactly one Ready Session Runtime. |
+| `tabby install` | Refresh registration and cooperatively ensure the installed binary owns the current Herdr Session. |
 | `tabby unlock-focused` | Clear the manual lock and plugin-label baseline for the focused Herdr tab so automatic naming resumes. |
 | `tabby unlock-all` | Clear all persisted manual locks and their associated plugin-label baselines so automatic naming resumes. |
+| `tabby repair-state --discard` | Explicitly archive invalid session-state evidence and create clean state. |
+| `tabby forget-session` | Remove retained state for the selected stopped Herdr Session. |
 
-Run `tabby status` first when labels are not updating. Its warnings distinguish a missing or disabled registration, a stopped or mismatched refresher, a numeric focused Manually Locked Tab, a suspicious focused-tab baseline, and recent failed or lock-skipped plugin actions. The command is read-only; suggested fixes are printed separately and run only when you choose them.
+Run `tabby status` first when labels are not updating. It reports Absent, Starting, Ready, or Faulted; lease ownership; runtime identity/version; the latest evaluation/failure and next periodic cycle; and per-session lock, baseline, and intent counts. The command is read-only.
 
 ## Local development
 
@@ -95,7 +94,7 @@ dist plan
 
 ## Release notes
 
-Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. After install or upgrade, `tabby install` refreshes Herdr registration so stale Homebrew Cellar paths are replaced with the current package path. Automatic label updates come from the per-session Hybrid Session Refresher; creation hooks and the `Start Tabby` action run `ensure-started`, while `tabby refresh` remains the manual one-shot path.
+Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. After install or upgrade, `tabby install` refreshes registration and performs a cooperative Session Runtime handoff when needed.
 
 Release setup and tagging details live in [`docs/release.md`](docs/release.md). The development and release manifests are kept aligned by [`scripts/check-herdr-manifests.py`](scripts/check-herdr-manifests.py).
 

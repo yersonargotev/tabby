@@ -60,7 +60,7 @@ pub fn relink_with(
     }
 
     Ok(format!(
-        "tabby install: linked {PLUGIN_ID} to {plugin_root}\nstart Tabby for the current Herdr Session with: tabby install --start\nor: herdr plugin action invoke start --plugin {PLUGIN_ID}"
+        "tabby install: linked {PLUGIN_ID} to {plugin_root}"
     ))
 }
 
@@ -264,6 +264,7 @@ mod tests {
             ]
         );
         assert!(message.contains("tabby install: linked yersonargotev.tabby"));
+        assert!(!message.contains("--start"));
     }
 
     #[test]

@@ -44,6 +44,37 @@ impl LifetimeLease {
             _ => Err(error),
         }
     }
+
+    /// Returns whether another process currently holds the lease, without creating state.
+    pub(crate) fn is_held(path: &Path) -> io::Result<bool> {
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !file.metadata()?.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("lease path `{}` is not a regular file", path.display()),
+            ));
+        }
+
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            return Ok(false);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EACCES) | Some(libc::EAGAIN) => Ok(true),
+            _ => Err(error),
+        }
+    }
 }
 
 /// Binds a listener whose directory and socket are private to the current user.
@@ -169,7 +200,10 @@ pub(crate) fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
 
@@ -210,6 +244,78 @@ mod tests {
         assert!(
             LifetimeLease::try_acquire(&path)
                 .expect("acquire released lease")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn lifetime_lease_reports_ownership_without_creating_a_missing_file() {
+        let directory = TempDir::new();
+        let path = directory.path.join("runtime.lock");
+
+        assert!(!LifetimeLease::is_held(&path).expect("missing lease is not held"));
+        assert!(!path.exists());
+
+        let lease = LifetimeLease::try_acquire(&path)
+            .expect("acquire lease")
+            .expect("lease available");
+        assert!(LifetimeLease::is_held(&path).expect("lease is held"));
+
+        drop(lease);
+        assert!(!LifetimeLease::is_held(&path).expect("released lease is not held"));
+    }
+
+    #[test]
+    fn lease_process_helper() {
+        let Some(path) = std::env::var_os("TABBY_RUNTIME_LEASE_HELPER_PATH") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let _lease = LifetimeLease::try_acquire(&path)
+            .expect("child acquires lease")
+            .expect("lease is available to child");
+        fs::write(path.with_extension("ready"), b"ready").expect("child signals readiness");
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn process_exit_releases_the_lifetime_lease_for_a_new_owner() {
+        let directory = TempDir::new();
+        let path = directory.path.join("runtime.lock");
+        let ready_path = path.with_extension("ready");
+        let test_binary = std::env::current_exe().expect("test binary");
+        let mut child = Command::new(test_binary)
+            .args([
+                "--exact",
+                "session_runtime::unix::tests::lease_process_helper",
+                "--nocapture",
+            ])
+            .env("TABBY_RUNTIME_LEASE_HELPER_PATH", &path)
+            .spawn()
+            .expect("spawn lease holder");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ready_path.exists(),
+            "child did not acquire the lease in time"
+        );
+        assert!(LifetimeLease::is_held(&path).expect("inspect child lease"));
+        assert!(
+            LifetimeLease::try_acquire(&path)
+                .expect("attempt concurrent lease")
+                .is_none()
+        );
+
+        child.kill().expect("terminate lease holder");
+        child.wait().expect("reap lease holder");
+        assert!(
+            LifetimeLease::try_acquire(&path)
+                .expect("acquire after child exit")
                 .is_some()
         );
     }

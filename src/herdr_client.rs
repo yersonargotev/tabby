@@ -7,9 +7,42 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
+const HERDR_RPC_TIMEOUT: Duration = Duration::from_millis(75);
+
 pub trait HerdrApi {
+    #[cfg(test)]
     fn list_tabs(&mut self) -> Result<Vec<TabInfo>, HerdrError>;
+    #[cfg(test)]
     fn list_panes(&mut self) -> Result<Vec<PaneInfo>, HerdrError>;
+
+    /// Reads a coherent focused tab and pane from `session.snapshot`.
+    ///
+    /// Foreground process data deliberately remains separate: callers must ask
+    /// `pane_process_info` for the selected pane after this observation.
+    #[cfg(not(test))]
+    fn observe_focused_tab(&mut self) -> Result<Option<FocusedTabObservation>, HerdrError>;
+
+    #[cfg(test)]
+    fn observe_focused_tab(&mut self) -> Result<Option<FocusedTabObservation>, HerdrError> {
+        let Some(tab) = self.list_tabs()?.into_iter().find(|tab| tab.focused) else {
+            return Ok(None);
+        };
+        let panes = self.list_panes()?;
+        let Some(pane) = panes
+            .iter()
+            .find(|pane| pane.tab_id == tab.tab_id && pane.focused)
+            .or_else(|| panes.iter().find(|pane| pane.tab_id == tab.tab_id))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(FocusedTabObservation {
+            working_directory: pane.foreground_cwd.clone().or_else(|| pane.cwd.clone()),
+            tab,
+            pane,
+        }))
+    }
+
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, HerdrError>;
     fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<RenameTabResult, HerdrError>;
 }
@@ -90,8 +123,8 @@ impl UnixSocketTransport {
 impl RpcTransport for UnixSocketTransport {
     fn send_request_line(&mut self, request_line: &str) -> Result<String, HerdrError> {
         let mut stream = UnixStream::connect(&self.socket_path)?;
-        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        stream.set_read_timeout(Some(HERDR_RPC_TIMEOUT))?;
+        stream.set_write_timeout(Some(HERDR_RPC_TIMEOUT))?;
         stream.write_all(request_line.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()?;
@@ -137,6 +170,22 @@ where
         self.transport
     }
 
+    /// Fetches the Herdr 0.8 session snapshot. Runtime evaluation should prefer
+    /// `observe_focused_tab`, which hides focus fallback and coherence rules.
+    pub fn session_snapshot(&mut self) -> Result<SessionSnapshot, HerdrError> {
+        let result: SessionSnapshotResult = self.call("session.snapshot", EmptyParams {})?;
+        result.into_snapshot()
+    }
+
+    /// Returns one coherent focused tab/pane observation from `session.snapshot`.
+    ///
+    /// This intentionally does not fetch foreground processes: `pane.process_info`
+    /// is a separate, later observation and cannot be atomically combined with the
+    /// snapshot.
+    pub fn observe_focused_tab(&mut self) -> Result<Option<FocusedTabObservation>, HerdrError> {
+        Ok(self.session_snapshot()?.into_focused_observation())
+    }
+
     fn call<P, R>(&mut self, method: &'static str, params: P) -> Result<R, HerdrError>
     where
         P: Serialize,
@@ -164,16 +213,22 @@ impl<T> HerdrApi for HerdrClient<T>
 where
     T: RpcTransport,
 {
+    #[cfg(test)]
     fn list_tabs(&mut self) -> Result<Vec<TabInfo>, HerdrError> {
         let result: TabListResult =
             self.call("tab.list", ListByWorkspaceParams { workspace_id: None })?;
         result.into_tabs()
     }
 
+    #[cfg(test)]
     fn list_panes(&mut self) -> Result<Vec<PaneInfo>, HerdrError> {
         let result: PaneListResult =
             self.call("pane.list", ListByWorkspaceParams { workspace_id: None })?;
         result.into_panes()
+    }
+
+    fn observe_focused_tab(&mut self) -> Result<Option<FocusedTabObservation>, HerdrError> {
+        HerdrClient::<T>::observe_focused_tab(self)
     }
 
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, HerdrError> {
@@ -214,11 +269,15 @@ impl<P> JsonRpcRequest<P> {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ListByWorkspaceParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct EmptyParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PaneProcessInfoParams {
@@ -257,6 +316,7 @@ pub struct RpcError {
     pub message: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TabListResult {
     #[serde(rename = "type")]
@@ -264,6 +324,7 @@ pub struct TabListResult {
     pub tabs: Vec<TabInfo>,
 }
 
+#[cfg(test)]
 impl TabListResult {
     fn into_tabs(self) -> Result<Vec<TabInfo>, HerdrError> {
         expect_response_type(&self.response_type, "tab_list")?;
@@ -271,6 +332,7 @@ impl TabListResult {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PaneListResult {
     #[serde(rename = "type")]
@@ -278,6 +340,7 @@ pub struct PaneListResult {
     pub panes: Vec<PaneInfo>,
 }
 
+#[cfg(test)]
 impl PaneListResult {
     fn into_panes(self) -> Result<Vec<PaneInfo>, HerdrError> {
         expect_response_type(&self.response_type, "pane_list")?;
@@ -297,6 +360,126 @@ impl PaneProcessInfoResult {
         expect_response_type(&self.response_type, "pane_process_info")?;
         Ok(self.process_info)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SessionSnapshotResult {
+    #[serde(rename = "type")]
+    response_type: String,
+    pub snapshot: SessionSnapshot,
+}
+
+impl SessionSnapshotResult {
+    pub fn into_snapshot(self) -> Result<SessionSnapshot, HerdrError> {
+        expect_response_type(&self.response_type, "session_snapshot")?;
+        Ok(self.snapshot)
+    }
+}
+
+/// The subset of Herdr's `session.snapshot` required for focused observation.
+/// Other snapshot sections are deliberately hidden because Tabby does not use
+/// them to label a focused tab.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SessionSnapshot {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub protocol: u32,
+    #[serde(default)]
+    pub focused_workspace_id: Option<String>,
+    #[serde(default)]
+    pub focused_tab_id: Option<String>,
+    #[serde(default)]
+    pub focused_pane_id: Option<String>,
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
+    #[serde(default)]
+    pub panes: Vec<PaneInfo>,
+}
+
+impl SessionSnapshot {
+    fn into_focused_observation(self) -> Option<FocusedTabObservation> {
+        let selected_tab_id = self
+            .focused_tab_id
+            .as_deref()
+            .filter(|tab_id| self.tabs.iter().any(|tab| tab.tab_id == *tab_id))
+            .or_else(|| {
+                self.focused_pane_id.as_deref().and_then(|pane_id| {
+                    self.panes
+                        .iter()
+                        .find(|pane| pane.pane_id == pane_id)
+                        .map(|pane| pane.tab_id.as_str())
+                })
+            })
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .find(|tab| tab.focused)
+                    .map(|tab| tab.tab_id.as_str())
+            })
+            .map(str::to_owned);
+
+        let selected_tab_id = selected_tab_id?;
+        let tab = self
+            .tabs
+            .into_iter()
+            .find(|tab| tab.tab_id == selected_tab_id)?;
+
+        let selected_pane_id = self
+            .focused_pane_id
+            .as_deref()
+            .filter(|pane_id| {
+                self.panes
+                    .iter()
+                    .any(|pane| pane.pane_id == *pane_id && pane.tab_id == tab.tab_id)
+            })
+            .or_else(|| {
+                self.panes
+                    .iter()
+                    .find(|pane| pane.tab_id == tab.tab_id && pane.focused)
+                    .map(|pane| pane.pane_id.as_str())
+            })
+            .or_else(|| {
+                self.panes
+                    .iter()
+                    .find(|pane| pane.tab_id == tab.tab_id)
+                    .map(|pane| pane.pane_id.as_str())
+            })
+            .map(str::to_owned);
+
+        let selected_pane_id = selected_pane_id?;
+        let pane = self
+            .panes
+            .into_iter()
+            .find(|pane| pane.pane_id == selected_pane_id && pane.tab_id == tab.tab_id)?;
+
+        Some(FocusedTabObservation {
+            working_directory: pane
+                .foreground_cwd
+                .as_deref()
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    pane.cwd
+                        .as_deref()
+                        .filter(|cwd| !cwd.is_empty())
+                        .map(str::to_owned)
+                }),
+            tab,
+            pane,
+        })
+    }
+}
+
+/// A focused tab/pane pair selected from one Herdr session snapshot.
+///
+/// `working_directory` prefers `foreground_cwd` and falls back to the pane's
+/// cwd. It has no foreground process data; use `pane_process_info` separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusedTabObservation {
+    pub tab: TabInfo,
+    pub pane: PaneInfo,
+    pub working_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -432,6 +615,12 @@ mod tests {
         include_str!("../tests/fixtures/herdr-client/pane-process-info.json");
     const PANE_PROCESS_INFO_REQUEST_FIXTURE: &str =
         include_str!("../tests/fixtures/herdr-client/pane-process-info-request.json");
+    const SESSION_SNAPSHOT_FIXTURE: &str =
+        include_str!("../tests/fixtures/herdr-client/session-snapshot.json");
+    const SESSION_SNAPSHOT_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/herdr-client/session-snapshot-request.json");
+    const SESSION_SNAPSHOT_FALLBACK_FIXTURE: &str =
+        include_str!("../tests/fixtures/herdr-client/session-snapshot-fallback.json");
     const TAB_RENAME_REQUEST_FIXTURE: &str =
         include_str!("../tests/fixtures/herdr-client/tab-rename-request.json");
     const TAB_RENAME_RESPONSE_FIXTURE: &str =
@@ -492,6 +681,92 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_session_snapshot_fixture() {
+        let result: SessionSnapshotResult =
+            decode_response("snapshot-1", SESSION_SNAPSHOT_FIXTURE).expect("session snapshot");
+        let snapshot = result
+            .into_snapshot()
+            .expect("session_snapshot response type");
+
+        assert_eq!(snapshot.version, "0.8.0");
+        assert_eq!(snapshot.protocol, 19);
+        assert_eq!(snapshot.focused_tab_id.as_deref(), Some("w1:t1"));
+        assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(snapshot.tabs.len(), 2);
+        assert_eq!(snapshot.panes.len(), 2);
+    }
+
+    #[test]
+    fn observes_focused_tab_from_a_coherent_snapshot_then_processes_separately() {
+        let transport = MockTransport::new(vec![
+            SESSION_SNAPSHOT_FIXTURE.replace("snapshot-1", "tabby-1"),
+            PANE_PROCESS_INFO_FIXTURE.replace("process-1", "tabby-2"),
+        ]);
+        let mut client = HerdrClient::new(transport);
+
+        let observation = client
+            .observe_focused_tab()
+            .expect("focused observation")
+            .expect("focused tab");
+        let process_info = client
+            .pane_process_info(&observation.pane.pane_id)
+            .expect("separate process observation");
+
+        assert_eq!(observation.tab.tab_id, "w1:t1");
+        assert_eq!(observation.pane.pane_id, "w1:p1");
+        assert_eq!(
+            observation.working_directory.as_deref(),
+            Some("/Users/me/dev/tabby")
+        );
+        assert_eq!(process_info.pane_id, observation.pane.pane_id);
+
+        let transport = client.into_transport();
+        let requests: Vec<serde_json::Value> = transport
+            .requests
+            .iter()
+            .map(|request| serde_json::from_str(request).expect("request line json"))
+            .collect();
+        assert_eq!(requests[0]["method"], "session.snapshot");
+        assert_eq!(requests[0]["params"], serde_json::json!({}));
+        assert_eq!(requests[1]["method"], "pane.process_info");
+    }
+
+    #[test]
+    fn focused_observation_falls_back_to_snapshot_flags_and_pane_cwd() {
+        let transport = MockTransport::new(vec![
+            SESSION_SNAPSHOT_FALLBACK_FIXTURE.replace("snapshot-fallback", "tabby-1"),
+        ]);
+        let mut client = HerdrClient::new(transport);
+
+        let observation = client
+            .observe_focused_tab()
+            .expect("focused observation")
+            .expect("focused tab");
+
+        assert_eq!(observation.tab.tab_id, "w1:t2");
+        assert_eq!(observation.pane.pane_id, "w1:p3");
+        assert_eq!(
+            observation.working_directory.as_deref(),
+            Some("/repo/fallback")
+        );
+    }
+
+    #[test]
+    fn focused_observation_returns_none_when_snapshot_has_no_focused_tab_or_pane() {
+        let snapshot = SessionSnapshot {
+            version: "0.8.0".to_string(),
+            protocol: 19,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            tabs: Vec::new(),
+            panes: Vec::new(),
+        };
+
+        assert_eq!(snapshot.into_focused_observation(), None);
+    }
+
+    #[test]
     fn serializes_tab_list_request_fixture() {
         let request = JsonRpcRequest::new(
             "tabs-1",
@@ -524,6 +799,13 @@ mod tests {
         );
 
         assert_request_matches_fixture(request, PANE_PROCESS_INFO_REQUEST_FIXTURE);
+    }
+
+    #[test]
+    fn serializes_session_snapshot_request_fixture() {
+        let request = JsonRpcRequest::new("snapshot-1", "session.snapshot", EmptyParams {});
+
+        assert_request_matches_fixture(request, SESSION_SNAPSHOT_REQUEST_FIXTURE);
     }
 
     #[test]

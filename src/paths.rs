@@ -17,11 +17,43 @@ pub const HERDR_PLUGIN_CONFIG_DIR_ENV: &str = "HERDR_PLUGIN_CONFIG_DIR";
 pub const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
 pub const HOME_ENV: &str = "HOME";
 const LOCK_STORE_FILE_NAME: &str = "locks.json";
+const SESSION_TAB_STATE_DIR_NAME: &str = "session-tab-state";
 
 pub fn lock_store_path_from_runtime() -> Result<PathBuf, StatePathError> {
     resolve_lock_store_path_with(RuntimePathInputs::from_env(), || {
         herdr_plugin_config_dir(PLUGIN_ID)
     })
+}
+
+/// Returns the persisted tab-state path owned by one validated Herdr Session.
+///
+/// The storage key is deliberately constrained to Tabby's lossless v2 SHA-256
+/// format before it becomes part of a path. The persisted record still embeds
+/// the original Session Identity; this path is only an index, never authority.
+pub fn session_tab_state_path(
+    state_base: impl AsRef<Path>,
+    session_key: &str,
+) -> Result<PathBuf, StatePathError> {
+    let state_base = absolute_path(
+        state_base.as_ref().to_path_buf(),
+        StatePathSource::SessionStateBase,
+    )?;
+    if !is_session_storage_key(session_key) {
+        return Err(StatePathError::InvalidSessionStorageKey(
+            session_key.to_string(),
+        ));
+    }
+    Ok(state_base
+        .join(SESSION_TAB_STATE_DIR_NAME)
+        .join(session_key)
+        .join("state.json"))
+}
+
+fn is_session_storage_key(key: &str) -> bool {
+    let Some(digest) = key.strip_prefix("v2-") else {
+        return false;
+    };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -190,6 +222,7 @@ pub enum StatePathSource {
     XdgStateHome,
     Home,
     HerdrPluginConfigDirCommand,
+    SessionStateBase,
 }
 
 impl From<PluginStateDirSource> for StatePathSource {
@@ -212,6 +245,7 @@ impl fmt::Display for StatePathSource {
             Self::XdgStateHome => XDG_STATE_HOME_ENV,
             Self::Home => HOME_ENV,
             Self::HerdrPluginConfigDirCommand => "herdr plugin config-dir",
+            Self::SessionStateBase => "session state base",
         };
         formatter.write_str(name)
     }
@@ -232,6 +266,7 @@ pub enum StatePathError {
         stderr: String,
     },
     HerdrConfigDirUtf8(FromUtf8Error),
+    InvalidSessionStorageKey(String),
 }
 
 impl fmt::Display for StatePathError {
@@ -257,6 +292,10 @@ impl fmt::Display for StatePathError {
                 formatter,
                 "`herdr plugin config-dir {PLUGIN_ID}` returned non-UTF-8 output: {error}"
             ),
+            Self::InvalidSessionStorageKey(key) => write!(
+                formatter,
+                "invalid Tabby Session Identity storage key `{key}`"
+            ),
         }
     }
 }
@@ -268,7 +307,8 @@ impl std::error::Error for StatePathError {
             Self::HerdrConfigDirUtf8(error) => Some(error),
             Self::EmptyPath { .. }
             | Self::RelativePath { .. }
-            | Self::HerdrConfigDirFailed { .. } => None,
+            | Self::HerdrConfigDirFailed { .. }
+            | Self::InvalidSessionStorageKey(_) => None,
         }
     }
 }
@@ -426,5 +466,29 @@ mod tests {
                 source: StatePathSource::HerdrPluginConfigDirCommand
             }
         ));
+    }
+
+    #[test]
+    fn derives_a_session_scoped_state_path_from_a_valid_session_key() {
+        let path = session_tab_state_path(
+            Path::new("/tmp/tabby-test/state"),
+            "v2-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("resolve session state path");
+
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/tmp/tabby-test/state/session-tab-state/v2-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/state.json"
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_a_session_key_that_could_escape_the_state_directory() {
+        let error = session_tab_state_path(Path::new("/tmp/tabby-test/state"), "../other")
+            .expect_err("session key must be a derived storage key");
+
+        assert!(matches!(error, StatePathError::InvalidSessionStorageKey(_)));
     }
 }

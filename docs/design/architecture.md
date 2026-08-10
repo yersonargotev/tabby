@@ -1,6 +1,6 @@
-# Herdr Tab Auto-Renamer Architecture Proposal
+# Herdr Tab Auto-Renamer Architecture
 
-Status: implemented design; ADR 0009 supersedes the one-shot-only model from ADR 0008 while preserving focused-tab-only safety from ADR 0007.
+Status: implemented design. ADR 0010 supersedes ADR 0009 while preserving focused-tab-only safety from ADR 0007.
 
 ## Goal
 
@@ -10,8 +10,7 @@ Build a Herdr plugin that automatically keeps tab labels meaningful. For the cur
 
 Primary Herdr APIs:
 
-- `tab.list` — enumerate tabs and current labels.
-- `pane.list` — enumerate panes, tab ownership, focus state, `cwd`, and `foreground_cwd` when available.
+- `session.snapshot` — coherently observe workspaces, tabs, panes, and focus.
 - `pane.process_info` — inspect foreground process details for app-first labels.
 - `tab.rename` — apply a Stable Label Candidate to a tab.
 
@@ -19,10 +18,10 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
 
 ## Core behavior
 
-1. Run one Hybrid Session Refresher per Herdr Session, started idempotently by `ensure-started`.
-2. Subscribe to `tab.focused`, `workspace.focused`, `tab.created`, `workspace.created`, and `pane.focused`.
-3. Reset a 1000 ms Focus Quiet Window on each focus/create event; during the window, do not call any Herdr API.
-4. Outside the quiet window, read only the focused tab on a low-cadence 5 second idle interval; inactive tabs are not inspected or renamed.
+1. Run one lease-owned Session Runtime per Herdr Session through a session-scoped Startup Gate.
+2. Receive `[[startup]]`, `pane.focused`, and creation-recovery hooks through a private authenticated control endpoint; do not open `events.subscribe`.
+3. Reset a 1000 ms Focus Quiet Window on each actionable trigger; during the window, do not call any Herdr API.
+4. Outside the quiet window, evaluate only the focused tab every 5 seconds; each attempt has a 2.5 second deadline, at most three samples, and 500 ms sample cadence.
 5. Select the focused tab's Focused Pane.
 6. Ask the Process Inspector for foreground process details for that pane.
 7. Use Label Policy to derive a Tab Label Candidate:
@@ -35,37 +34,33 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
    - keep the last Significant Command for a 2 second grace period before falling back to cwd;
    - skip no-op renames.
 9. Detect and preserve Manually Locked Tabs.
-10. Apply `tab.rename` only after the Focus Quiet Window and stability/revalidation gates pass.
+10. Persist Automatic Rename Intent, revalidate, then apply at most one `tab.rename`.
 
 ## Rust module shape
 
 Proposed files/modules for a single Rust crate:
 
 - `src/main.rs` — CLI entrypoint and command dispatch.
-- `src/daemon.rs` — Hybrid Session Refresher loop, one-shot refresh compatibility path, focused-tab inspection, and lock-aware rename orchestration.
+- `src/session_runtime.rs` — lifecycle, Startup Gate, lease, control ingress, scheduling, handoff, and effects.
+- `src/daemon.rs` — bounded One-Shot Refresh decision/execution.
 - `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client and DTOs.
 - `src/process_inspector.rs` — wrapper around `pane.process_info`; failure returns no Significant Command and allows cwd fallback.
 - `src/labeler.rs` — Label Policy and candidate derivation.
 - `src/stability.rs` — anti-flapping state machine.
-- `src/locks.rs` — persisted Manually Locked Tab store.
+- `src/locks.rs` — validated Session-Scoped Tab State and crash-safe rename reconciliation.
 - `src/paths.rs` — plugin state/log paths.
 
 Expected CLI/actions:
 
-- `start` to run the Hybrid Session Refresher in the foreground;
-- `ensure-started` to idempotently start one refresher for the current Herdr Session;
-- `refresh` for a manual one-shot refresh without refresher IPC;
-- `install` to relink/register the Homebrew-managed plugin without launching a long-running process, plus `install --start` to also ensure the refresher;
-- `unlock-focused` to remove the focused tab from the persisted lock store;
-- `unlock-all` to clear all persisted manual locks.
+- `start` / `ensure-started` cross the Startup Gate;
+- `refresh` signals the Ready owner;
+- `install` relinks and ensures/hands off to the installed owner;
+- `unlock-focused`, `unlock-all`, and `repair-state --discard` mutate through the owner;
+- `forget-session` removes retained state only while the selected runtime is Absent.
 
 ## Refresh trigger model
 
-Tabby prioritizes Navigation Stability while restoring automatic label freshness. The normal update path is one Hybrid Session Refresher per Herdr Session. Manifest startup hooks are limited to `workspace.created` and `tab.created`, both running `ensure-started`; focus events are handled inside the live refresher instead of spawning processes.
-
-The refresher subscribes to `workspace.focused`, `tab.focused`, `pane.focused`, `workspace.created`, and `tab.created`. Every such event resets the 1000 ms Focus Quiet Window and defers the next automatic read until the window expires. Pane output changes and layout updates remain intentionally out of scope.
-
-`tabby install` only refreshes Herdr registration. `tabby install --start` refreshes registration and ensures the current Herdr Session refresher is running.
+Tabby prioritizes Navigation Stability while retaining five-second focused-tab freshness. Startup and focus hooks cross the gate and signal the owner; creation hooks recover a missing owner. Newer triggers invalidate unfinished generations. Client Detach does not affect the runtime, proven Session Stop releases ownership, and Session Restore starts a new owner for the same retained Session Identity.
 
 ## Manual lock semantics
 

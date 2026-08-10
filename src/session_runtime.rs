@@ -2,21 +2,22 @@
 
 mod unix;
 
-use crate::daemon::{self, DaemonError, HybridRefresherState};
+use crate::daemon::{self, DaemonError, OneShotRefreshState};
 use crate::herdr_client::{HerdrClient, UnixSocketTransport};
-use crate::paths::{HERDR_PLUGIN_STATE_DIR_ENV, lock_store_path_from_runtime};
+use crate::paths::HERDR_PLUGIN_STATE_DIR_ENV;
 use crate::startup::SessionSocket;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -35,6 +36,10 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_LEASE_WAIT: Duration = Duration::from_secs(1);
 const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_MAX_LINE_BYTES: u64 = 64 * 1024;
+const CONTROL_WORKER_COUNT: usize = 4;
+const CONTROL_WORKER_QUEUE: usize = 16;
+const CONTROL_RECENT_REQUEST_IDS: usize = 128;
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 static NEXT_LAUNCH_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -62,6 +67,9 @@ pub struct ReadySessionRuntime {
 pub enum EnsureRuntimeOutcome {
     ReadyOwnerSignaled(ReadySessionRuntime),
     NewOwnerReady(ReadySessionRuntime),
+    Busy,
+    TimedOut,
+    Faulted { diagnostic: String },
 }
 
 pub struct SessionRuntimeLaunch<'a> {
@@ -111,20 +119,54 @@ struct RuntimeMetadata {
     launch_id: String,
     tabby_version: String,
     binary_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_evaluation_unix_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_failure: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_periodic_unix_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RuntimeMetadataState {
     Ready,
+    Faulted,
+}
+
+/// Read-only lifecycle information for one selected Herdr Session.
+///
+/// This inspection never signals, starts, repairs, or otherwise mutates a runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeInspection {
+    Absent,
+    Starting {
+        lease_held: bool,
+    },
+    Ready {
+        pid: u32,
+        launch_id: String,
+        version: String,
+        binary_path: PathBuf,
+        lease_held: bool,
+        last_evaluation_unix_ms: Option<u128>,
+        last_failure: Option<String>,
+        next_periodic_unix_ms: Option<u128>,
+    },
+    Faulted {
+        diagnostic: String,
+        lease_held: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ControlRequest {
     schema_version: u8,
     session_key: String,
+    socket_identity_hex: String,
     launch_id: String,
-    trigger: RefreshTrigger,
+    request_id: String,
+    operation: RuntimeControlOperation,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -132,13 +174,51 @@ struct ControlReply {
     accepted: bool,
     pid: u32,
     launch_id: String,
+    request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeControlOperation {
+    Signal { trigger: RefreshTrigger },
+    UnlockFocused,
+    UnlockAll,
+    RepairStateDiscard,
+    PrepareHandoff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeControlEvent {
+    Trigger(RefreshTrigger),
+    UnlockFocused,
+    UnlockAll,
+    RepairStateDiscard,
+    PrepareHandoff,
+}
+
 #[derive(Default)]
 struct TriggerMailboxState {
-    pending: Option<RefreshTrigger>,
+    pending: Option<RuntimeControlEvent>,
+}
+
+#[derive(Default)]
+struct RecentControlRequests {
+    ids: VecDeque<String>,
+}
+
+impl RecentControlRequests {
+    fn remember(&mut self, request_id: &str) -> bool {
+        if self.ids.iter().any(|known| known == request_id) {
+            return false;
+        }
+        self.ids.push_back(request_id.to_string());
+        if self.ids.len() > CONTROL_RECENT_REQUEST_IDS {
+            self.ids.pop_front();
+        }
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -161,21 +241,36 @@ fn trigger_mailbox() -> (TriggerSender, TriggerReceiver) {
 }
 
 impl TriggerSender {
-    fn send(&self, trigger: RefreshTrigger) {
+    fn send(&self, event: RuntimeControlEvent) {
         let (lock, ready) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !matches!(
-            (state.pending, trigger),
-            (Some(existing), RefreshTrigger::Creation) if existing != RefreshTrigger::Creation
-        ) {
-            state.pending = Some(trigger);
+        match (state.pending, event) {
+            (_, RuntimeControlEvent::PrepareHandoff) => {
+                state.pending = Some(RuntimeControlEvent::PrepareHandoff);
+            }
+            (Some(RuntimeControlEvent::PrepareHandoff), _) => {}
+            (
+                Some(
+                    RuntimeControlEvent::UnlockFocused
+                    | RuntimeControlEvent::UnlockAll
+                    | RuntimeControlEvent::RepairStateDiscard,
+                ),
+                RuntimeControlEvent::Trigger(_),
+            ) => {}
+            (
+                Some(RuntimeControlEvent::Trigger(existing)),
+                RuntimeControlEvent::Trigger(RefreshTrigger::Creation),
+            ) if existing != RefreshTrigger::Creation => {}
+            (_, event) => {
+                state.pending = Some(event);
+            }
         }
         ready.notify_one();
     }
 }
 
 impl TriggerReceiver {
-    fn recv_until(&self, deadline: Option<Instant>) -> Option<RefreshTrigger> {
+    fn recv_until(&self, deadline: Option<Instant>) -> Option<RuntimeControlEvent> {
         let (lock, ready) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
@@ -236,15 +331,21 @@ where
     A: SessionRuntimeAdapter,
 {
     let paths = RuntimePaths::for_launch(launch);
-    let _gate = adapter.acquire_startup_gate(&paths.startup_gate)?;
+    let _gate = match adapter.acquire_startup_gate(&paths.startup_gate) {
+        Ok(gate) => gate,
+        Err(error) => return Ok(error.into_gate_outcome()),
+    };
 
-    if let Some(owner) = adapter.signal_ready_owner(launch, trigger)? {
-        return Ok(EnsureRuntimeOutcome::ReadyOwnerSignaled(owner));
+    match adapter.signal_ready_owner(launch, trigger) {
+        Ok(Some(owner)) => return Ok(EnsureRuntimeOutcome::ReadyOwnerSignaled(owner)),
+        Ok(None) => {}
+        Err(error) => return Ok(error.into_gate_outcome()),
     }
 
-    adapter
-        .start_owner_and_wait_ready(launch, trigger)
-        .map(EnsureRuntimeOutcome::NewOwnerReady)
+    match adapter.start_owner_and_wait_ready(launch, trigger) {
+        Ok(owner) => Ok(EnsureRuntimeOutcome::NewOwnerReady(owner)),
+        Err(error) => Ok(error.into_gate_outcome()),
+    }
 }
 
 pub fn ensure_ready_owner_from_env(trigger: RefreshTrigger) -> Result<String, SessionRuntimeError> {
@@ -267,6 +368,257 @@ pub fn ensure_ready_owner_from_env(trigger: RefreshTrigger) -> Result<String, Se
             "started Tabby Session Runtime with pid {} and confirmed readiness",
             owner.pid
         ),
+        EnsureRuntimeOutcome::Busy => {
+            return Err(SessionRuntimeError::StartupGateBusy(
+                RuntimePaths::for_launch(&launch).startup_gate,
+            ));
+        }
+        EnsureRuntimeOutcome::TimedOut => {
+            return Err(SessionRuntimeError::Readiness(
+                "timed out while waiting for the Session Runtime to become ready".to_string(),
+            ));
+        }
+        EnsureRuntimeOutcome::Faulted { diagnostic } => {
+            return Err(SessionRuntimeError::Control(diagnostic));
+        }
+    })
+}
+
+/// Delivers a manual Refresh Trigger through the Startup Gate and control endpoint.
+pub fn signal_manual_refresh_from_env() -> Result<String, SessionRuntimeError> {
+    ensure_ready_owner_from_env(RefreshTrigger::Manual)
+}
+
+/// Requests a cooperative replacement after `tabby install` has updated registration.
+///
+/// A Ready owner receives an authenticated handoff request and exits on its own; this path
+/// never treats a recorded PID as authority to terminate a process.
+pub fn ensure_current_runtime_after_install_from_env() -> Result<String, SessionRuntimeError> {
+    let socket = crate::startup::resolve_socket_from_env()?;
+    let state_base = crate::startup::state_base_from_runtime()?;
+    let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
+    let launch = SessionRuntimeLaunch {
+        socket: &socket,
+        state_base: &state_base,
+        binary_path: &binary_path,
+    };
+    let paths = RuntimePaths::for_launch(&launch);
+    let mut adapter = SystemSessionRuntimeAdapter::default();
+    let _gate = adapter.acquire_startup_gate(&paths.startup_gate)?;
+
+    match inspect_runtime(&launch)? {
+        RuntimeInspection::Ready { binary_path, .. }
+            if binary_path == crate::startup::binary_identity(launch.binary_path) =>
+        {
+            let owner = request_ready_owner(
+                &launch,
+                RuntimeControlOperation::Signal {
+                    trigger: RefreshTrigger::Startup,
+                },
+            )?
+            .ok_or_else(|| {
+                SessionRuntimeError::Control(
+                    "Ready owner disappeared during install verification".to_string(),
+                )
+            })?;
+            return Ok(format!(
+                "current Tabby Session Runtime already ready with pid {}",
+                owner.pid
+            ));
+        }
+        RuntimeInspection::Ready { .. } => {
+            request_ready_owner(&launch, RuntimeControlOperation::PrepareHandoff)?.ok_or_else(
+                || {
+                    SessionRuntimeError::Control(
+                        "Ready owner did not accept cooperative handoff".to_string(),
+                    )
+                },
+            )?;
+            wait_for_runtime_release(&paths)?;
+        }
+        RuntimeInspection::Absent => {}
+        RuntimeInspection::Starting { .. } => {
+            return Err(SessionRuntimeError::Control(
+                "a Session Runtime is still starting during install".to_string(),
+            ));
+        }
+        RuntimeInspection::Faulted { diagnostic, .. } => {
+            return Err(SessionRuntimeError::Control(diagnostic));
+        }
+    }
+
+    let owner = adapter.start_owner_and_wait_ready(&launch, RefreshTrigger::Startup)?;
+    Ok(format!(
+        "started current Tabby Session Runtime with pid {} after cooperative handoff",
+        owner.pid
+    ))
+}
+
+fn wait_for_runtime_release(paths: &RuntimePaths) -> Result<(), SessionRuntimeError> {
+    let deadline = Instant::now() + HANDOFF_TIMEOUT;
+    while LifetimeLease::is_held(&paths.lifetime_lease)? {
+        if Instant::now() >= deadline {
+            return Err(SessionRuntimeError::Readiness(
+                "timed out waiting for the previous Session Runtime to release its lease"
+                    .to_string(),
+            ));
+        }
+        thread::park_timeout(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+/// Repairs invalid Session-Scoped Tab State only after the explicit discard command.
+pub fn repair_session_state_from_env() -> Result<String, SessionRuntimeError> {
+    request_runtime_operation_from_env(RuntimeControlOperation::RepairStateDiscard)
+}
+
+/// Requests that the Ready Session Runtime unlock the currently focused tab.
+pub fn request_unlock_focused_from_env() -> Result<String, SessionRuntimeError> {
+    request_runtime_operation_from_env(RuntimeControlOperation::UnlockFocused)
+}
+
+/// Requests that the Ready Session Runtime clear all manually locked tabs.
+pub fn request_unlock_all_from_env() -> Result<String, SessionRuntimeError> {
+    request_runtime_operation_from_env(RuntimeControlOperation::UnlockAll)
+}
+
+fn request_runtime_operation_from_env(
+    operation: RuntimeControlOperation,
+) -> Result<String, SessionRuntimeError> {
+    let socket = crate::startup::resolve_socket_from_env()?;
+    let state_base = crate::startup::state_base_from_runtime()?;
+    let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
+    let launch = SessionRuntimeLaunch {
+        socket: &socket,
+        state_base: &state_base,
+        binary_path: &binary_path,
+    };
+    let mut adapter = SystemSessionRuntimeAdapter::default();
+    match ensure_ready_owner_with(&launch, RefreshTrigger::Manual, &mut adapter)? {
+        EnsureRuntimeOutcome::ReadyOwnerSignaled(_) | EnsureRuntimeOutcome::NewOwnerReady(_) => {}
+        EnsureRuntimeOutcome::Busy => {
+            return Err(SessionRuntimeError::StartupGateBusy(
+                RuntimePaths::for_launch(&launch).startup_gate,
+            ));
+        }
+        EnsureRuntimeOutcome::TimedOut => {
+            return Err(SessionRuntimeError::Readiness(
+                "timed out while preparing the Session Runtime control operation".to_string(),
+            ));
+        }
+        EnsureRuntimeOutcome::Faulted { diagnostic } => {
+            return Err(SessionRuntimeError::Control(diagnostic));
+        }
+    }
+    request_ready_owner(&launch, operation)?.ok_or_else(|| {
+        SessionRuntimeError::Control(
+            "Ready owner disappeared before accepting the control operation".to_string(),
+        )
+    })?;
+    Ok("tabby control operation accepted by the Ready Session Runtime".to_string())
+}
+
+/// Forgets retained session state only after verifying that its runtime is absent.
+pub fn forget_session_from_env() -> Result<String, SessionRuntimeError> {
+    let socket = crate::startup::resolve_socket_from_env()?;
+    let state_base = crate::startup::state_base_from_runtime()?;
+    let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
+    let launch = SessionRuntimeLaunch {
+        socket: &socket,
+        state_base: &state_base,
+        binary_path: &binary_path,
+    };
+    match inspect_runtime(&launch)? {
+        RuntimeInspection::Absent => {}
+        inspection => {
+            return Err(SessionRuntimeError::Control(format!(
+                "refusing to forget Session-Scoped Tab State while the Session Runtime is {inspection:?}"
+            )));
+        }
+    }
+    crate::locks::SessionTabStateStore::open(&state_base, &socket)?
+        .forget_session(crate::locks::RuntimeStoppedConfirmation::confirmed())?;
+    Ok("tabby forget-session: removed retained Session-Scoped Tab State".to_string())
+}
+
+/// Inspects the selected Session Runtime without starting or signalling it.
+pub fn inspect_runtime_from_env() -> Result<RuntimeInspection, SessionRuntimeError> {
+    let socket = crate::startup::resolve_socket_from_env()?;
+    let state_base = crate::startup::state_base_from_runtime()?;
+    let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
+    let launch = SessionRuntimeLaunch {
+        socket: &socket,
+        state_base: &state_base,
+        binary_path: &binary_path,
+    };
+    inspect_runtime(&launch)
+}
+
+/// Inspects one Session Runtime at the injectable launch seam.
+pub fn inspect_runtime(
+    launch: &SessionRuntimeLaunch<'_>,
+) -> Result<RuntimeInspection, SessionRuntimeError> {
+    let paths = RuntimePaths::for_launch(launch);
+    let lease_held = LifetimeLease::is_held(&paths.lifetime_lease)?;
+    let metadata = match fs::read(&paths.metadata) {
+        Ok(bytes) => match serde_json::from_slice::<RuntimeMetadata>(&bytes) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Ok(RuntimeInspection::Faulted {
+                    diagnostic: format!("runtime metadata cannot be decoded: {error}"),
+                    lease_held,
+                });
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(if lease_held {
+                RuntimeInspection::Starting { lease_held }
+            } else {
+                RuntimeInspection::Absent
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if let Err(diagnostic) = validate_runtime_identity(&metadata, launch) {
+        return Ok(RuntimeInspection::Faulted {
+            diagnostic,
+            lease_held,
+        });
+    }
+    if metadata.state == RuntimeMetadataState::Faulted {
+        return Ok(RuntimeInspection::Faulted {
+            diagnostic: metadata
+                .last_failure
+                .unwrap_or_else(|| "Session Runtime entered Faulted state".to_string()),
+            lease_held,
+        });
+    }
+
+    let control_is_socket = fs::symlink_metadata(&paths.control_socket)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false);
+    if !lease_held && !control_is_socket {
+        return Ok(RuntimeInspection::Absent);
+    }
+    if !lease_held || !control_is_socket {
+        return Ok(RuntimeInspection::Faulted {
+            diagnostic: "runtime metadata is Ready but its lease or control endpoint is absent"
+                .to_string(),
+            lease_held,
+        });
+    }
+
+    Ok(RuntimeInspection::Ready {
+        pid: metadata.pid,
+        launch_id: metadata.launch_id,
+        version: metadata.tabby_version,
+        binary_path: PathBuf::from(metadata.binary_path),
+        lease_held,
+        last_evaluation_unix_ms: metadata.last_evaluation_unix_ms,
+        last_failure: metadata.last_failure,
+        next_periodic_unix_ms: metadata.next_periodic_unix_ms,
     })
 }
 
@@ -377,6 +729,13 @@ fn signal_ready_owner(
     launch: &SessionRuntimeLaunch<'_>,
     trigger: RefreshTrigger,
 ) -> Result<Option<ReadySessionRuntime>, SessionRuntimeError> {
+    request_ready_owner(launch, RuntimeControlOperation::Signal { trigger })
+}
+
+fn request_ready_owner(
+    launch: &SessionRuntimeLaunch<'_>,
+    operation: RuntimeControlOperation,
+) -> Result<Option<ReadySessionRuntime>, SessionRuntimeError> {
     let paths = RuntimePaths::for_launch(launch);
     let metadata = match fs::read(&paths.metadata) {
         Ok(bytes) => serde_json::from_slice::<RuntimeMetadata>(&bytes)?,
@@ -384,15 +743,7 @@ fn signal_ready_owner(
         Err(error) => return Err(error.into()),
     };
 
-    if metadata.schema_version != RUNTIME_METADATA_SCHEMA_VERSION
-        || metadata.state != RuntimeMetadataState::Ready
-        || metadata.session_key != launch.socket.session_key
-        || metadata.socket_identity_hex != launch.socket.identity_hex()
-    {
-        return Err(SessionRuntimeError::Control(
-            "runtime metadata contradicts the requested Session Identity".to_string(),
-        ));
-    }
+    validate_runtime_metadata(&metadata, launch).map_err(SessionRuntimeError::Control)?;
 
     let mut stream = match UnixStream::connect(&paths.control_socket) {
         Ok(stream) => stream,
@@ -411,8 +762,10 @@ fn signal_ready_owner(
     let request = ControlRequest {
         schema_version: CONTROL_SCHEMA_VERSION,
         session_key: launch.socket.session_key.clone(),
+        socket_identity_hex: launch.socket.identity_hex(),
         launch_id: metadata.launch_id.clone(),
-        trigger,
+        request_id: new_launch_id(),
+        operation,
     };
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
@@ -435,10 +788,40 @@ fn signal_ready_owner(
             "control reply came from a stale runtime launch".to_string(),
         ));
     }
+    if reply.request_id != request.request_id {
+        return Err(SessionRuntimeError::Control(
+            "control reply does not match the request".to_string(),
+        ));
+    }
     Ok(Some(ReadySessionRuntime {
         pid: reply.pid,
         launch_id: reply.launch_id,
     }))
+}
+
+fn validate_runtime_metadata(
+    metadata: &RuntimeMetadata,
+    launch: &SessionRuntimeLaunch<'_>,
+) -> Result<(), String> {
+    validate_runtime_identity(metadata, launch)?;
+    if metadata.state != RuntimeMetadataState::Ready {
+        return Err("Session Runtime is Faulted and cannot accept control requests".to_string());
+    }
+    Ok(())
+}
+
+fn validate_runtime_identity(
+    metadata: &RuntimeMetadata,
+    launch: &SessionRuntimeLaunch<'_>,
+) -> Result<(), String> {
+    if metadata.schema_version != RUNTIME_METADATA_SCHEMA_VERSION
+        || metadata.session_key != launch.socket.session_key
+        || metadata.socket_path != launch.socket.socket_path.to_string_lossy()
+        || metadata.socket_identity_hex != launch.socket.identity_hex()
+    {
+        return Err("runtime metadata contradicts the requested Session Identity".to_string());
+    }
+    Ok(())
 }
 
 pub fn run_owned_session_from_env(launch_id: String) -> Result<String, SessionRuntimeError> {
@@ -467,18 +850,19 @@ fn run_owned_session(
     ensure_private_directory(&paths.directory)?;
     let _lease = acquire_runtime_lease(&paths.lifetime_lease, &launch.socket.session_key)?;
 
-    let lock_store_path = lock_store_path_from_runtime()?;
-    let mut refresher_state = HybridRefresherState::load(&lock_store_path)?;
+    let tab_state = crate::locks::SessionTabStateStore::open(launch.state_base, launch.socket)?;
+    let mut refresher_state = OneShotRefreshState::new(daemon::DaemonState::default());
     let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)?;
     let (trigger_tx, trigger_rx) = trigger_mailbox();
     spawn_control_acceptor(
         listener,
         launch.socket.session_key.clone(),
+        launch.socket.identity_hex(),
         launch_id.to_string(),
         trigger_tx,
     );
 
-    let metadata = RuntimeMetadata {
+    let mut metadata = RuntimeMetadata {
         schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
         state: RuntimeMetadataState::Ready,
         pid: std::process::id(),
@@ -490,22 +874,36 @@ fn run_owned_session(
         binary_path: crate::startup::binary_identity(launch.binary_path)
             .to_string_lossy()
             .into_owned(),
+        last_evaluation_unix_ms: None,
+        last_failure: None,
+        next_periodic_unix_ms: Some(unix_time_after(daemon::DEFAULT_SESSION_REFRESH_INTERVAL)),
     };
     write_metadata(&paths.metadata, &metadata)?;
-    let _artifacts = RuntimeArtifacts {
+    let mut artifacts = RuntimeArtifacts {
         metadata_path: paths.metadata.clone(),
         control_socket_path: paths.control_socket.clone(),
         launch_id: launch_id.to_string(),
+        retain_metadata: false,
     };
 
     let transport = UnixSocketTransport::new(&launch.socket.socket_path);
     let mut client = HerdrClient::new(transport);
-    run_runtime_loop(
+    let result = run_runtime_loop(
         &mut client,
         &mut refresher_state,
-        &lock_store_path,
+        &tab_state,
         trigger_rx,
-    )
+        &paths.metadata,
+        &mut metadata,
+    );
+    if let Err(error) = &result {
+        metadata.state = RuntimeMetadataState::Faulted;
+        metadata.last_failure = Some(error.to_string());
+        metadata.next_periodic_unix_ms = None;
+        write_metadata(&paths.metadata, &metadata)?;
+        artifacts.retain_metadata = true;
+    }
+    result
 }
 
 fn acquire_runtime_lease(
@@ -583,101 +981,234 @@ fn version_at_least_0_8_0(version: &str) -> bool {
 
 fn run_runtime_loop(
     herdr: &mut impl crate::herdr_client::HerdrApi,
-    state: &mut HybridRefresherState,
-    lock_store_path: &Path,
+    state: &mut OneShotRefreshState,
+    tab_state: &crate::locks::SessionTabStateStore,
     triggers: TriggerReceiver,
+    metadata_path: &Path,
+    metadata: &mut RuntimeMetadata,
 ) -> Result<(), SessionRuntimeError> {
-    let mut next_tick_at = Some(Instant::now() + daemon::DEFAULT_HYBRID_IDLE_POLL_INTERVAL);
+    let mut next_tick_at = Some(Instant::now() + daemon::DEFAULT_SESSION_REFRESH_INTERVAL);
 
     loop {
         let trigger = triggers.recv_until(next_tick_at);
 
-        if let Some(trigger) = trigger {
-            if trigger == RefreshTrigger::Creation {
-                continue;
+        if let Some(event) = trigger {
+            match event {
+                RuntimeControlEvent::PrepareHandoff => return Ok(()),
+                RuntimeControlEvent::Trigger(RefreshTrigger::Creation) => continue,
+                RuntimeControlEvent::Trigger(_) => {
+                    let now = Instant::now();
+                    state.note_refresh_trigger(now);
+                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                    continue;
+                }
+                RuntimeControlEvent::UnlockFocused => {
+                    if let Some(observation) =
+                        herdr.observe_focused_tab().map_err(DaemonError::Herdr)?
+                    {
+                        tab_state.mutate(|state| state.unlock_tab(&observation.tab.tab_id))?;
+                    }
+                    let now = Instant::now();
+                    state.note_refresh_trigger(now);
+                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                    continue;
+                }
+                RuntimeControlEvent::UnlockAll => {
+                    tab_state.mutate(crate::locks::SessionTabState::unlock_all)?;
+                    let now = Instant::now();
+                    state.note_refresh_trigger(now);
+                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                    continue;
+                }
+                RuntimeControlEvent::RepairStateDiscard => {
+                    tab_state.repair_discard(crate::locks::RepairConfirmation::confirmed())?;
+                    let now = Instant::now();
+                    state.note_refresh_trigger(now);
+                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                    continue;
+                }
             }
-            let now = Instant::now();
-            state.note_focus_or_create_event(now);
-            next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
-            continue;
         }
 
         let now = Instant::now();
-        match daemon::hybrid_tick_and_save_locks(herdr, state, lock_store_path, now) {
-            Ok(_) => {}
+        match daemon::evaluate_one_shot(herdr, state, tab_state, now) {
+            Ok(_) => {
+                metadata.last_evaluation_unix_ms = Some(unix_time_after(Duration::ZERO));
+                metadata.last_failure = None;
+            }
             Err(error) if error.proves_session_stop() => return Ok(()),
-            Err(DaemonError::Herdr(_)) => {
+            Err(error @ DaemonError::Herdr(_)) => {
                 // Ambiguous transport/application failures end this evaluation only.
+                metadata.last_failure = Some(error.to_string());
             }
             Err(error) => return Err(error.into()),
         }
-        next_tick_at = Some(now + daemon::DEFAULT_HYBRID_IDLE_POLL_INTERVAL);
+        next_tick_at = state
+            .next_sample_at()
+            .or(Some(now + daemon::DEFAULT_SESSION_REFRESH_INTERVAL));
+        metadata.next_periodic_unix_ms = next_tick_at
+            .map(|next| unix_time_after(next.saturating_duration_since(Instant::now())));
+        write_metadata(metadata_path, metadata)?;
     }
 }
 
 fn spawn_control_acceptor(
     listener: UnixListener,
     session_key: String,
+    socket_identity_hex: String,
     launch_id: String,
     triggers: TriggerSender,
 ) {
     thread::spawn(move || {
+        let (work_sender, work_receiver) = mpsc::sync_channel(CONTROL_WORKER_QUEUE);
+        let work_receiver = Arc::new(Mutex::new(work_receiver));
+        let recent_requests = Arc::new(Mutex::new(RecentControlRequests::default()));
+        for _ in 0..CONTROL_WORKER_COUNT {
+            let receiver = Arc::clone(&work_receiver);
+            let session_key = session_key.clone();
+            let socket_identity_hex = socket_identity_hex.clone();
+            let launch_id = launch_id.clone();
+            let triggers = triggers.clone();
+            let recent_requests = Arc::clone(&recent_requests);
+            thread::spawn(move || {
+                loop {
+                    let stream = {
+                        let receiver = receiver
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        receiver.recv()
+                    };
+                    let Ok(mut stream) = stream else {
+                        return;
+                    };
+                    let reply = handle_control_request(
+                        &mut stream,
+                        &session_key,
+                        &socket_identity_hex,
+                        &launch_id,
+                        &triggers,
+                        &recent_requests,
+                    );
+                    write_control_reply(&mut stream, &reply);
+                }
+            });
+        }
+
         for incoming in listener.incoming() {
-            let Ok(mut stream) = incoming else {
+            let Ok(stream) = incoming else {
                 break;
             };
-            let reply = handle_control_request(&mut stream, &session_key, &launch_id, &triggers);
-            let _ = serde_json::to_writer(&mut stream, &reply);
-            let _ = stream.write_all(b"\n");
-            let _ = stream.flush();
+            if let Err(error) = work_sender.try_send(stream) {
+                let mut stream = match error {
+                    mpsc::TrySendError::Full(stream) | mpsc::TrySendError::Disconnected(stream) => {
+                        stream
+                    }
+                };
+                let reply = ControlReply {
+                    accepted: false,
+                    pid: std::process::id(),
+                    launch_id: launch_id.clone(),
+                    request_id: String::new(),
+                    error: Some("runtime control endpoint is busy".to_string()),
+                };
+                write_control_reply(&mut stream, &reply);
+            }
         }
     });
+}
+
+fn write_control_reply(stream: &mut UnixStream, reply: &ControlReply) {
+    let _ = stream.set_write_timeout(Some(CONTROL_IO_TIMEOUT));
+    let _ = serde_json::to_writer(&mut *stream, reply);
+    let _ = stream.write_all(b"\n");
+    let _ = stream.flush();
 }
 
 fn handle_control_request(
     stream: &mut UnixStream,
     session_key: &str,
+    socket_identity_hex: &str,
     launch_id: &str,
     triggers: &TriggerSender,
+    recent_requests: &Mutex<RecentControlRequests>,
 ) -> ControlReply {
-    let reject = |message: String| ControlReply {
+    let reject = |message: String, request_id: String| ControlReply {
         accepted: false,
         pid: std::process::id(),
         launch_id: launch_id.to_string(),
+        request_id,
         error: Some(message),
     };
 
     match peer_uid(stream) {
         Ok(uid) if uid == unsafe { libc::geteuid() } => {}
-        Ok(_) => return reject("control peer is not the runtime owner".to_string()),
-        Err(error) => return reject(format!("could not validate control peer: {error}")),
+        Ok(_) => {
+            return reject(
+                "control peer is not the runtime owner".to_string(),
+                String::new(),
+            );
+        }
+        Err(error) => {
+            return reject(
+                format!("could not validate control peer: {error}"),
+                String::new(),
+            );
+        }
     }
     if let Err(error) = stream.set_read_timeout(Some(CONTROL_IO_TIMEOUT)) {
-        return reject(format!("could not bound control read: {error}"));
+        return reject(
+            format!("could not bound control read: {error}"),
+            String::new(),
+        );
     }
     let mut line = String::new();
     if let Err(error) = BufReader::new(&mut *stream)
         .take(CONTROL_MAX_LINE_BYTES)
         .read_line(&mut line)
     {
-        return reject(format!("could not read control request: {error}"));
+        return reject(
+            format!("could not read control request: {error}"),
+            String::new(),
+        );
     }
     let request: ControlRequest = match serde_json::from_str(&line) {
         Ok(request) => request,
-        Err(error) => return reject(format!("invalid control request: {error}")),
+        Err(error) => return reject(format!("invalid control request: {error}"), String::new()),
     };
     if request.schema_version != CONTROL_SCHEMA_VERSION
         || request.session_key != session_key
+        || request.socket_identity_hex != socket_identity_hex
         || request.launch_id != launch_id
     {
-        return reject("control request identity does not match the Ready owner".to_string());
+        return reject(
+            "control request identity does not match the Ready owner".to_string(),
+            request.request_id,
+        );
     }
-    triggers.send(request.trigger);
+    if !recent_requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remember(&request.request_id)
+    {
+        return reject(
+            "duplicate control request was rejected".to_string(),
+            request.request_id,
+        );
+    }
+    let event = match request.operation {
+        RuntimeControlOperation::Signal { trigger } => RuntimeControlEvent::Trigger(trigger),
+        RuntimeControlOperation::UnlockFocused => RuntimeControlEvent::UnlockFocused,
+        RuntimeControlOperation::UnlockAll => RuntimeControlEvent::UnlockAll,
+        RuntimeControlOperation::RepairStateDiscard => RuntimeControlEvent::RepairStateDiscard,
+        RuntimeControlOperation::PrepareHandoff => RuntimeControlEvent::PrepareHandoff,
+    };
+    triggers.send(event);
 
     ControlReply {
         accepted: true,
         pid: std::process::id(),
         launch_id: launch_id.to_string(),
+        request_id: request.request_id,
         error: None,
     }
 }
@@ -706,10 +1237,19 @@ fn new_launch_id() -> String {
     format!("{}-{elapsed:x}-{sequence:x}", std::process::id())
 }
 
+fn unix_time_after(delay: Duration) -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .saturating_add(delay)
+        .as_millis()
+}
+
 struct RuntimeArtifacts {
     metadata_path: PathBuf,
     control_socket_path: PathBuf,
     launch_id: String,
+    retain_metadata: bool,
 }
 
 impl Drop for RuntimeArtifacts {
@@ -718,7 +1258,7 @@ impl Drop for RuntimeArtifacts {
             .ok()
             .and_then(|contents| serde_json::from_slice::<RuntimeMetadata>(&contents).ok())
             .is_some_and(|metadata| metadata.launch_id == self.launch_id);
-        if owns_metadata {
+        if owns_metadata && !self.retain_metadata {
             let _ = fs::remove_file(&self.metadata_path);
         }
         let _ = fs::remove_file(&self.control_socket_path);
@@ -731,6 +1271,7 @@ pub enum SessionRuntimeError {
     Io(std::io::Error),
     Json(serde_json::Error),
     StatePath(crate::paths::StatePathError),
+    SessionTabState(crate::locks::SessionTabStateError),
     Startup(crate::startup::StartupError),
     Daemon(DaemonError),
     StartupGateBusy(PathBuf),
@@ -754,6 +1295,12 @@ impl fmt::Display for SessionRuntimeError {
             Self::Io(error) => write!(formatter, "session runtime I/O failed: {error}"),
             Self::Json(error) => write!(formatter, "session runtime JSON failed: {error}"),
             Self::StatePath(error) => write!(formatter, "session runtime state failed: {error}"),
+            Self::SessionTabState(error) => {
+                write!(
+                    formatter,
+                    "session runtime Session-Scoped Tab State failed: {error}"
+                )
+            }
             Self::Startup(error) => write!(formatter, "session runtime startup failed: {error}"),
             Self::Daemon(error) => write!(formatter, "session runtime evaluation failed: {error}"),
             Self::StartupGateBusy(path) => write!(
@@ -802,6 +1349,18 @@ impl fmt::Display for SessionRuntimeError {
 
 impl std::error::Error for SessionRuntimeError {}
 
+impl SessionRuntimeError {
+    fn into_gate_outcome(self) -> EnsureRuntimeOutcome {
+        match self {
+            Self::StartupGateBusy(_) => EnsureRuntimeOutcome::Busy,
+            Self::Readiness(_) => EnsureRuntimeOutcome::TimedOut,
+            error => EnsureRuntimeOutcome::Faulted {
+                diagnostic: error.to_string(),
+            },
+        }
+    }
+}
+
 impl From<io::Error> for SessionRuntimeError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
@@ -817,6 +1376,12 @@ impl From<serde_json::Error> for SessionRuntimeError {
 impl From<crate::paths::StatePathError> for SessionRuntimeError {
     fn from(error: crate::paths::StatePathError) -> Self {
         Self::StatePath(error)
+    }
+}
+
+impl From<crate::locks::SessionTabStateError> for SessionRuntimeError {
+    fn from(error: crate::locks::SessionTabStateError) -> Self {
+        Self::SessionTabState(error)
     }
 }
 
@@ -836,6 +1401,8 @@ impl From<DaemonError> for SessionRuntimeError {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     #[derive(Default)]
     struct FakeAdapter {
@@ -843,6 +1410,9 @@ mod tests {
         signaled: Vec<RefreshTrigger>,
         spawned: usize,
         ready_owner: Option<ReadySessionRuntime>,
+        gate_error: Option<SessionRuntimeError>,
+        signal_error: Option<SessionRuntimeError>,
+        start_error: Option<SessionRuntimeError>,
     }
 
     struct FakeGuard;
@@ -855,6 +1425,9 @@ mod tests {
             path: &Path,
         ) -> Result<Box<dyn StartupGateGuard>, SessionRuntimeError> {
             self.acquired_paths.push(path.to_path_buf());
+            if let Some(error) = self.gate_error.take() {
+                return Err(error);
+            }
             Ok(Box::new(FakeGuard))
         }
 
@@ -864,6 +1437,9 @@ mod tests {
             trigger: RefreshTrigger,
         ) -> Result<Option<ReadySessionRuntime>, SessionRuntimeError> {
             self.signaled.push(trigger);
+            if let Some(error) = self.signal_error.take() {
+                return Err(error);
+            }
             Ok(self.ready_owner.clone())
         }
 
@@ -873,6 +1449,9 @@ mod tests {
             _trigger: RefreshTrigger,
         ) -> Result<ReadySessionRuntime, SessionRuntimeError> {
             self.spawned += 1;
+            if let Some(error) = self.start_error.take() {
+                return Err(error);
+            }
             Ok(ReadySessionRuntime {
                 pid: 202,
                 launch_id: "new-owner".to_string(),
@@ -931,6 +1510,296 @@ mod tests {
     }
 
     #[test]
+    fn startup_gate_reports_busy_without_spawning_another_owner() {
+        let socket = SessionSocket::resolve("/tmp/busy-herdr.sock").expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let mut adapter = FakeAdapter {
+            gate_error: Some(SessionRuntimeError::StartupGateBusy(PathBuf::from(
+                "/tmp/gate",
+            ))),
+            ..FakeAdapter::default()
+        };
+
+        assert_eq!(
+            ensure_ready_owner_with(&launch, RefreshTrigger::Focus, &mut adapter)
+                .expect("classified busy gate"),
+            EnsureRuntimeOutcome::Busy
+        );
+        assert!(adapter.signaled.is_empty());
+        assert_eq!(adapter.spawned, 0);
+    }
+
+    #[test]
+    fn startup_gate_reports_a_failed_spawn_as_faulted() {
+        let socket = SessionSocket::resolve("/tmp/spawn-herdr.sock").expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let mut adapter = FakeAdapter {
+            start_error: Some(SessionRuntimeError::SpawnRuntime(io::Error::other(
+                "denied",
+            ))),
+            ..FakeAdapter::default()
+        };
+
+        let outcome = ensure_ready_owner_with(&launch, RefreshTrigger::Startup, &mut adapter)
+            .expect("classified spawn failure");
+
+        assert!(matches!(outcome, EnsureRuntimeOutcome::Faulted { .. }));
+        assert_eq!(adapter.spawned, 1);
+    }
+
+    #[test]
+    fn startup_gate_reports_a_child_exit_before_readiness_as_faulted() {
+        let socket = SessionSocket::resolve("/tmp/child-exit-herdr.sock").expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let exit_status = Command::new("false").status().expect("run false");
+        let mut adapter = FakeAdapter {
+            start_error: Some(SessionRuntimeError::ChildExitedBeforeReady(exit_status)),
+            ..FakeAdapter::default()
+        };
+
+        let outcome = ensure_ready_owner_with(&launch, RefreshTrigger::Startup, &mut adapter)
+            .expect("classified child exit");
+
+        assert!(matches!(outcome, EnsureRuntimeOutcome::Faulted { .. }));
+    }
+
+    #[test]
+    fn startup_gate_reports_a_readiness_timeout_without_exposing_error_interpretation() {
+        let socket = SessionSocket::resolve("/tmp/timeout-herdr.sock").expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let mut adapter = FakeAdapter {
+            start_error: Some(SessionRuntimeError::Readiness("timed out".to_string())),
+            ..FakeAdapter::default()
+        };
+
+        assert_eq!(
+            ensure_ready_owner_with(&launch, RefreshTrigger::Startup, &mut adapter)
+                .expect("classified timeout"),
+            EnsureRuntimeOutcome::TimedOut
+        );
+    }
+
+    #[test]
+    fn startup_gate_reports_an_identity_contradiction_as_faulted() {
+        let socket = SessionSocket::resolve("/tmp/identity-herdr.sock").expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let mut adapter = FakeAdapter {
+            signal_error: Some(SessionRuntimeError::Control(
+                "runtime metadata contradicts the requested Session Identity".to_string(),
+            )),
+            ..FakeAdapter::default()
+        };
+
+        let outcome = ensure_ready_owner_with(&launch, RefreshTrigger::Focus, &mut adapter)
+            .expect("classified identity fault");
+
+        assert!(matches!(outcome, EnsureRuntimeOutcome::Faulted { .. }));
+        assert_eq!(adapter.spawned, 0);
+    }
+
+    #[test]
+    fn stale_ready_metadata_without_a_control_endpoint_is_not_treated_as_an_owner() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-stale-runtime-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        write_metadata(
+            &paths.metadata,
+            &RuntimeMetadata {
+                schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+                state: RuntimeMetadataState::Ready,
+                pid: 999_999,
+                session_key: socket.session_key.clone(),
+                socket_path: socket.socket_path.to_string_lossy().into_owned(),
+                socket_identity_hex: socket.identity_hex(),
+                launch_id: "stale-launch".to_string(),
+                tabby_version: env!("CARGO_PKG_VERSION").to_string(),
+                binary_path: "/tmp/tabby".to_string(),
+                last_evaluation_unix_ms: None,
+                last_failure: None,
+                next_periodic_unix_ms: None,
+            },
+        )
+        .expect("stale metadata");
+
+        assert_eq!(
+            signal_ready_owner(&launch, RefreshTrigger::Focus).expect("check stale endpoint"),
+            None
+        );
+        assert_eq!(
+            inspect_runtime(&launch).expect("inspect stale runtime"),
+            RuntimeInspection::Absent
+        );
+
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn wrong_identity_metadata_is_a_fault_and_is_never_signalled() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-identity-runtime-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        write_metadata(
+            &paths.metadata,
+            &RuntimeMetadata {
+                schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+                state: RuntimeMetadataState::Ready,
+                pid: 999_999,
+                session_key: socket.session_key.clone(),
+                socket_path: socket.socket_path.to_string_lossy().into_owned(),
+                socket_identity_hex: "wrong-identity".to_string(),
+                launch_id: "wrong-identity".to_string(),
+                tabby_version: env!("CARGO_PKG_VERSION").to_string(),
+                binary_path: "/tmp/tabby".to_string(),
+                last_evaluation_unix_ms: None,
+                last_failure: None,
+                next_periodic_unix_ms: None,
+            },
+        )
+        .expect("wrong identity metadata");
+
+        assert!(matches!(
+            signal_ready_owner(&launch, RefreshTrigger::Focus),
+            Err(SessionRuntimeError::Control(_))
+        ));
+        assert!(matches!(
+            inspect_runtime(&launch).expect("inspect wrong identity"),
+            RuntimeInspection::Faulted { .. }
+        ));
+
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    struct ConcurrentGateAdapter {
+        starts: Arc<AtomicUsize>,
+    }
+
+    impl SessionRuntimeAdapter for ConcurrentGateAdapter {
+        fn acquire_startup_gate(
+            &mut self,
+            path: &Path,
+        ) -> Result<Box<dyn StartupGateGuard>, SessionRuntimeError> {
+            match LifetimeLease::try_acquire(path)? {
+                Some(lease) => Ok(Box::new(lease)),
+                None => Err(SessionRuntimeError::StartupGateBusy(path.to_path_buf())),
+            }
+        }
+
+        fn signal_ready_owner(
+            &mut self,
+            _launch: &SessionRuntimeLaunch<'_>,
+            _trigger: RefreshTrigger,
+        ) -> Result<Option<ReadySessionRuntime>, SessionRuntimeError> {
+            Ok(None)
+        }
+
+        fn start_owner_and_wait_ready(
+            &mut self,
+            _launch: &SessionRuntimeLaunch<'_>,
+            _trigger: RefreshTrigger,
+        ) -> Result<ReadySessionRuntime, SessionRuntimeError> {
+            self.starts.fetch_add(1, AtomicOrdering::SeqCst);
+            thread::sleep(Duration::from_millis(25));
+            Ok(ReadySessionRuntime {
+                pid: 303,
+                launch_id: "concurrent-owner".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn concurrent_startup_gate_callers_allow_exactly_one_new_owner() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-concurrent-gate-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let paths = RuntimePaths::for_launch(&SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        });
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        let starts = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let socket = socket.clone();
+            let state_base = state_base.clone();
+            let starts = Arc::clone(&starts);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let launch = SessionRuntimeLaunch {
+                    socket: &socket,
+                    state_base: &state_base,
+                    binary_path: Path::new("/tmp/tabby"),
+                };
+                let mut adapter = ConcurrentGateAdapter { starts };
+                ensure_ready_owner_with(&launch, RefreshTrigger::Startup, &mut adapter)
+                    .expect("classified concurrent outcome")
+            }));
+        }
+
+        let first = handles.remove(0).join().expect("first caller");
+        let second = handles.remove(0).join().expect("second caller");
+        assert_eq!(starts.load(AtomicOrdering::SeqCst), 1);
+        assert!(
+            matches!(first, EnsureRuntimeOutcome::NewOwnerReady(_))
+                || matches!(second, EnsureRuntimeOutcome::NewOwnerReady(_))
+        );
+        assert!(
+            matches!(first, EnsureRuntimeOutcome::Busy)
+                || matches!(second, EnsureRuntimeOutcome::Busy)
+        );
+
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
     fn control_endpoint_delivers_a_validated_trigger_to_the_ready_owner() {
         let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
         let state_base =
@@ -950,6 +1819,7 @@ mod tests {
         spawn_control_acceptor(
             listener,
             socket.session_key.clone(),
+            socket.identity_hex(),
             "ready-launch".to_string(),
             sender,
         );
@@ -965,6 +1835,9 @@ mod tests {
                 launch_id: "ready-launch".to_string(),
                 tabby_version: env!("CARGO_PKG_VERSION").to_string(),
                 binary_path: "/tmp/tabby".to_string(),
+                last_evaluation_unix_ms: None,
+                last_failure: None,
+                next_periodic_unix_ms: None,
             },
         )
         .expect("ready metadata");
@@ -979,7 +1852,7 @@ mod tests {
             receiver
                 .recv_until(Some(Instant::now() + Duration::from_secs(1)))
                 .expect("delivered trigger"),
-            RefreshTrigger::Focus
+            RuntimeControlEvent::Trigger(RefreshTrigger::Focus)
         );
 
         let _ = fs::remove_file(&paths.control_socket);
@@ -1015,13 +1888,13 @@ mod tests {
     fn trigger_mailbox_coalesces_to_the_latest_actionable_trigger() {
         let (sender, receiver) = trigger_mailbox();
 
-        sender.send(RefreshTrigger::Focus);
-        sender.send(RefreshTrigger::Creation);
-        sender.send(RefreshTrigger::Manual);
+        sender.send(RuntimeControlEvent::Trigger(RefreshTrigger::Focus));
+        sender.send(RuntimeControlEvent::Trigger(RefreshTrigger::Creation));
+        sender.send(RuntimeControlEvent::Trigger(RefreshTrigger::Manual));
 
         assert_eq!(
             receiver.recv_until(Some(Instant::now())),
-            Some(RefreshTrigger::Manual)
+            Some(RuntimeControlEvent::Trigger(RefreshTrigger::Manual))
         );
         assert_eq!(receiver.recv_until(Some(Instant::now())), None);
     }
