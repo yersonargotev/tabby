@@ -10,38 +10,11 @@ use std::os::unix::net::UnixStream;
 const HERDR_RPC_TIMEOUT: Duration = Duration::from_millis(75);
 
 pub trait HerdrApi {
-    #[cfg(test)]
-    fn list_tabs(&mut self) -> Result<Vec<TabInfo>, HerdrError>;
-    #[cfg(test)]
-    fn list_panes(&mut self) -> Result<Vec<PaneInfo>, HerdrError>;
-
     /// Reads a coherent focused tab and pane from `session.snapshot`.
     ///
     /// Foreground process data deliberately remains separate: callers must ask
     /// `pane_process_info` for the selected pane after this observation.
-    #[cfg(not(test))]
     fn observe_focused_tab(&mut self) -> Result<Option<FocusedTabObservation>, HerdrError>;
-
-    #[cfg(test)]
-    fn observe_focused_tab(&mut self) -> Result<Option<FocusedTabObservation>, HerdrError> {
-        let Some(tab) = self.list_tabs()?.into_iter().find(|tab| tab.focused) else {
-            return Ok(None);
-        };
-        let panes = self.list_panes()?;
-        let Some(pane) = panes
-            .iter()
-            .find(|pane| pane.tab_id == tab.tab_id && pane.focused)
-            .or_else(|| panes.iter().find(|pane| pane.tab_id == tab.tab_id))
-            .cloned()
-        else {
-            return Ok(None);
-        };
-        Ok(Some(FocusedTabObservation {
-            working_directory: pane.foreground_cwd.clone().or_else(|| pane.cwd.clone()),
-            tab,
-            pane,
-        }))
-    }
 
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, HerdrError>;
     fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<RenameTabResult, HerdrError>;
@@ -213,20 +186,6 @@ impl<T> HerdrApi for HerdrClient<T>
 where
     T: RpcTransport,
 {
-    #[cfg(test)]
-    fn list_tabs(&mut self) -> Result<Vec<TabInfo>, HerdrError> {
-        let result: TabListResult =
-            self.call("tab.list", ListByWorkspaceParams { workspace_id: None })?;
-        result.into_tabs()
-    }
-
-    #[cfg(test)]
-    fn list_panes(&mut self) -> Result<Vec<PaneInfo>, HerdrError> {
-        let result: PaneListResult =
-            self.call("pane.list", ListByWorkspaceParams { workspace_id: None })?;
-        result.into_panes()
-    }
-
     fn observe_focused_tab(&mut self) -> Result<Option<FocusedTabObservation>, HerdrError> {
         HerdrClient::<T>::observe_focused_tab(self)
     }
@@ -269,13 +228,6 @@ impl<P> JsonRpcRequest<P> {
     }
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ListByWorkspaceParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct EmptyParams {}
 
@@ -314,38 +266,6 @@ enum JsonRpcResponse<R> {
 pub struct RpcError {
     pub code: String,
     pub message: String,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct TabListResult {
-    #[serde(rename = "type")]
-    response_type: String,
-    pub tabs: Vec<TabInfo>,
-}
-
-#[cfg(test)]
-impl TabListResult {
-    fn into_tabs(self) -> Result<Vec<TabInfo>, HerdrError> {
-        expect_response_type(&self.response_type, "tab_list")?;
-        Ok(self.tabs)
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct PaneListResult {
-    #[serde(rename = "type")]
-    response_type: String,
-    pub panes: Vec<PaneInfo>,
-}
-
-#[cfg(test)]
-impl PaneListResult {
-    fn into_panes(self) -> Result<Vec<PaneInfo>, HerdrError> {
-        expect_response_type(&self.response_type, "pane_list")?;
-        Ok(self.panes)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -605,12 +525,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::io;
 
-    const TAB_LIST_FIXTURE: &str = include_str!("../tests/fixtures/herdr-client/tab-list.json");
-    const TAB_LIST_REQUEST_FIXTURE: &str =
-        include_str!("../tests/fixtures/herdr-client/tab-list-request.json");
-    const PANE_LIST_FIXTURE: &str = include_str!("../tests/fixtures/herdr-client/pane-list.json");
-    const PANE_LIST_REQUEST_FIXTURE: &str =
-        include_str!("../tests/fixtures/herdr-client/pane-list-request.json");
     const PANE_PROCESS_INFO_FIXTURE: &str =
         include_str!("../tests/fixtures/herdr-client/pane-process-info.json");
     const PANE_PROCESS_INFO_REQUEST_FIXTURE: &str =
@@ -629,34 +543,6 @@ mod tests {
         include_str!("../tests/fixtures/herdr-client/jsonrpc-error.json");
     const INVALID_PAYLOAD_FIXTURE: &str =
         include_str!("../tests/fixtures/herdr-client/invalid-payload.json");
-
-    #[test]
-    fn deserializes_tab_list_fixture() {
-        let tabs: TabListResult = decode_response("tabs-1", TAB_LIST_FIXTURE).expect("tab list");
-        let tabs = tabs.into_tabs().expect("tab_list response type");
-
-        assert_eq!(tabs.len(), 2);
-        assert_eq!(tabs[0].tab_id, "w1:t1");
-        assert_eq!(tabs[0].label, "editor");
-        assert!(tabs[0].focused);
-        assert_eq!(tabs[1].pane_count, Some(1));
-    }
-
-    #[test]
-    fn deserializes_pane_list_fixture() {
-        let panes: PaneListResult =
-            decode_response("panes-1", PANE_LIST_FIXTURE).expect("pane list");
-        let panes = panes.into_panes().expect("pane_list response type");
-
-        assert_eq!(panes.len(), 2);
-        assert_eq!(panes[0].pane_id, "w1:p1");
-        assert_eq!(
-            panes[0].foreground_cwd.as_deref(),
-            Some("/Users/me/dev/tabby")
-        );
-        assert!(panes[0].focused);
-        assert!(!panes[1].focused);
-    }
 
     #[test]
     fn deserializes_pane_process_info_fixture() {
@@ -767,28 +653,6 @@ mod tests {
     }
 
     #[test]
-    fn serializes_tab_list_request_fixture() {
-        let request = JsonRpcRequest::new(
-            "tabs-1",
-            "tab.list",
-            ListByWorkspaceParams { workspace_id: None },
-        );
-
-        assert_request_matches_fixture(request, TAB_LIST_REQUEST_FIXTURE);
-    }
-
-    #[test]
-    fn serializes_pane_list_request_fixture() {
-        let request = JsonRpcRequest::new(
-            "panes-1",
-            "pane.list",
-            ListByWorkspaceParams { workspace_id: None },
-        );
-
-        assert_request_matches_fixture(request, PANE_LIST_REQUEST_FIXTURE);
-    }
-
-    #[test]
     fn serializes_pane_process_info_request_fixture() {
         let request = JsonRpcRequest::new(
             "process-1",
@@ -845,7 +709,7 @@ mod tests {
 
     #[test]
     fn jsonrpc_error_becomes_error_variant() {
-        let error = decode_response::<TabListResult>("tabs-1", JSONRPC_ERROR_FIXTURE)
+        let error = decode_response::<SessionSnapshotResult>("tabs-1", JSONRPC_ERROR_FIXTURE)
             .expect_err("rpc error");
 
         assert!(matches!(
@@ -857,7 +721,7 @@ mod tests {
 
     #[test]
     fn invalid_payload_returns_error_without_panic() {
-        let error = decode_response::<TabListResult>("tabs-1", INVALID_PAYLOAD_FIXTURE)
+        let error = decode_response::<SessionSnapshotResult>("tabs-1", INVALID_PAYLOAD_FIXTURE)
             .expect_err("invalid payload");
 
         assert!(matches!(
@@ -869,15 +733,13 @@ mod tests {
     #[test]
     fn client_methods_serialize_expected_requests() {
         let transport = MockTransport::new(vec![
-            TAB_LIST_FIXTURE.replace("tabs-1", "tabby-1"),
-            PANE_LIST_FIXTURE.replace("panes-1", "tabby-2"),
-            PANE_PROCESS_INFO_FIXTURE.replace("process-1", "tabby-3"),
-            TAB_RENAME_RESPONSE_FIXTURE.replace("rename-1", "tabby-4"),
+            SESSION_SNAPSHOT_FIXTURE.replace("snapshot-1", "tabby-1"),
+            PANE_PROCESS_INFO_FIXTURE.replace("process-1", "tabby-2"),
+            TAB_RENAME_RESPONSE_FIXTURE.replace("rename-1", "tabby-3"),
         ]);
         let mut client = HerdrClient::new(transport);
 
-        client.list_tabs().expect("list tabs");
-        client.list_panes().expect("list panes");
+        client.observe_focused_tab().expect("focused tab");
         client.pane_process_info("w1:p1").expect("process info");
         client.rename_tab("w1:t1", "pnpm dev").expect("rename tab");
 
@@ -888,17 +750,16 @@ mod tests {
             .map(|request| serde_json::from_str(request).expect("request line json"))
             .collect();
 
-        assert_eq!(requests[0]["method"], "tab.list");
+        assert_eq!(requests[0]["method"], "session.snapshot");
         assert_eq!(requests[0]["params"], serde_json::json!({}));
-        assert_eq!(requests[1]["method"], "pane.list");
-        assert_eq!(requests[2]["method"], "pane.process_info");
+        assert_eq!(requests[1]["method"], "pane.process_info");
         assert_eq!(
-            requests[2]["params"],
+            requests[1]["params"],
             serde_json::json!({"pane_id":"w1:p1"})
         );
-        assert_eq!(requests[3]["method"], "tab.rename");
+        assert_eq!(requests[2]["method"], "tab.rename");
         assert_eq!(
-            requests[3]["params"],
+            requests[2]["params"],
             serde_json::json!({"tab_id":"w1:t1","label":"pnpm dev"})
         );
     }
@@ -909,7 +770,7 @@ mod tests {
             MockTransport::with_error(io::Error::new(io::ErrorKind::NotFound, "no socket"));
         let mut client = HerdrClient::new(transport);
 
-        let error = client.list_tabs().expect_err("transport error");
+        let error = client.observe_focused_tab().expect_err("transport error");
         assert!(matches!(error, HerdrError::Io(_)));
     }
 

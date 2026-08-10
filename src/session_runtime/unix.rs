@@ -1,12 +1,15 @@
 //! Unix primitives owned by a Session Runtime.
 
+use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::path::PathBuf;
 
 /// A non-blocking advisory lease that remains held for as long as this value lives.
 pub(crate) struct LifetimeLease {
@@ -153,6 +156,69 @@ pub(crate) fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Resolves the executable currently running in the peer process.
+///
+/// This is deliberately stronger than same-UID authentication for cooperative handoff: the
+/// caller must actually be the executable identity it asks the runtime to replace with.
+#[cfg(target_os = "macos")]
+pub(crate) fn peer_executable_identity(stream: &UnixStream) -> io::Result<PathBuf> {
+    let mut pid: libc::pid_t = 0;
+    let mut length = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &raw mut length,
+        )
+    };
+    if result != 0 || pid <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut path = [0_i8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    if length <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let bytes = unsafe { CStr::from_ptr(path.as_ptr()) }.to_bytes().to_vec();
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// Resolves the executable currently running in the peer process.
+#[cfg(target_os = "linux")]
+pub(crate) fn peer_executable_identity(stream: &UnixStream) -> io::Result<PathBuf> {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &raw mut length,
+        )
+    };
+    if result != 0 || credentials.pid <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    fs::read_link(format!("/proc/{}/exe", credentials.pid))
+}
+
+/// Returns an unsupported-platform error where peer executable identity is unavailable.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn peer_executable_identity(_stream: &UnixStream) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Unix peer executable lookup is unsupported on this platform",
+    ))
 }
 
 /// Returns the effective user ID of the peer connected to `stream`.

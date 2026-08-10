@@ -72,6 +72,23 @@ pub(crate) fn resolve_socket_from_env() -> Result<SessionSocket, StartupError> {
     resolve_socket_with_env(std::env::var_os(HERDR_SOCKET_PATH_ENV), herdr_status_json)
 }
 
+/// Resolves the explicit identity of a stopped session without falling back to
+/// another currently running Herdr session.
+///
+/// A stopped session no longer has a connectable socket, so `forget-session`
+/// must retain the exact absolute path supplied by Herdr/the operator instead
+/// of applying the normal stale-socket fallback.
+pub(crate) fn resolve_stopped_socket_from_env() -> Result<SessionSocket, StartupError> {
+    resolve_stopped_socket(std::env::var_os(HERDR_SOCKET_PATH_ENV))
+}
+
+fn resolve_stopped_socket(socket_path: Option<OsString>) -> Result<SessionSocket, StartupError> {
+    let socket_path = socket_path
+        .filter(|value| !value.is_empty())
+        .ok_or(StartupError::MissingSocketPath)?;
+    SessionSocket::resolve(PathBuf::from(socket_path))
+}
+
 fn resolve_socket_with_env(
     socket_path: Option<OsString>,
     load_status: impl FnOnce() -> Result<serde_json::Value, StartupError>,
@@ -353,6 +370,21 @@ mod tests {
         })
         .expect("socket from herdr status");
         assert_eq!(socket.socket_path, PathBuf::from("/tmp/live-herdr.sock"));
+    }
+
+    #[test]
+    fn stopped_session_resolution_preserves_an_explicit_missing_socket_identity() {
+        let temp_dir = TestTempDir::new();
+        let stopped_socket = temp_dir.path().join("stopped.sock");
+        let socket = resolve_stopped_socket(Some(stopped_socket.clone().into_os_string()))
+            .expect("stopped session identity");
+        assert_eq!(socket.socket_path, stopped_socket);
+    }
+
+    #[test]
+    fn stopped_session_resolution_requires_an_explicit_identity() {
+        let error = resolve_stopped_socket(None).expect_err("explicit stopped session identity");
+        assert!(matches!(error, StartupError::MissingSocketPath));
     }
 
     #[test]

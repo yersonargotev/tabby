@@ -21,7 +21,10 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use self::unix::{LifetimeLease, bind_private_listener, ensure_private_directory, peer_uid};
+use self::unix::{
+    LifetimeLease, bind_private_listener, ensure_private_directory, peer_executable_identity,
+    peer_uid,
+};
 
 const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
 const RUNTIMES_DIR_NAME: &str = "session-runtimes";
@@ -35,6 +38,7 @@ const STARTUP_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_LEASE_WAIT: Duration = Duration::from_secs(1);
 const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(1);
+const CONTROL_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_MAX_LINE_BYTES: u64 = 64 * 1024;
 const CONTROL_WORKER_COUNT: usize = 4;
 const CONTROL_WORKER_QUEUE: usize = 16;
@@ -177,6 +181,8 @@ struct ControlReply {
     request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip)]
+    handoff_reply_written: Option<mpsc::SyncSender<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,21 +192,38 @@ enum RuntimeControlOperation {
     UnlockFocused,
     UnlockAll,
     RepairStateDiscard,
-    PrepareHandoff,
+    PrepareHandoff { replacement_binary_identity: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeControlEvent {
-    Trigger(RefreshTrigger),
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeMutation {
     UnlockFocused,
     UnlockAll,
     RepairStateDiscard,
-    PrepareHandoff,
+    PrepareHandoff { replacement_binary_identity: String },
+}
+
+struct RuntimeCommand {
+    mutation: RuntimeMutation,
+    completion: mpsc::SyncSender<Result<(), String>>,
+    handoff_reply_written: Option<mpsc::Receiver<()>>,
+}
+
+struct QueuedControlCommand {
+    completion: mpsc::Receiver<Result<(), String>>,
+    handoff_reply_written: Option<mpsc::SyncSender<()>>,
+}
+
+enum RuntimeControlEvent {
+    Trigger(RefreshTrigger),
+    Command(RuntimeCommand),
 }
 
 #[derive(Default)]
 struct TriggerMailboxState {
-    pending: Option<RuntimeControlEvent>,
+    pending_trigger: Option<RefreshTrigger>,
+    commands: VecDeque<RuntimeCommand>,
+    handoff_requested: bool,
 }
 
 #[derive(Default)]
@@ -241,31 +264,47 @@ fn trigger_mailbox() -> (TriggerSender, TriggerReceiver) {
 }
 
 impl TriggerSender {
-    fn send(&self, event: RuntimeControlEvent) {
+    fn send_trigger(&self, trigger: RefreshTrigger) -> Result<(), String> {
         let (lock, ready) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        match (state.pending, event) {
-            (_, RuntimeControlEvent::PrepareHandoff) => {
-                state.pending = Some(RuntimeControlEvent::PrepareHandoff);
-            }
-            (Some(RuntimeControlEvent::PrepareHandoff), _) => {}
-            (
-                Some(
-                    RuntimeControlEvent::UnlockFocused
-                    | RuntimeControlEvent::UnlockAll
-                    | RuntimeControlEvent::RepairStateDiscard,
-                ),
-                RuntimeControlEvent::Trigger(_),
-            ) => {}
-            (
-                Some(RuntimeControlEvent::Trigger(existing)),
-                RuntimeControlEvent::Trigger(RefreshTrigger::Creation),
-            ) if existing != RefreshTrigger::Creation => {}
-            (_, event) => {
-                state.pending = Some(event);
-            }
+        if state.handoff_requested {
+            return Err("Session Runtime is preparing a cooperative handoff".to_string());
+        }
+        match (state.pending_trigger, trigger) {
+            (Some(existing), RefreshTrigger::Creation) if existing != RefreshTrigger::Creation => {}
+            (_, trigger) => state.pending_trigger = Some(trigger),
         }
         ready.notify_one();
+        Ok(())
+    }
+
+    fn enqueue_mutation(&self, mutation: RuntimeMutation) -> Result<QueuedControlCommand, String> {
+        let (lock, ready) = &*self.shared;
+        let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.handoff_requested {
+            return Err("Session Runtime is preparing a cooperative handoff".to_string());
+        }
+        if matches!(mutation, RuntimeMutation::PrepareHandoff { .. }) {
+            state.handoff_requested = true;
+        }
+        let (completion, result) = mpsc::sync_channel(1);
+        let (handoff_reply_written, owner_wait) =
+            if matches!(mutation, RuntimeMutation::PrepareHandoff { .. }) {
+                let (reply_written, owner_wait) = mpsc::sync_channel(0);
+                (Some(reply_written), Some(owner_wait))
+            } else {
+                (None, None)
+            };
+        state.commands.push_back(RuntimeCommand {
+            mutation,
+            completion,
+            handoff_reply_written: owner_wait,
+        });
+        ready.notify_one();
+        Ok(QueuedControlCommand {
+            completion: result,
+            handoff_reply_written,
+        })
     }
 }
 
@@ -274,8 +313,11 @@ impl TriggerReceiver {
         let (lock, ready) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
-            if let Some(trigger) = state.pending.take() {
-                return Some(trigger);
+            if let Some(command) = state.commands.pop_front() {
+                return Some(RuntimeControlEvent::Command(command));
+            }
+            if let Some(trigger) = state.pending_trigger.take() {
+                return Some(RuntimeControlEvent::Trigger(trigger));
             }
             match deadline {
                 Some(deadline) => {
@@ -287,7 +329,10 @@ impl TriggerReceiver {
                         .wait_timeout(state, remaining)
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state = next_state;
-                    if timeout.timed_out() && state.pending.is_none() {
+                    if timeout.timed_out()
+                        && state.pending_trigger.is_none()
+                        && state.commands.is_empty()
+                    {
                         return None;
                     }
                 }
@@ -427,13 +472,20 @@ pub fn ensure_current_runtime_after_install_from_env() -> Result<String, Session
             ));
         }
         RuntimeInspection::Ready { .. } => {
-            request_ready_owner(&launch, RuntimeControlOperation::PrepareHandoff)?.ok_or_else(
-                || {
-                    SessionRuntimeError::Control(
-                        "Ready owner did not accept cooperative handoff".to_string(),
-                    )
+            let replacement_binary_identity = crate::startup::binary_identity(launch.binary_path)
+                .to_string_lossy()
+                .into_owned();
+            request_ready_owner(
+                &launch,
+                RuntimeControlOperation::PrepareHandoff {
+                    replacement_binary_identity,
                 },
-            )?;
+            )?
+            .ok_or_else(|| {
+                SessionRuntimeError::Control(
+                    "Ready owner did not accept cooperative handoff".to_string(),
+                )
+            })?;
             wait_for_runtime_release(&paths)?;
         }
         RuntimeInspection::Absent => {}
@@ -470,7 +522,50 @@ fn wait_for_runtime_release(paths: &RuntimePaths) -> Result<(), SessionRuntimeEr
 
 /// Repairs invalid Session-Scoped Tab State only after the explicit discard command.
 pub fn repair_session_state_from_env() -> Result<String, SessionRuntimeError> {
-    request_runtime_operation_from_env(RuntimeControlOperation::RepairStateDiscard)
+    let socket = crate::startup::resolve_socket_from_env()?;
+    let state_base = crate::startup::state_base_from_runtime()?;
+    let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
+    let launch = SessionRuntimeLaunch {
+        socket: &socket,
+        state_base: &state_base,
+        binary_path: &binary_path,
+    };
+    let paths = RuntimePaths::for_launch(&launch);
+    let mut adapter = SystemSessionRuntimeAdapter::default();
+    let _gate = adapter.acquire_startup_gate(&paths.startup_gate)?;
+
+    match inspect_runtime(&launch)? {
+        RuntimeInspection::Ready { .. } => {
+            request_ready_owner(&launch, RuntimeControlOperation::RepairStateDiscard)?.ok_or_else(
+                || {
+                    SessionRuntimeError::Control(
+                        "Ready owner disappeared before repairing Session-Scoped Tab State"
+                            .to_string(),
+                    )
+                },
+            )?;
+        }
+        RuntimeInspection::Absent => {
+            crate::locks::SessionTabStateStore::open(&state_base, &socket)?
+                .repair_discard(crate::locks::RepairConfirmation::confirmed())?;
+        }
+        RuntimeInspection::Faulted {
+            lease_held: false, ..
+        } => {
+            crate::locks::SessionTabStateStore::open(&state_base, &socket)?
+                .repair_discard(crate::locks::RepairConfirmation::confirmed())?;
+        }
+        RuntimeInspection::Starting { .. }
+        | RuntimeInspection::Faulted {
+            lease_held: true, ..
+        } => {
+            return Err(SessionRuntimeError::Control(
+                "cannot repair Session-Scoped Tab State while its Session Runtime holds a lease"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok("tabby repair-state: discarded invalid Session-Scoped Tab State".to_string())
 }
 
 /// Requests that the Ready Session Runtime unlock the currently focused tab.
@@ -519,9 +614,10 @@ fn request_runtime_operation_from_env(
     Ok("tabby control operation accepted by the Ready Session Runtime".to_string())
 }
 
-/// Forgets retained session state only after verifying that its runtime is absent.
+/// Forgets retained session state only after verifying that the explicitly
+/// selected Herdr session and its Tabby runtime are both stopped.
 pub fn forget_session_from_env() -> Result<String, SessionRuntimeError> {
-    let socket = crate::startup::resolve_socket_from_env()?;
+    let socket = crate::startup::resolve_stopped_socket_from_env()?;
     let state_base = crate::startup::state_base_from_runtime()?;
     let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
     let launch = SessionRuntimeLaunch {
@@ -529,17 +625,35 @@ pub fn forget_session_from_env() -> Result<String, SessionRuntimeError> {
         state_base: &state_base,
         binary_path: &binary_path,
     };
-    match inspect_runtime(&launch)? {
-        RuntimeInspection::Absent => {}
-        inspection => {
-            return Err(SessionRuntimeError::Control(format!(
-                "refusing to forget Session-Scoped Tab State while the Session Runtime is {inspection:?}"
-            )));
-        }
-    }
-    crate::locks::SessionTabStateStore::open(&state_base, &socket)?
-        .forget_session(crate::locks::RuntimeStoppedConfirmation::confirmed())?;
+    forget_stopped_session(&launch)?;
     Ok("tabby forget-session: removed retained Session-Scoped Tab State".to_string())
+}
+
+fn forget_stopped_session(launch: &SessionRuntimeLaunch<'_>) -> Result<(), SessionRuntimeError> {
+    let paths = RuntimePaths::for_launch(launch);
+    if LifetimeLease::is_held(&paths.lifetime_lease)? {
+        return Err(SessionRuntimeError::Control(
+            "refusing to forget Session-Scoped Tab State while its Session Runtime holds the lifetime lease"
+                .to_string(),
+        ));
+    }
+    match UnixStream::connect(&launch.socket.socket_path) {
+        Ok(_) => {
+            return Err(SessionRuntimeError::Control(
+                "refusing to forget Session-Scoped Tab State while the selected Herdr Session is running"
+                    .to_string(),
+            ));
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) => {}
+        Err(error) => return Err(error.into()),
+    }
+    crate::locks::SessionTabStateStore::open(launch.state_base, launch.socket)?
+        .forget_session(crate::locks::RuntimeStoppedConfirmation::confirmed())?;
+    Ok(())
 }
 
 /// Inspects the selected Session Runtime without starting or signalling it.
@@ -757,7 +871,14 @@ fn request_ready_owner(
         }
         Err(error) => return Err(error.into()),
     };
-    stream.set_read_timeout(Some(CONTROL_IO_TIMEOUT))?;
+    let response_timeout = match &operation {
+        RuntimeControlOperation::Signal { .. } => CONTROL_IO_TIMEOUT,
+        RuntimeControlOperation::UnlockFocused
+        | RuntimeControlOperation::UnlockAll
+        | RuntimeControlOperation::RepairStateDiscard
+        | RuntimeControlOperation::PrepareHandoff { .. } => CONTROL_COMMAND_TIMEOUT,
+    };
+    stream.set_read_timeout(Some(response_timeout))?;
     stream.set_write_timeout(Some(CONTROL_IO_TIMEOUT))?;
     let request = ControlRequest {
         schema_version: CONTROL_SCHEMA_VERSION,
@@ -854,11 +975,15 @@ fn run_owned_session(
     let mut refresher_state = OneShotRefreshState::new(daemon::DaemonState::default());
     let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)?;
     let (trigger_tx, trigger_rx) = trigger_mailbox();
+    let binary_identity = crate::startup::binary_identity(launch.binary_path)
+        .to_string_lossy()
+        .into_owned();
     spawn_control_acceptor(
         listener,
         launch.socket.session_key.clone(),
         launch.socket.identity_hex(),
         launch_id.to_string(),
+        binary_identity.clone(),
         trigger_tx,
     );
 
@@ -871,9 +996,7 @@ fn run_owned_session(
         socket_identity_hex: launch.socket.identity_hex(),
         launch_id: launch_id.to_string(),
         tabby_version: env!("CARGO_PKG_VERSION").to_string(),
-        binary_path: crate::startup::binary_identity(launch.binary_path)
-            .to_string_lossy()
-            .into_owned(),
+        binary_path: binary_identity,
         last_evaluation_unix_ms: None,
         last_failure: None,
         next_periodic_unix_ms: Some(unix_time_after(daemon::DEFAULT_SESSION_REFRESH_INTERVAL)),
@@ -987,41 +1110,64 @@ fn run_runtime_loop(
     metadata_path: &Path,
     metadata: &mut RuntimeMetadata,
 ) -> Result<(), SessionRuntimeError> {
-    let mut next_tick_at = Some(Instant::now() + daemon::DEFAULT_SESSION_REFRESH_INTERVAL);
+    // A newly spawned owner always begins with an initial quiet evaluation. This is what makes
+    // a creation hook that recovered a missing owner distinct from a creation signal delivered
+    // to an already Ready owner, which remains recovery-only below.
+    let initial_now = Instant::now();
+    state.note_refresh_trigger(initial_now);
+    let mut next_tick_at = Some(initial_now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
 
     loop {
         let trigger = triggers.recv_until(next_tick_at);
 
         if let Some(event) = trigger {
             match event {
-                RuntimeControlEvent::PrepareHandoff => return Ok(()),
+                RuntimeControlEvent::Command(command) => {
+                    let is_handoff =
+                        matches!(&command.mutation, RuntimeMutation::PrepareHandoff { .. });
+                    let result: Result<(), SessionRuntimeError> = (|| match command.mutation {
+                        RuntimeMutation::PrepareHandoff { .. } => Ok(()),
+                        RuntimeMutation::UnlockFocused => {
+                            if let Some(observation) =
+                                herdr.observe_focused_tab().map_err(DaemonError::Herdr)?
+                            {
+                                tab_state
+                                    .mutate(|state| state.unlock_tab(&observation.tab.tab_id))?;
+                            }
+                            let now = Instant::now();
+                            state.note_refresh_trigger(now);
+                            next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                            Ok(())
+                        }
+                        RuntimeMutation::UnlockAll => {
+                            tab_state.mutate(crate::locks::SessionTabState::unlock_all)?;
+                            let now = Instant::now();
+                            state.note_refresh_trigger(now);
+                            next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                            Ok(())
+                        }
+                        RuntimeMutation::RepairStateDiscard => {
+                            tab_state
+                                .repair_discard(crate::locks::RepairConfirmation::confirmed())?;
+                            let now = Instant::now();
+                            state.note_refresh_trigger(now);
+                            next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
+                            Ok(())
+                        }
+                    })();
+                    let _ = command
+                        .completion
+                        .send(result.map_err(|error: SessionRuntimeError| error.to_string()));
+                    if is_handoff {
+                        if let Some(reply_written) = command.handoff_reply_written {
+                            let _ = reply_written.recv_timeout(CONTROL_IO_TIMEOUT);
+                        }
+                        return Ok(());
+                    }
+                    continue;
+                }
                 RuntimeControlEvent::Trigger(RefreshTrigger::Creation) => continue,
                 RuntimeControlEvent::Trigger(_) => {
-                    let now = Instant::now();
-                    state.note_refresh_trigger(now);
-                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
-                    continue;
-                }
-                RuntimeControlEvent::UnlockFocused => {
-                    if let Some(observation) =
-                        herdr.observe_focused_tab().map_err(DaemonError::Herdr)?
-                    {
-                        tab_state.mutate(|state| state.unlock_tab(&observation.tab.tab_id))?;
-                    }
-                    let now = Instant::now();
-                    state.note_refresh_trigger(now);
-                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
-                    continue;
-                }
-                RuntimeControlEvent::UnlockAll => {
-                    tab_state.mutate(crate::locks::SessionTabState::unlock_all)?;
-                    let now = Instant::now();
-                    state.note_refresh_trigger(now);
-                    next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
-                    continue;
-                }
-                RuntimeControlEvent::RepairStateDiscard => {
-                    tab_state.repair_discard(crate::locks::RepairConfirmation::confirmed())?;
                     let now = Instant::now();
                     state.note_refresh_trigger(now);
                     next_tick_at = Some(now + daemon::DEFAULT_FOCUS_QUIET_WINDOW);
@@ -1057,6 +1203,7 @@ fn spawn_control_acceptor(
     session_key: String,
     socket_identity_hex: String,
     launch_id: String,
+    owner_binary_identity: String,
     triggers: TriggerSender,
 ) {
     thread::spawn(move || {
@@ -1068,6 +1215,7 @@ fn spawn_control_acceptor(
             let session_key = session_key.clone();
             let socket_identity_hex = socket_identity_hex.clone();
             let launch_id = launch_id.clone();
+            let owner_binary_identity = owner_binary_identity.clone();
             let triggers = triggers.clone();
             let recent_requests = Arc::clone(&recent_requests);
             thread::spawn(move || {
@@ -1081,15 +1229,22 @@ fn spawn_control_acceptor(
                     let Ok(mut stream) = stream else {
                         return;
                     };
-                    let reply = handle_control_request(
+                    let mut reply = handle_control_request(
                         &mut stream,
                         &session_key,
                         &socket_identity_hex,
                         &launch_id,
+                        &owner_binary_identity,
                         &triggers,
                         &recent_requests,
                     );
-                    write_control_reply(&mut stream, &reply);
+                    let handoff_reply_written = reply.handoff_reply_written.take();
+                    if !write_control_reply(&mut stream, &reply) {
+                        continue;
+                    }
+                    if let Some(handoff_reply_written) = handoff_reply_written {
+                        let _ = handoff_reply_written.send(());
+                    }
                 }
             });
         }
@@ -1110,18 +1265,19 @@ fn spawn_control_acceptor(
                     launch_id: launch_id.clone(),
                     request_id: String::new(),
                     error: Some("runtime control endpoint is busy".to_string()),
+                    handoff_reply_written: None,
                 };
-                write_control_reply(&mut stream, &reply);
+                let _ = write_control_reply(&mut stream, &reply);
             }
         }
     });
 }
 
-fn write_control_reply(stream: &mut UnixStream, reply: &ControlReply) {
-    let _ = stream.set_write_timeout(Some(CONTROL_IO_TIMEOUT));
-    let _ = serde_json::to_writer(&mut *stream, reply);
-    let _ = stream.write_all(b"\n");
-    let _ = stream.flush();
+fn write_control_reply(stream: &mut UnixStream, reply: &ControlReply) -> bool {
+    stream.set_write_timeout(Some(CONTROL_IO_TIMEOUT)).is_ok()
+        && serde_json::to_writer(&mut *stream, reply).is_ok()
+        && stream.write_all(b"\n").is_ok()
+        && stream.flush().is_ok()
 }
 
 fn handle_control_request(
@@ -1129,6 +1285,7 @@ fn handle_control_request(
     session_key: &str,
     socket_identity_hex: &str,
     launch_id: &str,
+    owner_binary_identity: &str,
     triggers: &TriggerSender,
     recent_requests: &Mutex<RecentControlRequests>,
 ) -> ControlReply {
@@ -1138,6 +1295,7 @@ fn handle_control_request(
         launch_id: launch_id.to_string(),
         request_id,
         error: Some(message),
+        handoff_reply_written: None,
     };
 
     match peer_uid(stream) {
@@ -1195,14 +1353,61 @@ fn handle_control_request(
             request.request_id,
         );
     }
-    let event = match request.operation {
-        RuntimeControlOperation::Signal { trigger } => RuntimeControlEvent::Trigger(trigger),
-        RuntimeControlOperation::UnlockFocused => RuntimeControlEvent::UnlockFocused,
-        RuntimeControlOperation::UnlockAll => RuntimeControlEvent::UnlockAll,
-        RuntimeControlOperation::RepairStateDiscard => RuntimeControlEvent::RepairStateDiscard,
-        RuntimeControlOperation::PrepareHandoff => RuntimeControlEvent::PrepareHandoff,
+    let completion = match request.operation {
+        RuntimeControlOperation::Signal { trigger } => {
+            if let Err(error) = triggers.send_trigger(trigger) {
+                return reject(error, request.request_id);
+            }
+            None
+        }
+        RuntimeControlOperation::UnlockFocused => {
+            Some(triggers.enqueue_mutation(RuntimeMutation::UnlockFocused))
+        }
+        RuntimeControlOperation::UnlockAll => {
+            Some(triggers.enqueue_mutation(RuntimeMutation::UnlockAll))
+        }
+        RuntimeControlOperation::RepairStateDiscard => {
+            Some(triggers.enqueue_mutation(RuntimeMutation::RepairStateDiscard))
+        }
+        RuntimeControlOperation::PrepareHandoff {
+            replacement_binary_identity,
+        } => {
+            if let Err(error) = validate_replacement_binary_identity(
+                stream,
+                &replacement_binary_identity,
+                owner_binary_identity,
+            ) {
+                return reject(error, request.request_id);
+            }
+            Some(triggers.enqueue_mutation(RuntimeMutation::PrepareHandoff {
+                replacement_binary_identity,
+            }))
+        }
     };
-    triggers.send(event);
+    let mut handoff_reply_written = None;
+    if let Some(completion) = completion {
+        let completion = match completion {
+            Ok(completion) => completion,
+            Err(error) => return reject(error, request.request_id),
+        };
+        match completion.completion.recv_timeout(CONTROL_COMMAND_TIMEOUT) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return reject(error, request.request_id),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return reject(
+                    "Session Runtime did not complete the control operation in time".to_string(),
+                    request.request_id,
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return reject(
+                    "Session Runtime stopped before completing the control operation".to_string(),
+                    request.request_id,
+                );
+            }
+        }
+        handoff_reply_written = completion.handoff_reply_written;
+    }
 
     ControlReply {
         accepted: true,
@@ -1210,7 +1415,58 @@ fn handle_control_request(
         launch_id: launch_id.to_string(),
         request_id: request.request_id,
         error: None,
+        handoff_reply_written,
     }
+}
+
+fn validate_replacement_binary_identity(
+    stream: &UnixStream,
+    replacement_binary_identity: &str,
+    owner_binary_identity: &str,
+) -> Result<(), String> {
+    validate_declared_replacement_binary_identity(
+        replacement_binary_identity,
+        owner_binary_identity,
+    )?;
+    let peer_binary_identity = crate::startup::binary_identity(
+        &peer_executable_identity(stream)
+            .map_err(|error| format!("could not validate replacement peer executable: {error}"))?,
+    )
+    .to_string_lossy()
+    .into_owned();
+    if peer_binary_identity != replacement_binary_identity {
+        return Err(
+            "replacement executable identity does not match the executing control peer".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_declared_replacement_binary_identity(
+    replacement_binary_identity: &str,
+    owner_binary_identity: &str,
+) -> Result<(), String> {
+    let replacement = Path::new(replacement_binary_identity);
+    if !replacement.is_absolute() {
+        return Err("replacement executable identity must be an absolute path".to_string());
+    }
+    let metadata = fs::metadata(replacement)
+        .map_err(|error| format!("replacement executable identity cannot be validated: {error}"))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(
+            "replacement executable identity is not an executable regular file".to_string(),
+        );
+    }
+    let canonical = crate::startup::binary_identity(replacement);
+    if canonical.to_string_lossy() != replacement_binary_identity {
+        return Err("replacement executable identity is not canonical".to_string());
+    }
+    if replacement_binary_identity == owner_binary_identity {
+        return Err(
+            "cooperative handoff requires a different Tabby executable identity".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn write_metadata(path: &Path, metadata: &RuntimeMetadata) -> Result<(), SessionRuntimeError> {
@@ -1618,6 +1874,68 @@ mod tests {
     }
 
     #[test]
+    fn forget_session_removes_only_an_explicitly_stopped_session_identity() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-forget-stopped-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("stopped.sock")).expect("socket");
+        let store = crate::locks::SessionTabStateStore::open(&state_base, &socket)
+            .expect("session state store");
+        store
+            .mutate(|state| state.record_plugin_label("tab-1", "nvim"))
+            .expect("persist selected session state");
+        let state_path = store.path().to_path_buf();
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+
+        forget_stopped_session(&launch).expect("forget stopped session");
+
+        assert!(!state_path.exists());
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn forget_session_rejects_a_running_herdr_listener_without_mutating_state() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-forget-running-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket_path = state_base.join("running.sock");
+        let listener = UnixListener::bind(&socket_path).expect("running Herdr listener");
+        let socket = SessionSocket::resolve(&socket_path).expect("socket");
+        let store = crate::locks::SessionTabStateStore::open(&state_base, &socket)
+            .expect("session state store");
+        store
+            .mutate(|state| state.record_plugin_label("tab-1", "nvim"))
+            .expect("persist selected session state");
+        let state_path = store.path().to_path_buf();
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+
+        let error = forget_stopped_session(&launch).expect_err("running session must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("selected Herdr Session is running")
+        );
+        assert!(state_path.exists());
+        drop(listener);
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
     fn stale_ready_metadata_without_a_control_endpoint_is_not_treated_as_an_owner() {
         let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
         let state_base = PathBuf::from("/tmp").join(format!(
@@ -1821,6 +2139,7 @@ mod tests {
             socket.session_key.clone(),
             socket.identity_hex(),
             "ready-launch".to_string(),
+            "/tmp/tabby-owner".to_string(),
             sender,
         );
         write_metadata(
@@ -1848,12 +2167,12 @@ mod tests {
 
         assert_eq!(owner.pid, std::process::id());
         assert_eq!(owner.launch_id, "ready-launch");
-        assert_eq!(
+        assert!(matches!(
             receiver
                 .recv_until(Some(Instant::now() + Duration::from_secs(1)))
                 .expect("delivered trigger"),
             RuntimeControlEvent::Trigger(RefreshTrigger::Focus)
-        );
+        ));
 
         let _ = fs::remove_file(&paths.control_socket);
         let _ = fs::remove_dir_all(&paths.control_directory);
@@ -1888,14 +2207,440 @@ mod tests {
     fn trigger_mailbox_coalesces_to_the_latest_actionable_trigger() {
         let (sender, receiver) = trigger_mailbox();
 
-        sender.send(RuntimeControlEvent::Trigger(RefreshTrigger::Focus));
-        sender.send(RuntimeControlEvent::Trigger(RefreshTrigger::Creation));
-        sender.send(RuntimeControlEvent::Trigger(RefreshTrigger::Manual));
+        sender
+            .send_trigger(RefreshTrigger::Focus)
+            .expect("focus trigger");
+        sender
+            .send_trigger(RefreshTrigger::Creation)
+            .expect("creation trigger");
+        sender
+            .send_trigger(RefreshTrigger::Manual)
+            .expect("manual trigger");
 
-        assert_eq!(
+        assert!(matches!(
             receiver.recv_until(Some(Instant::now())),
             Some(RuntimeControlEvent::Trigger(RefreshTrigger::Manual))
+        ));
+        assert!(receiver.recv_until(Some(Instant::now())).is_none());
+    }
+
+    #[test]
+    fn mutation_commands_are_completed_in_order_without_being_coalesced() {
+        let (sender, receiver) = trigger_mailbox();
+        let unlock = sender
+            .enqueue_mutation(RuntimeMutation::UnlockAll)
+            .expect("queue unlock");
+        let repair = sender
+            .enqueue_mutation(RuntimeMutation::RepairStateDiscard)
+            .expect("queue repair");
+
+        let RuntimeControlEvent::Command(first) = receiver
+            .recv_until(Some(Instant::now()))
+            .expect("first mutation")
+        else {
+            panic!("first event is a mutation command");
+        };
+        assert_eq!(first.mutation, RuntimeMutation::UnlockAll);
+        first.completion.send(Ok(())).expect("complete unlock");
+
+        let RuntimeControlEvent::Command(second) = receiver
+            .recv_until(Some(Instant::now()))
+            .expect("second mutation")
+        else {
+            panic!("second event is a mutation command");
+        };
+        assert_eq!(second.mutation, RuntimeMutation::RepairStateDiscard);
+        second.completion.send(Ok(())).expect("complete repair");
+
+        assert_eq!(unlock.completion.recv().expect("unlock result"), Ok(()));
+        assert_eq!(repair.completion.recv().expect("repair result"), Ok(()));
+    }
+
+    #[test]
+    fn queued_handoff_rejects_duplicate_or_stale_follow_up_commands() {
+        let (sender, receiver) = trigger_mailbox();
+        let handoff = sender
+            .enqueue_mutation(RuntimeMutation::PrepareHandoff {
+                replacement_binary_identity: "/replacement/tabby".to_string(),
+            })
+            .expect("queue handoff");
+
+        assert!(
+            sender
+                .enqueue_mutation(RuntimeMutation::UnlockFocused)
+                .is_err()
         );
-        assert_eq!(receiver.recv_until(Some(Instant::now())), None);
+        assert!(sender.send_trigger(RefreshTrigger::Focus).is_err());
+
+        let RuntimeControlEvent::Command(command) = receiver
+            .recv_until(Some(Instant::now()))
+            .expect("handoff command")
+        else {
+            panic!("handoff remains a command");
+        };
+        assert!(matches!(
+            command.mutation,
+            RuntimeMutation::PrepareHandoff { .. }
+        ));
+        command.completion.send(Ok(())).expect("complete handoff");
+        assert_eq!(handoff.completion.recv().expect("handoff result"), Ok(()));
+    }
+
+    #[test]
+    fn handoff_rejects_the_current_or_unvalidated_replacement_identity() {
+        let current = std::env::current_exe()
+            .expect("current executable")
+            .canonicalize()
+            .expect("canonical current executable");
+        let current = current.to_string_lossy().into_owned();
+
+        assert!(validate_declared_replacement_binary_identity(&current, &current).is_err());
+        assert!(
+            validate_declared_replacement_binary_identity("relative/tabby", "/owner/tabby")
+                .is_err()
+        );
+        assert!(
+            validate_declared_replacement_binary_identity("/not/a/tabby", "/owner/tabby").is_err()
+        );
+    }
+
+    #[test]
+    fn control_endpoint_rejects_stale_duplicate_and_same_binary_handoff_requests() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-control-authentication-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)
+            .expect("control listener");
+        let (sender, receiver) = trigger_mailbox();
+        let current = std::env::current_exe()
+            .expect("current executable")
+            .canonicalize()
+            .expect("canonical current executable")
+            .to_string_lossy()
+            .into_owned();
+        spawn_control_acceptor(
+            listener,
+            socket.session_key.clone(),
+            socket.identity_hex(),
+            "ready-launch".to_string(),
+            current.clone(),
+            sender,
+        );
+
+        let base_request = |request_id: &str| ControlRequest {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            session_key: socket.session_key.clone(),
+            socket_identity_hex: socket.identity_hex(),
+            launch_id: "ready-launch".to_string(),
+            request_id: request_id.to_string(),
+            operation: RuntimeControlOperation::Signal {
+                trigger: RefreshTrigger::Focus,
+            },
+        };
+        let first = send_raw_control_request(&paths.control_socket, base_request("duplicate-id"));
+        assert!(first.accepted);
+        assert!(matches!(
+            receiver.recv_until(Some(Instant::now() + Duration::from_secs(1))),
+            Some(RuntimeControlEvent::Trigger(RefreshTrigger::Focus))
+        ));
+        let duplicate =
+            send_raw_control_request(&paths.control_socket, base_request("duplicate-id"));
+        assert!(!duplicate.accepted);
+        assert!(
+            duplicate
+                .error
+                .expect("duplicate error")
+                .contains("duplicate")
+        );
+
+        let mut stale = base_request("stale-id");
+        stale.launch_id = "stale-launch".to_string();
+        let stale_reply = send_raw_control_request(&paths.control_socket, stale);
+        assert!(!stale_reply.accepted);
+        assert!(stale_reply.error.expect("stale error").contains("identity"));
+
+        let same_binary = send_raw_control_request(
+            &paths.control_socket,
+            ControlRequest {
+                schema_version: CONTROL_SCHEMA_VERSION,
+                session_key: socket.session_key.clone(),
+                socket_identity_hex: socket.identity_hex(),
+                launch_id: "ready-launch".to_string(),
+                request_id: "same-binary-handoff".to_string(),
+                operation: RuntimeControlOperation::PrepareHandoff {
+                    replacement_binary_identity: current,
+                },
+            },
+        );
+        assert!(!same_binary.accepted);
+        assert!(
+            same_binary
+                .error
+                .expect("same binary error")
+                .contains("different Tabby executable")
+        );
+
+        let _ = fs::remove_file(&paths.control_socket);
+        let _ = fs::remove_dir_all(&paths.control_directory);
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn control_endpoint_rejects_a_replacement_identity_not_executed_by_its_peer() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-control-peer-executable-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)
+            .expect("control listener");
+        let (sender, receiver) = trigger_mailbox();
+        let owner_identity = std::env::current_exe()
+            .expect("current executable")
+            .canonicalize()
+            .expect("canonical current executable")
+            .to_string_lossy()
+            .into_owned();
+        spawn_control_acceptor(
+            listener,
+            socket.session_key.clone(),
+            socket.identity_hex(),
+            "ready-launch".to_string(),
+            owner_identity,
+            sender,
+        );
+        let declared_identity = PathBuf::from("/bin/sh")
+            .canonicalize()
+            .expect("canonical shell")
+            .to_string_lossy()
+            .into_owned();
+        let test_binary = std::env::current_exe().expect("test binary");
+        let status = Command::new(test_binary)
+            .args([
+                "--exact",
+                "session_runtime::tests::wrong_replacement_peer_helper",
+                "--nocapture",
+            ])
+            .env("TABBY_TEST_CONTROL_SOCKET", &paths.control_socket)
+            .env("TABBY_TEST_CONTROL_SESSION_KEY", &socket.session_key)
+            .env("TABBY_TEST_CONTROL_SOCKET_IDENTITY", socket.identity_hex())
+            .env("TABBY_TEST_CONTROL_REPLACEMENT", declared_identity)
+            .status()
+            .expect("run wrong replacement peer");
+        assert!(
+            status.success(),
+            "subprocess rejected the wrong peer as expected"
+        );
+        assert!(receiver.recv_until(Some(Instant::now())).is_none());
+
+        let _ = fs::remove_file(&paths.control_socket);
+        let _ = fs::remove_dir_all(&paths.control_directory);
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn wrong_replacement_peer_helper() {
+        let Ok(control_socket) = std::env::var("TABBY_TEST_CONTROL_SOCKET") else {
+            return;
+        };
+        let request = ControlRequest {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            session_key: std::env::var("TABBY_TEST_CONTROL_SESSION_KEY")
+                .expect("session key supplied"),
+            socket_identity_hex: std::env::var("TABBY_TEST_CONTROL_SOCKET_IDENTITY")
+                .expect("socket identity supplied"),
+            launch_id: "ready-launch".to_string(),
+            request_id: "wrong-peer-handoff".to_string(),
+            operation: RuntimeControlOperation::PrepareHandoff {
+                replacement_binary_identity: std::env::var("TABBY_TEST_CONTROL_REPLACEMENT")
+                    .expect("replacement supplied"),
+            },
+        };
+        let reply = send_raw_control_request(Path::new(&control_socket), request);
+        assert!(!reply.accepted);
+        assert!(
+            reply
+                .error
+                .expect("peer identity error")
+                .contains("does not match the executing control peer")
+        );
+    }
+
+    #[test]
+    fn cooperative_handoff_releases_the_old_process_lease_before_a_new_owner_can_acquire_it() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-cooperative-handoff-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let parent_binary = std::env::current_exe()
+            .expect("parent test executable")
+            .canonicalize()
+            .expect("canonical parent test executable");
+        let owner_binary = state_base.join("handoff-owner-test-binary");
+        fs::copy(&parent_binary, &owner_binary).expect("copy independent owner executable");
+        fs::set_permissions(&owner_binary, fs::Permissions::from_mode(0o700))
+            .expect("make owner executable");
+        let ready_path = state_base.join("owner-ready");
+        let mut child = Command::new(&owner_binary)
+            .args([
+                "--exact",
+                "session_runtime::tests::cooperative_handoff_owner_helper",
+                "--nocapture",
+            ])
+            .env("TABBY_TEST_HANDOFF_SOCKET", &socket.socket_path)
+            .env("TABBY_TEST_HANDOFF_STATE_BASE", &state_base)
+            .env("TABBY_TEST_HANDOFF_READY", &ready_path)
+            .spawn()
+            .expect("start independent runtime owner");
+
+        let ready_deadline = Instant::now() + Duration::from_secs(2);
+        while !ready_path.exists() && Instant::now() < ready_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready_path.exists(), "old owner did not publish readiness");
+
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: &parent_binary,
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        assert!(LifetimeLease::is_held(&paths.lifetime_lease).expect("old lease held"));
+        assert!(
+            LifetimeLease::try_acquire(&paths.lifetime_lease)
+                .expect("attempt concurrent owner")
+                .is_none()
+        );
+
+        let owner = request_ready_owner(
+            &launch,
+            RuntimeControlOperation::PrepareHandoff {
+                replacement_binary_identity: parent_binary.to_string_lossy().into_owned(),
+            },
+        )
+        .expect("request cooperative handoff")
+        .expect("old owner accepted cooperative handoff");
+        assert_eq!(owner.launch_id, "handoff-owner");
+        assert!(child.wait().expect("reap old owner").success());
+
+        assert!(
+            LifetimeLease::try_acquire(&paths.lifetime_lease)
+                .expect("new owner acquires released lease")
+                .is_some()
+        );
+
+        let _ = fs::remove_file(&paths.control_socket);
+        let _ = fs::remove_dir_all(&paths.control_directory);
+        fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn cooperative_handoff_owner_helper() {
+        let Ok(socket_path) = std::env::var("TABBY_TEST_HANDOFF_SOCKET") else {
+            return;
+        };
+        let state_base = PathBuf::from(
+            std::env::var("TABBY_TEST_HANDOFF_STATE_BASE").expect("state base supplied"),
+        );
+        let ready_path =
+            PathBuf::from(std::env::var("TABBY_TEST_HANDOFF_READY").expect("ready path supplied"));
+        let socket = SessionSocket::resolve(socket_path).expect("resolve session socket");
+        let binary_path = std::env::current_exe()
+            .expect("owner executable")
+            .canonicalize()
+            .expect("canonical owner executable");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: &binary_path,
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        let lease = LifetimeLease::try_acquire(&paths.lifetime_lease)
+            .expect("acquire owner lease")
+            .expect("owner lease available");
+        let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)
+            .expect("bind owner control endpoint");
+        let (sender, receiver) = trigger_mailbox();
+        spawn_control_acceptor(
+            listener,
+            socket.session_key.clone(),
+            socket.identity_hex(),
+            "handoff-owner".to_string(),
+            binary_path.to_string_lossy().into_owned(),
+            sender,
+        );
+        write_metadata(
+            &paths.metadata,
+            &RuntimeMetadata {
+                schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+                state: RuntimeMetadataState::Ready,
+                pid: std::process::id(),
+                session_key: socket.session_key.clone(),
+                socket_path: socket.socket_path.to_string_lossy().into_owned(),
+                socket_identity_hex: socket.identity_hex(),
+                launch_id: "handoff-owner".to_string(),
+                tabby_version: env!("CARGO_PKG_VERSION").to_string(),
+                binary_path: binary_path.to_string_lossy().into_owned(),
+                last_evaluation_unix_ms: None,
+                last_failure: None,
+                next_periodic_unix_ms: None,
+            },
+        )
+        .expect("write owner metadata");
+        fs::write(ready_path, b"ready").expect("publish owner readiness");
+
+        let RuntimeControlEvent::Command(command) =
+            receiver.recv_until(None).expect("handoff command")
+        else {
+            panic!("runtime owner only exits for a handoff command");
+        };
+        assert!(matches!(
+            command.mutation,
+            RuntimeMutation::PrepareHandoff { .. }
+        ));
+        command.completion.send(Ok(())).expect("complete handoff");
+        if let Some(reply_written) = command.handoff_reply_written {
+            reply_written
+                .recv_timeout(CONTROL_IO_TIMEOUT)
+                .expect("handoff caller received its acknowledgement");
+        }
+        drop(lease);
+    }
+
+    fn send_raw_control_request(path: &Path, request: ControlRequest) -> ControlReply {
+        let mut stream = UnixStream::connect(path).expect("connect control endpoint");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("bound reply read");
+        serde_json::to_writer(&mut stream, &request).expect("write request");
+        stream.write_all(b"\n").expect("terminate request");
+        stream.flush().expect("flush request");
+        let mut line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .expect("read reply");
+        serde_json::from_str(&line).expect("decode reply")
     }
 }

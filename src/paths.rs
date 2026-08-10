@@ -1,8 +1,7 @@
 //! Runtime path resolution for plugin-owned Tabby state.
 //!
-//! `TABBY_LOCK_STORE_PATH` stays the explicit test/development override. When it
-//! is absent, runtime commands ask Herdr for Tabby's plugin-owned config
-//! directory instead of inventing a path under the user's home directory.
+//! Runtime state is owned by one Herdr Session. This module only resolves the
+//! plugin state directory and derives paths indexed by a validated session key.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -11,19 +10,11 @@ use std::process::{Command, ExitStatus};
 use std::string::FromUtf8Error;
 
 pub const PLUGIN_ID: &str = "yersonargotev.tabby";
-pub const LOCK_STORE_PATH_ENV: &str = "TABBY_LOCK_STORE_PATH";
 pub const HERDR_PLUGIN_STATE_DIR_ENV: &str = "HERDR_PLUGIN_STATE_DIR";
 pub const HERDR_PLUGIN_CONFIG_DIR_ENV: &str = "HERDR_PLUGIN_CONFIG_DIR";
 pub const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
 pub const HOME_ENV: &str = "HOME";
-const LOCK_STORE_FILE_NAME: &str = "locks.json";
 const SESSION_TAB_STATE_DIR_NAME: &str = "session-tab-state";
-
-pub fn lock_store_path_from_runtime() -> Result<PathBuf, StatePathError> {
-    resolve_lock_store_path_with(RuntimePathInputs::from_env(), || {
-        herdr_plugin_config_dir(PLUGIN_ID)
-    })
-}
 
 /// Returns the persisted tab-state path owned by one validated Herdr Session.
 ///
@@ -34,10 +25,7 @@ pub fn session_tab_state_path(
     state_base: impl AsRef<Path>,
     session_key: &str,
 ) -> Result<PathBuf, StatePathError> {
-    let state_base = absolute_path(
-        state_base.as_ref().to_path_buf(),
-        StatePathSource::SessionStateBase,
-    )?;
+    let state_base = absolute_session_state_base(state_base.as_ref().to_path_buf())?;
     if !is_session_storage_key(session_key) {
         return Err(StatePathError::InvalidSessionStorageKey(
             session_key.to_string(),
@@ -57,26 +45,11 @@ fn is_session_storage_key(key: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RuntimePathInputs {
-    pub lock_store_override: Option<OsString>,
-    pub plugin_state: PluginStateDirInputs,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginStateDirInputs {
     pub herdr_plugin_state_dir: Option<OsString>,
     pub herdr_plugin_config_dir: Option<OsString>,
     pub xdg_state_home: Option<OsString>,
     pub home: Option<OsString>,
-}
-
-impl RuntimePathInputs {
-    fn from_env() -> Self {
-        Self {
-            lock_store_override: std::env::var_os(LOCK_STORE_PATH_ENV),
-            plugin_state: PluginStateDirInputs::from_env(),
-        }
-    }
 }
 
 impl PluginStateDirInputs {
@@ -88,24 +61,6 @@ impl PluginStateDirInputs {
             home: std::env::var_os(HOME_ENV),
         }
     }
-}
-
-pub fn resolve_lock_store_path_with(
-    inputs: RuntimePathInputs,
-    discover_plugin_config_dir: impl FnOnce() -> Result<PathBuf, StatePathError>,
-) -> Result<PathBuf, StatePathError> {
-    if let Some(path) = inputs.lock_store_override {
-        return absolute_path(PathBuf::from(path), StatePathSource::Override);
-    }
-
-    if let Some((path, source)) = plugin_state_dir_from_inputs(&inputs.plugin_state) {
-        return state_file_in_dir(path, source.into());
-    }
-
-    state_file_in_dir(
-        discover_plugin_config_dir()?,
-        StatePathSource::HerdrPluginConfigDirCommand,
-    )
 }
 
 pub fn plugin_state_dir_from_inputs(
@@ -189,82 +144,31 @@ pub fn herdr_plugin_config_dir(plugin_id: &str) -> Result<PathBuf, StatePathErro
     let stdout = String::from_utf8(output.stdout)?;
     let path = stdout.trim();
     if path.is_empty() {
-        return Err(StatePathError::EmptyPath {
-            source: StatePathSource::HerdrPluginConfigDirCommand,
-        });
+        return Err(StatePathError::EmptyHerdrPluginConfigDir);
     }
 
     Ok(PathBuf::from(path))
 }
 
-fn state_file_in_dir(dir: PathBuf, source: StatePathSource) -> Result<PathBuf, StatePathError> {
-    let dir = absolute_path(dir, source)?;
-    Ok(dir.join(LOCK_STORE_FILE_NAME))
-}
-
-fn absolute_path(path: PathBuf, source: StatePathSource) -> Result<PathBuf, StatePathError> {
+fn absolute_session_state_base(path: PathBuf) -> Result<PathBuf, StatePathError> {
     if path.as_os_str().is_empty() {
-        return Err(StatePathError::EmptyPath { source });
+        return Err(StatePathError::EmptySessionStateBase);
     }
 
     if !path.is_absolute() {
-        return Err(StatePathError::RelativePath { source, path });
+        return Err(StatePathError::RelativeSessionStateBase(path));
     }
 
     Ok(path)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatePathSource {
-    Override,
-    HerdrPluginStateDir,
-    HerdrPluginConfigDir,
-    XdgStateHome,
-    Home,
-    HerdrPluginConfigDirCommand,
-    SessionStateBase,
-}
-
-impl From<PluginStateDirSource> for StatePathSource {
-    fn from(source: PluginStateDirSource) -> Self {
-        match source {
-            PluginStateDirSource::HerdrPluginStateDir => Self::HerdrPluginStateDir,
-            PluginStateDirSource::HerdrPluginConfigDir => Self::HerdrPluginConfigDir,
-            PluginStateDirSource::XdgStateHome => Self::XdgStateHome,
-            PluginStateDirSource::Home => Self::Home,
-        }
-    }
-}
-
-impl fmt::Display for StatePathSource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Override => LOCK_STORE_PATH_ENV,
-            Self::HerdrPluginStateDir => HERDR_PLUGIN_STATE_DIR_ENV,
-            Self::HerdrPluginConfigDir => HERDR_PLUGIN_CONFIG_DIR_ENV,
-            Self::XdgStateHome => XDG_STATE_HOME_ENV,
-            Self::Home => HOME_ENV,
-            Self::HerdrPluginConfigDirCommand => "herdr plugin config-dir",
-            Self::SessionStateBase => "session state base",
-        };
-        formatter.write_str(name)
-    }
-}
-
 #[derive(Debug)]
 pub enum StatePathError {
-    EmptyPath {
-        source: StatePathSource,
-    },
-    RelativePath {
-        source: StatePathSource,
-        path: PathBuf,
-    },
+    EmptySessionStateBase,
+    RelativeSessionStateBase(PathBuf),
+    EmptyHerdrPluginConfigDir,
     HerdrConfigDirIo(std::io::Error),
-    HerdrConfigDirFailed {
-        status: ExitStatus,
-        stderr: String,
-    },
+    HerdrConfigDirFailed { status: ExitStatus, stderr: String },
     HerdrConfigDirUtf8(FromUtf8Error),
     InvalidSessionStorageKey(String),
 }
@@ -272,13 +176,20 @@ pub enum StatePathError {
 impl fmt::Display for StatePathError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyPath { source } => {
-                write!(formatter, "{source} resolved an empty Tabby state path")
+            Self::EmptySessionStateBase => {
+                write!(
+                    formatter,
+                    "session state base resolved an empty Tabby state path"
+                )
             }
-            Self::RelativePath { source, path } => write!(
+            Self::RelativeSessionStateBase(path) => write!(
                 formatter,
-                "{source} resolved relative Tabby state path `{}`; refusing to write plugin state outside an explicit absolute path",
+                "session state base resolved relative Tabby state path `{}`; refusing to write plugin state outside an explicit absolute path",
                 path.display()
+            ),
+            Self::EmptyHerdrPluginConfigDir => write!(
+                formatter,
+                "`herdr plugin config-dir {PLUGIN_ID}` returned an empty Tabby state directory"
             ),
             Self::HerdrConfigDirIo(error) => write!(
                 formatter,
@@ -305,8 +216,9 @@ impl std::error::Error for StatePathError {
         match self {
             Self::HerdrConfigDirIo(error) => Some(error),
             Self::HerdrConfigDirUtf8(error) => Some(error),
-            Self::EmptyPath { .. }
-            | Self::RelativePath { .. }
+            Self::EmptySessionStateBase
+            | Self::RelativeSessionStateBase(_)
+            | Self::EmptyHerdrPluginConfigDir
             | Self::HerdrConfigDirFailed { .. }
             | Self::InvalidSessionStorageKey(_) => None,
         }
@@ -322,151 +234,6 @@ impl From<FromUtf8Error> for StatePathError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-
-    #[test]
-    fn override_path_wins_over_herdr_defaults() {
-        let path = resolve_lock_store_path_with(
-            RuntimePathInputs {
-                lock_store_override: Some(OsString::from("/tmp/tabby-test/override.json")),
-                plugin_state: PluginStateDirInputs {
-                    herdr_plugin_state_dir: Some(OsString::from("/tmp/tabby-test/state")),
-                    herdr_plugin_config_dir: Some(OsString::from("/tmp/tabby-test/config")),
-                    ..PluginStateDirInputs::default()
-                },
-            },
-            || panic!("override must not call Herdr config-dir"),
-        )
-        .expect("resolve override path");
-
-        assert_eq!(path, PathBuf::from("/tmp/tabby-test/override.json"));
-    }
-
-    #[test]
-    fn state_dir_env_wins_over_config_dir_env() {
-        let path = resolve_lock_store_path_with(
-            RuntimePathInputs {
-                lock_store_override: None,
-                plugin_state: PluginStateDirInputs {
-                    herdr_plugin_state_dir: Some(OsString::from("/tmp/tabby-test/state")),
-                    herdr_plugin_config_dir: Some(OsString::from("/tmp/tabby-test/config")),
-                    ..PluginStateDirInputs::default()
-                },
-            },
-            || panic!("env state dir must not call Herdr config-dir"),
-        )
-        .expect("resolve state dir path");
-
-        assert_eq!(path, PathBuf::from("/tmp/tabby-test/state/locks.json"));
-    }
-
-    #[test]
-    fn config_dir_env_is_used_when_state_dir_env_is_absent() {
-        let path = resolve_lock_store_path_with(
-            RuntimePathInputs {
-                lock_store_override: None,
-                plugin_state: PluginStateDirInputs {
-                    herdr_plugin_state_dir: None,
-                    herdr_plugin_config_dir: Some(OsString::from("/tmp/tabby-test/config")),
-                    ..PluginStateDirInputs::default()
-                },
-            },
-            || panic!("env config dir must not call Herdr config-dir"),
-        )
-        .expect("resolve config dir path");
-
-        assert_eq!(path, PathBuf::from("/tmp/tabby-test/config/locks.json"));
-    }
-
-    #[test]
-    fn herdr_config_dir_command_is_default_when_no_env_paths_exist() {
-        let path = resolve_lock_store_path_with(RuntimePathInputs::default(), || {
-            Ok(PathBuf::from("/tmp/tabby-test/herdr-config"))
-        })
-        .expect("resolve Herdr config-dir path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/tabby-test/herdr-config/locks.json")
-        );
-    }
-
-    #[test]
-    fn xdg_state_home_matches_herdr_plugin_state_layout_without_plugin_env() {
-        let path = resolve_lock_store_path_with(
-            RuntimePathInputs {
-                plugin_state: PluginStateDirInputs {
-                    xdg_state_home: Some(OsString::from("/tmp/tabby-test/xdg-state")),
-                    home: Some(OsString::from("/tmp/tabby-test/home")),
-                    ..PluginStateDirInputs::default()
-                },
-                ..RuntimePathInputs::default()
-            },
-            || panic!("XDG_STATE_HOME should avoid Herdr config-dir discovery"),
-        )
-        .expect("resolve XDG state path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/tabby-test/xdg-state/herdr/plugins/yersonargotev.tabby/locks.json")
-        );
-    }
-
-    #[test]
-    fn home_state_fallback_matches_herdr_plugin_state_layout_without_plugin_env() {
-        let path = resolve_lock_store_path_with(
-            RuntimePathInputs {
-                plugin_state: PluginStateDirInputs {
-                    home: Some(OsString::from("/tmp/tabby-test/home")),
-                    ..PluginStateDirInputs::default()
-                },
-                ..RuntimePathInputs::default()
-            },
-            || panic!("HOME state fallback should avoid Herdr config-dir discovery"),
-        )
-        .expect("resolve HOME state path");
-
-        assert_eq!(
-            path,
-            PathBuf::from(
-                "/tmp/tabby-test/home/.local/state/herdr/plugins/yersonargotev.tabby/locks.json"
-            )
-        );
-    }
-
-    #[test]
-    fn refuses_relative_override_path() {
-        let error = resolve_lock_store_path_with(
-            RuntimePathInputs {
-                lock_store_override: Some(OsString::from("relative/locks.json")),
-                ..RuntimePathInputs::default()
-            },
-            || panic!("relative override must fail before discovery"),
-        )
-        .expect_err("relative override should be rejected");
-
-        assert!(matches!(
-            error,
-            StatePathError::RelativePath {
-                source: StatePathSource::Override,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn refuses_empty_default_config_dir() {
-        let error =
-            resolve_lock_store_path_with(RuntimePathInputs::default(), || Ok(PathBuf::new()))
-                .expect_err("empty config dir should be rejected");
-
-        assert!(matches!(
-            error,
-            StatePathError::EmptyPath {
-                source: StatePathSource::HerdrPluginConfigDirCommand
-            }
-        ));
-    }
 
     #[test]
     fn derives_a_session_scoped_state_path_from_a_valid_session_key() {

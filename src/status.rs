@@ -1,7 +1,7 @@
 use crate::herdr_client::{HerdrApi, HerdrClient, HerdrError, UnixSocketTransport};
 use crate::labeler::LabelPolicy;
-use crate::locks::{SessionTabState, SessionTabStateError, SessionTabStateStore};
-use crate::paths::{PLUGIN_ID, StatePathError};
+use crate::locks::{SessionTabStateInspection, SessionTabStateStore};
+use crate::paths::PLUGIN_ID;
 use crate::session_runtime::{self, RuntimeInspection, SessionRuntimeError};
 use crate::startup::{self, SessionSocket, StartupError};
 use serde_json::Value;
@@ -45,7 +45,7 @@ pub struct StatusSnapshot {
     pub plugin: Option<PluginRegistration>,
     pub runtime: RuntimeInspection,
     pub focused_tab: Option<FocusedTabInspection>,
-    pub tab_state: SessionTabState,
+    pub tab_state: SessionTabStateInspection,
     pub recent_actions: Vec<RecentAction>,
 }
 
@@ -109,19 +109,7 @@ pub fn render_status(snapshot: &StatusSnapshot) -> String {
         None => lines.push("Focused tab: <none>".to_string()),
     }
 
-    lines.push(format!(
-        "State: {} Manually Locked Tabs, {} baselines, {} unresolved rename intents",
-        snapshot.tab_state.lock_count(),
-        snapshot.tab_state.baseline_count(),
-        snapshot.tab_state.unresolved_rename_intent_count(),
-    ));
-    for lock in snapshot.tab_state.locks() {
-        lines.push(format!(
-            "- {} label={}",
-            lock.tab_id(),
-            lock.label().unwrap_or("<unknown>")
-        ));
-    }
+    render_tab_state(&mut lines, &snapshot.tab_state);
 
     let failed_actions = snapshot
         .recent_actions
@@ -158,6 +146,25 @@ pub fn render_status(snapshot: &StatusSnapshot) -> String {
     }
 
     lines.join("\n")
+}
+
+fn render_tab_state(lines: &mut Vec<String>, tab_state: &SessionTabStateInspection) {
+    match tab_state {
+        SessionTabStateInspection::Missing => lines.push(
+            "State: 0 Manually Locked Tabs, 0 baselines, 0 unresolved rename intents (not yet persisted)"
+                .to_string(),
+        ),
+        SessionTabStateInspection::Valid {
+            manual_locks,
+            baselines,
+            unresolved_rename_intents,
+        } => lines.push(format!(
+            "State: {manual_locks} Manually Locked Tabs, {baselines} baselines, {unresolved_rename_intents} unresolved rename intents"
+        )),
+        SessionTabStateInspection::Fault { diagnostic } => lines.push(format!(
+            "State: unavailable (State Integrity Fault: {diagnostic})"
+        )),
+    }
 }
 
 fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
@@ -256,23 +263,12 @@ fn warnings_and_fixes(snapshot: &StatusSnapshot) -> (Vec<String>, BTreeSet<Strin
         }
     }
 
-    if let Some(tab) = &snapshot.focused_tab {
-        if tab.label.parse::<u64>().is_ok() && snapshot.tab_state.is_locked(&tab.tab_id) {
-            warnings.push(format!(
-                "focused tab {} has numeric label {} and is manually locked",
-                tab.tab_id, tab.label
-            ));
-            fixes.insert("run `tabby unlock-focused` to clear its lock and baseline".to_string());
-        }
-        if let Some(baseline) = snapshot.tab_state.last_plugin_label(&tab.tab_id)
-            && baseline != tab.label
-        {
-            warnings.push(format!(
-                "baseline for {} is {baseline} but the visible label is {}; possible stale tab_id reuse",
-                tab.tab_id, tab.label
-            ));
-            fixes.insert("run `tabby unlock-focused` to clear its lock and baseline".to_string());
-        }
+    if let SessionTabStateInspection::Fault { diagnostic } = &snapshot.tab_state {
+        warnings.push(format!("State Integrity Fault: {diagnostic}"));
+        fixes.insert(
+            "run `tabby repair-state --discard` to preserve evidence and discard invalid Session-Scoped Tab State"
+                .to_string(),
+        );
     }
 
     for action in &snapshot.recent_actions {
@@ -339,7 +335,7 @@ fn collect_from_env() -> Result<StatusSnapshot, StatusError> {
     let runtime = session_runtime::inspect_runtime_from_env()?;
     let focused_tab = inspect_focused_tab(&socket)?;
     let state_base = startup::state_base_from_runtime()?;
-    let tab_state = SessionTabStateStore::open(&state_base, &socket)?.read(Clone::clone)?;
+    let tab_state = SessionTabStateStore::inspect_read_only(&state_base, &socket);
 
     Ok(StatusSnapshot {
         session_name: session_name_from_socket(&socket.socket_path),
@@ -528,8 +524,6 @@ fn parse_recent_actions(value: &Value) -> Vec<RecentAction> {
 pub enum StatusError {
     CurrentExe(io::Error),
     Startup(StartupError),
-    StatePath(StatePathError),
-    SessionTabState(SessionTabStateError),
     Herdr(HerdrError),
     SessionRuntime(SessionRuntimeError),
     HerdrCommandIo {
@@ -559,15 +553,6 @@ impl fmt::Display for StatusError {
                 formatter,
                 "failed to resolve Herdr Session runtime inputs: {error}"
             ),
-            Self::StatePath(error) => {
-                write!(formatter, "failed to resolve Tabby state path: {error}")
-            }
-            Self::SessionTabState(error) => {
-                write!(
-                    formatter,
-                    "failed to inspect session-scoped tab state: {error}"
-                )
-            }
             Self::Herdr(error) => {
                 write!(formatter, "failed to inspect focused Herdr state: {error}")
             }
@@ -600,8 +585,6 @@ impl std::error::Error for StatusError {
         match self {
             Self::CurrentExe(error) => Some(error),
             Self::Startup(error) => Some(error),
-            Self::StatePath(error) => Some(error),
-            Self::SessionTabState(error) => Some(error),
             Self::Herdr(error) => Some(error),
             Self::SessionRuntime(error) => Some(error),
             Self::HerdrCommandIo { source, .. } => Some(source),
@@ -614,18 +597,6 @@ impl std::error::Error for StatusError {
 impl From<StartupError> for StatusError {
     fn from(error: StartupError) -> Self {
         Self::Startup(error)
-    }
-}
-
-impl From<StatePathError> for StatusError {
-    fn from(error: StatePathError) -> Self {
-        Self::StatePath(error)
-    }
-}
-
-impl From<SessionTabStateError> for StatusError {
-    fn from(error: SessionTabStateError) -> Self {
-        Self::SessionTabState(error)
     }
 }
 
@@ -644,9 +615,11 @@ impl From<SessionRuntimeError> for StatusError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::session_tab_state_path;
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static NEXT_STATUS_STATE_ID: AtomicU64 = AtomicU64::new(0);
+    static NEXT_STATUS_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn reports_required_healthy_status_sections() {
@@ -687,10 +660,9 @@ mod tests {
                 cwd: Some("/repo".to_string()),
                 candidate_label: Some("codex".to_string()),
             }),
-            tab_state: test_tab_state(|state| {
-                state.lock_tab("w1:t1", Some("1".to_string()));
-                state.record_plugin_label("w1:t1", "codex");
-            }),
+            tab_state: SessionTabStateInspection::Fault {
+                diagnostic: "invalid JSON in state.json".to_string(),
+            },
             recent_actions: vec![RecentAction {
                 command: "../../bin/tabby refresh".to_string(),
                 status: "failed".to_string(),
@@ -704,11 +676,14 @@ mod tests {
 
         assert!(output.contains("plugin yersonargotev.tabby is not registered"));
         assert!(output.contains("Session Runtime is Faulted: control endpoint is absent"));
-        assert!(output.contains("focused tab w1:t1 has numeric label 1 and is manually locked"));
-        assert!(output.contains("baseline for w1:t1 is codex but the visible label is 1"));
+        assert!(
+            output
+                .contains("State: unavailable (State Integrity Fault: invalid JSON in state.json)")
+        );
+        assert!(output.contains("State Integrity Fault: invalid JSON in state.json"));
         assert!(output.contains("recent plugin action failed"));
         assert!(output.contains("recent plugin action reported SkippedLocked"));
-        assert!(output.contains("tabby unlock-focused"));
+        assert!(output.contains("tabby repair-state --discard"));
     }
 
     #[test]
@@ -736,6 +711,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn missing_state_path_remains_nonexistent_during_read_only_status_inspection() {
+        let state_base = test_state_base();
+        let session = SessionSocket::resolve("/tmp/tabby-status-missing.sock").expect("session");
+
+        let inspection = SessionTabStateStore::inspect_read_only(&state_base, &session);
+
+        assert_eq!(inspection, SessionTabStateInspection::Missing);
+        assert!(
+            !state_base.exists(),
+            "a read-only status inspection must not create the state directory"
+        );
+    }
+
+    #[test]
+    fn invalid_state_bytes_render_an_actionable_state_integrity_fault() {
+        let state_base = test_state_base();
+        let session = SessionSocket::resolve("/tmp/tabby-status-invalid.sock").expect("session");
+        let path = session_tab_state_path(&state_base, &session.session_key).expect("state path");
+        fs::create_dir_all(path.parent().expect("state parent")).expect("state parent");
+        fs::write(&path, b"not JSON").expect("invalid state bytes");
+
+        let inspection = SessionTabStateStore::inspect_read_only(&state_base, &session);
+        let mut snapshot = healthy_snapshot();
+        snapshot.tab_state = inspection;
+        let output = render_status(&snapshot);
+
+        assert!(output.contains("State: unavailable (State Integrity Fault:"));
+        assert!(output.contains("invalid JSON"));
+        assert!(output.contains("tabby repair-state --discard"));
+
+        fs::remove_dir_all(&state_base).expect("remove test state");
+    }
+
     fn healthy_snapshot() -> StatusSnapshot {
         StatusSnapshot {
             session_name: Some("work".to_string()),
@@ -756,7 +765,11 @@ mod tests {
                 cwd: Some("/repo".to_string()),
                 candidate_label: Some("codex".to_string()),
             }),
-            tab_state: test_tab_state(|_| {}),
+            tab_state: SessionTabStateInspection::Valid {
+                manual_locks: 0,
+                baselines: 0,
+                unresolved_rename_intents: 0,
+            },
             recent_actions: vec![RecentAction {
                 command: "../../bin/tabby ensure-started".to_string(),
                 status: "succeeded".to_string(),
@@ -779,19 +792,8 @@ mod tests {
         }
     }
 
-    fn test_tab_state(mutate: impl FnOnce(&mut SessionTabState)) -> SessionTabState {
-        let socket = SessionSocket::resolve("/tmp/tabby-status-test.sock").expect("socket");
-        let id = NEXT_STATUS_STATE_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "tabby-status-test-{}-{id}.json",
-            std::process::id(),
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = SessionTabStateStore::at_path(&path, &socket).expect("state store");
-        store.mutate(mutate).expect("mutate state");
-        let state = store.read(Clone::clone).expect("read state");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("json.lock"));
-        state
+    fn test_state_base() -> PathBuf {
+        let id = NEXT_STATUS_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("tabby-status-test-{}-{id}", std::process::id()))
     }
 }

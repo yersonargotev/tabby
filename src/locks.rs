@@ -6,7 +6,6 @@
 //! lifecycle and discards stale state for that ID. Otherwise locks remain until an
 //! explicit unlock operation removes them.
 
-use crate::herdr_client::{HerdrApi, HerdrError};
 use crate::labeler::LabelCandidate;
 use crate::paths::{StatePathError, session_tab_state_path};
 use crate::startup::SessionSocket;
@@ -82,14 +81,14 @@ impl ManualLock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LockStore {
+struct SessionTabStateData {
     version: u8,
     locks: BTreeMap<String, ManualLock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     last_plugin_labels: BTreeMap<String, String>,
 }
 
-impl Default for LockStore {
+impl Default for SessionTabStateData {
     fn default() -> Self {
         Self {
             version: 1,
@@ -99,38 +98,7 @@ impl Default for LockStore {
     }
 }
 
-impl LockStore {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, LockStoreError> {
-        match fs::read_to_string(path.as_ref()) {
-            Ok(contents) => {
-                let store: Self = serde_json::from_str(&contents)?;
-                if store.version == 1 {
-                    Ok(store)
-                } else {
-                    Err(LockStoreError::UnsupportedVersion(store.version))
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), LockStoreError> {
-        let path = path.as_ref();
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
-
-        let contents = serde_json::to_string_pretty(self)?;
-        let temp_path = temp_path_for(path);
-        fs::write(&temp_path, contents)?;
-        fs::rename(&temp_path, path)?;
-        Ok(())
-    }
-
+impl SessionTabStateData {
     pub fn lock_tab(&mut self, tab_id: impl Into<String>, label: Option<String>) {
         let tab_id = tab_id.into();
         let lock = ManualLock::new(tab_id.clone(), label);
@@ -157,19 +125,6 @@ impl LockStore {
         }
         self.last_plugin_labels.insert(tab_id, label);
         true
-    }
-
-    pub fn discard_tab_state_for_default_label(
-        &mut self,
-        tab_id: &str,
-        current_label: &str,
-        tab_number: Option<u64>,
-    ) -> bool {
-        if !is_default_tab_label(current_label, tab_number) {
-            return false;
-        }
-
-        self.discard_tab_state(tab_id)
     }
 
     pub(crate) fn discard_tab_state(&mut self, tab_id: &str) -> bool {
@@ -205,10 +160,6 @@ impl LockStore {
         self.locks.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.locks.is_empty()
-    }
-
     pub fn baseline_count(&self) -> usize {
         self.last_plugin_labels.len()
     }
@@ -221,6 +172,36 @@ pub struct AutomaticRenameIntent {
     tab_id: String,
     previous_label: String,
     intended_baseline: String,
+    lifecycle: TabLifecycleEvidence,
+}
+
+/// Snapshot evidence that makes a `tab_id` meaningful for one tab lifecycle.
+///
+/// Herdr may reuse a tab id after workspace churn. An unresolved rename intent
+/// therefore cannot be reconciled against an observation unless this evidence
+/// still matches the tab and pane from which the intent was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabLifecycleEvidence {
+    workspace_id: String,
+    tab_number: Option<u64>,
+    pane_id: String,
+    pane_revision: Option<u64>,
+}
+
+impl TabLifecycleEvidence {
+    pub fn new(
+        workspace_id: impl Into<String>,
+        tab_number: Option<u64>,
+        pane_id: impl Into<String>,
+        pane_revision: Option<u64>,
+    ) -> Self {
+        Self {
+            workspace_id: workspace_id.into(),
+            tab_number,
+            pane_id: pane_id.into(),
+            pane_revision,
+        }
+    }
 }
 
 impl AutomaticRenameIntent {
@@ -228,11 +209,13 @@ impl AutomaticRenameIntent {
         tab_id: impl Into<String>,
         previous_label: impl Into<String>,
         intended_baseline: impl Into<String>,
+        lifecycle: TabLifecycleEvidence,
     ) -> Self {
         Self {
             tab_id: tab_id.into(),
             previous_label: previous_label.into(),
             intended_baseline: intended_baseline.into(),
+            lifecycle,
         }
     }
 
@@ -247,6 +230,10 @@ impl AutomaticRenameIntent {
     pub fn intended_baseline(&self) -> &str {
         &self.intended_baseline
     }
+
+    pub fn lifecycle(&self) -> &TabLifecycleEvidence {
+        &self.lifecycle
+    }
 }
 
 /// The only persistent state that a Session Runtime may use for one Herdr
@@ -257,7 +244,7 @@ pub struct SessionTabState {
     schema_version: u8,
     session_key: String,
     socket_identity_hex: String,
-    locks: LockStore,
+    locks: SessionTabStateData,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     rename_intents: BTreeMap<String, AutomaticRenameIntent>,
 }
@@ -270,7 +257,7 @@ impl SessionTabState {
             schema_version: Self::SCHEMA_VERSION,
             session_key: session.session_key.clone(),
             socket_identity_hex: session.identity_hex(),
-            locks: LockStore::default(),
+            locks: SessionTabStateData::default(),
             rename_intents: BTreeMap::new(),
         }
     }
@@ -371,11 +358,19 @@ impl SessionTabState {
         &mut self,
         tab_id: &str,
         visible_label: &str,
-        tab_number: Option<u64>,
+        lifecycle: &TabLifecycleEvidence,
     ) -> RenameIntentReconciliation {
         let Some(intent) = self.rename_intents.get(tab_id).cloned() else {
             return RenameIntentReconciliation::NoIntent;
         };
+
+        if intent.lifecycle != *lifecycle
+            || is_default_tab_label(visible_label, lifecycle.tab_number)
+        {
+            self.rename_intents.remove(tab_id);
+            self.locks.discard_tab_state(tab_id);
+            return RenameIntentReconciliation::ReusedTab;
+        }
 
         if visible_label == intent.intended_baseline {
             self.locks
@@ -389,12 +384,6 @@ impl SessionTabState {
         if visible_label == intent.previous_label {
             self.rename_intents.remove(tab_id);
             return RenameIntentReconciliation::SourceUnchanged;
-        }
-
-        if is_default_tab_label(visible_label, tab_number) {
-            self.rename_intents.remove(tab_id);
-            self.locks.discard_tab_state(tab_id);
-            return RenameIntentReconciliation::ReusedTab;
         }
 
         self.rename_intents.remove(tab_id);
@@ -426,7 +415,84 @@ pub struct SessionTabStateStore {
     session: SessionSocket,
 }
 
+/// A non-mutating diagnostic projection of one session's retained state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTabStateInspection {
+    Missing,
+    Valid {
+        manual_locks: usize,
+        baselines: usize,
+        unresolved_rename_intents: usize,
+    },
+    Fault {
+        diagnostic: String,
+    },
+}
+
 impl SessionTabStateStore {
+    /// Inspects state without opening a lock, creating a directory, or changing
+    /// permissions. Runtime Status uses this seam to remain strictly read-only.
+    pub fn inspect_read_only(
+        state_base: impl AsRef<Path>,
+        session: &SessionSocket,
+    ) -> SessionTabStateInspection {
+        let state_base = state_base.as_ref();
+        let path = match session_tab_state_path(state_base, &session.session_key) {
+            Ok(path) => path,
+            Err(error) => {
+                return SessionTabStateInspection::Fault {
+                    diagnostic: error.to_string(),
+                };
+            }
+        };
+        let legacy_path = state_base.join("locks.json");
+        match fs::symlink_metadata(&legacy_path) {
+            Ok(_) => {
+                return SessionTabStateInspection::Fault {
+                    diagnostic: format!(
+                        "obsolete identity-less lock evidence at `{}` requires `tabby repair-state --discard`",
+                        legacy_path.display()
+                    ),
+                };
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return SessionTabStateInspection::Fault {
+                    diagnostic: format!("cannot inspect `{}`: {error}", legacy_path.display()),
+                };
+            }
+        }
+        let contents = match read_session_state_bytes(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return SessionTabStateInspection::Missing;
+            }
+            Err(error) => {
+                return SessionTabStateInspection::Fault {
+                    diagnostic: format!("cannot read `{}`: {error}", path.display()),
+                };
+            }
+        };
+        let state = match serde_json::from_slice::<SessionTabState>(&contents) {
+            Ok(state) => state,
+            Err(error) => {
+                return SessionTabStateInspection::Fault {
+                    diagnostic: format!("invalid JSON in `{}`: {error}", path.display()),
+                };
+            }
+        };
+        if let Err(error) = state.validate_identity(session) {
+            return SessionTabStateInspection::Fault {
+                diagnostic: error.to_string(),
+            };
+        }
+        SessionTabStateInspection::Valid {
+            manual_locks: state.lock_count(),
+            baselines: state.baseline_count(),
+            unresolved_rename_intents: state.unresolved_rename_intent_count(),
+        }
+    }
+
     pub fn open(
         state_base: impl AsRef<Path>,
         session: &SessionSocket,
@@ -486,8 +552,10 @@ impl SessionTabStateStore {
         tab_id: impl Into<String>,
         previous_label: impl Into<String>,
         intended_baseline: impl Into<String>,
+        lifecycle: TabLifecycleEvidence,
     ) -> Result<(), SessionTabStateError> {
-        let intent = AutomaticRenameIntent::new(tab_id, previous_label, intended_baseline);
+        let intent =
+            AutomaticRenameIntent::new(tab_id, previous_label, intended_baseline, lifecycle);
         self.mutate(|state| state.record_automatic_rename_intent(intent))?
     }
 
@@ -495,10 +563,10 @@ impl SessionTabStateStore {
         &self,
         tab_id: &str,
         visible_label: &str,
-        tab_number: Option<u64>,
+        lifecycle: &TabLifecycleEvidence,
     ) -> Result<RenameIntentReconciliation, SessionTabStateError> {
         self.mutate(|state| {
-            state.reconcile_automatic_rename_intent(tab_id, visible_label, tab_number)
+            state.reconcile_automatic_rename_intent(tab_id, visible_label, lifecycle)
         })
     }
 
@@ -528,24 +596,33 @@ impl SessionTabStateStore {
         _confirmation: RepairConfirmation,
     ) -> Result<RepairDiscardOutcome, SessionTabStateError> {
         let _lock = SessionStateFileLock::acquire(&self.path, FileLockMode::Exclusive)?;
-        let contents = match read_session_state_bytes(&self.path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(RepairDiscardOutcome::NothingToRepair);
-            }
+        let legacy_path = legacy_lock_store_path(&self.path)?;
+        let legacy_evidence_exists = match fs::symlink_metadata(&legacy_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
         };
-
-        if let Ok(state) = serde_json::from_slice::<SessionTabState>(&contents) {
-            match state.validate_identity(&self.session) {
-                Ok(()) => return Ok(RepairDiscardOutcome::NothingToRepair),
-                Err(error @ SessionTabStateError::IdentityMismatch { .. }) => return Err(error),
-                Err(SessionTabStateError::UnsupportedVersion(_)) => {}
-                Err(error) => return Err(error),
-            }
+        let contents = match read_session_state_bytes(&self.path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let state_is_valid = contents.as_ref().is_some_and(|contents| {
+            serde_json::from_slice::<SessionTabState>(contents)
+                .is_ok_and(|state| state.validate_identity(&self.session).is_ok())
+        });
+        if (contents.is_none() || state_is_valid) && !legacy_evidence_exists {
+            return Ok(RepairDiscardOutcome::NothingToRepair);
         }
 
-        let archived_evidence_path = archive_session_state_evidence(&self.path)?;
+        let archived_evidence_path = if contents.is_some() {
+            archive_session_state_evidence(&self.path)?
+        } else {
+            archive_session_state_evidence(&legacy_path)?
+        };
+        if legacy_evidence_exists && contents.is_some() {
+            archive_session_state_evidence(&legacy_path)?;
+        }
         write_session_state_atomically(&self.path, &SessionTabState::empty_for(&self.session))?;
         Ok(RepairDiscardOutcome::Repaired {
             archived_evidence_path,
@@ -565,6 +642,15 @@ impl SessionTabStateStore {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn legacy_lock_store_path(state_path: &Path) -> Result<PathBuf, SessionTabStateError> {
+    let state_base = state_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| SessionTabStateError::RelativePath(state_path.to_path_buf()))?;
+    Ok(state_base.join("locks.json"))
 }
 
 /// Proof that a user explicitly authorized discarding invalid persisted state.
@@ -806,151 +892,9 @@ fn archive_session_state_evidence(path: &Path) -> Result<PathBuf, SessionTabStat
     Ok(archive_path)
 }
 
-pub fn lock_tab_at_path(
-    path: impl AsRef<Path>,
-    tab_id: &str,
-    label: Option<String>,
-) -> Result<(), LockStoreError> {
-    mutate_store_at_path(path, |store| store.lock_tab(tab_id.to_string(), label))
-}
-
-pub fn unlock_tab_at_path(path: impl AsRef<Path>, tab_id: &str) -> Result<bool, LockStoreError> {
-    mutate_store_at_path(path, |store| store.unlock_tab(tab_id))
-}
-
-pub fn unlock_all_at_path(path: impl AsRef<Path>) -> Result<(), LockStoreError> {
-    mutate_store_at_path(path, LockStore::unlock_all)
-}
-
-fn mutate_store_at_path<R>(
-    path: impl AsRef<Path>,
-    mutate: impl FnOnce(&mut LockStore) -> R,
-) -> Result<R, LockStoreError> {
-    let path = path.as_ref();
-    let mut store = LockStore::load(path)?;
-    let result = mutate(&mut store);
-    store.save(path)?;
-    Ok(result)
-}
-
-pub fn unlock_focused_tab_at_path<C>(
-    path: impl AsRef<Path>,
-    herdr: &mut C,
-) -> Result<UnlockFocusedOutcome, UnlockFocusedError>
-where
-    C: HerdrApi,
-{
-    let focused_tab_id = herdr
-        .observe_focused_tab()?
-        .map(|observation| observation.tab.tab_id);
-
-    let Some(tab_id) = focused_tab_id else {
-        return Ok(UnlockFocusedOutcome::NoFocusedTab);
-    };
-
-    if unlock_tab_at_path(path, &tab_id)? {
-        Ok(UnlockFocusedOutcome::Unlocked { tab_id })
-    } else {
-        Ok(UnlockFocusedOutcome::NotLocked { tab_id })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnlockFocusedOutcome {
-    NoFocusedTab,
-    Unlocked { tab_id: String },
-    NotLocked { tab_id: String },
-}
-
-#[derive(Debug)]
-pub enum LockStoreError {
-    Io(io::Error),
-    Json(serde_json::Error),
-    UnsupportedVersion(u8),
-}
-
-impl fmt::Display for LockStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(formatter, "lock store I/O failed: {error}"),
-            Self::Json(error) => write!(formatter, "lock store JSON parsing failed: {error}"),
-            Self::UnsupportedVersion(version) => {
-                write!(formatter, "unsupported lock store version `{version}`")
-            }
-        }
-    }
-}
-
-impl std::error::Error for LockStoreError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            Self::Json(error) => Some(error),
-            Self::UnsupportedVersion(_) => None,
-        }
-    }
-}
-
-impl From<io::Error> for LockStoreError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<serde_json::Error> for LockStoreError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(error)
-    }
-}
-
-#[derive(Debug)]
-pub enum UnlockFocusedError {
-    Herdr(HerdrError),
-    LockStore(LockStoreError),
-}
-
-impl fmt::Display for UnlockFocusedError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Herdr(error) => write!(formatter, "failed to find focused Herdr tab: {error}"),
-            Self::LockStore(error) => write!(formatter, "failed to unlock focused tab: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for UnlockFocusedError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Herdr(error) => Some(error),
-            Self::LockStore(error) => Some(error),
-        }
-    }
-}
-
-impl From<HerdrError> for UnlockFocusedError {
-    fn from(error: HerdrError) -> Self {
-        Self::Herdr(error)
-    }
-}
-
-impl From<LockStoreError> for UnlockFocusedError {
-    fn from(error: LockStoreError) -> Self {
-        Self::LockStore(error)
-    }
-}
-
-fn temp_path_for(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("locks.json");
-    path.with_file_name(format!(".{file_name}.tmp"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr_client::{PaneInfo, PaneProcessInfo, RenameTabResult, TabInfo};
     use crate::labeler::LabelCandidate;
     use crate::startup::SessionSocket;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -959,6 +903,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_lifecycle() -> TabLifecycleEvidence {
+        TabLifecycleEvidence::new("w1", Some(1), "w1:p1", Some(7))
+    }
 
     #[test]
     fn detects_manual_lock_when_label_differs_from_plugin_and_candidate() {
@@ -1010,177 +958,6 @@ mod tests {
     }
 
     #[test]
-    fn default_numeric_label_discards_state_for_reused_tab_id() {
-        let mut store = LockStore::default();
-        store.record_plugin_label("w2:t1", "nvim");
-        store.lock_tab("w2:t1", Some("custom".to_string()));
-
-        let changed = store.discard_tab_state_for_default_label("w2:t1", "1", Some(1));
-
-        assert!(changed);
-        assert!(!store.is_locked("w2:t1"));
-        assert_eq!(store.last_plugin_label("w2:t1"), None);
-    }
-
-    #[test]
-    fn non_default_numeric_label_preserves_manual_state() {
-        let mut store = LockStore::default();
-        store.record_plugin_label("w2:t2", "nvim");
-        store.lock_tab("w2:t2", Some("1".to_string()));
-
-        let changed = store.discard_tab_state_for_default_label("w2:t2", "1", Some(2));
-
-        assert!(!changed);
-        assert!(store.is_locked("w2:t2"));
-        assert_eq!(store.last_plugin_label("w2:t2"), Some("nvim"));
-    }
-
-    #[test]
-    fn lock_survives_store_reload() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("state").join("locks.json");
-
-        let mut store = LockStore::default();
-        store.lock_tab("w1:t1", Some("custom".to_string()));
-        store.save(&path).expect("save lock store");
-
-        let reloaded = LockStore::load(&path).expect("reload lock store");
-
-        assert!(reloaded.is_locked("w1:t1"));
-        assert_eq!(reloaded.len(), 1);
-        assert_eq!(
-            reloaded.locks().next().and_then(ManualLock::label),
-            Some("custom")
-        );
-    }
-
-    #[test]
-    fn unlock_tab_removes_only_that_lock() {
-        let mut store = LockStore::default();
-        store.record_plugin_label("w1:t1", "editor");
-        store.record_plugin_label("w1:t2", "server");
-        store.lock_tab("w1:t1", Some("custom one".to_string()));
-        store.lock_tab("w1:t2", Some("custom two".to_string()));
-
-        assert!(store.unlock_tab("w1:t1"));
-
-        assert!(!store.is_locked("w1:t1"));
-        assert_eq!(store.last_plugin_label("w1:t1"), None);
-        assert!(store.is_locked("w1:t2"));
-        assert_eq!(store.last_plugin_label("w1:t2"), Some("server"));
-    }
-
-    #[test]
-    fn unlock_focused_tab_removes_only_focused_lock_from_path() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("locks.json");
-        let mut store = LockStore::default();
-        store.lock_tab("w1:t1", Some("editor".to_string()));
-        store.lock_tab("w1:t2", Some("server".to_string()));
-        store.save(&path).expect("save lock store");
-        let mut herdr = FakeHerdr {
-            tabs: vec![tab("w1:t1", false), tab("w1:t2", true)],
-        };
-
-        let outcome = unlock_focused_tab_at_path(&path, &mut herdr).expect("unlock focused tab");
-        let reloaded = LockStore::load(&path).expect("reload lock store");
-
-        assert_eq!(
-            outcome,
-            UnlockFocusedOutcome::Unlocked {
-                tab_id: "w1:t2".to_string()
-            }
-        );
-        assert!(reloaded.is_locked("w1:t1"));
-        assert!(!reloaded.is_locked("w1:t2"));
-    }
-
-    #[test]
-    fn unlock_tab_at_path_removes_only_that_lock() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("locks.json");
-        lock_tab_at_path(&path, "w1:t1", Some("editor".to_string())).expect("lock tab one");
-        lock_tab_at_path(&path, "w1:t2", Some("server".to_string())).expect("lock tab two");
-
-        assert!(unlock_tab_at_path(&path, "w1:t1").expect("unlock tab"));
-        let reloaded = LockStore::load(&path).expect("reload lock store");
-
-        assert!(!reloaded.is_locked("w1:t1"));
-        assert!(reloaded.is_locked("w1:t2"));
-    }
-
-    #[test]
-    fn unlock_focused_reports_when_focused_tab_was_not_locked() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("locks.json");
-        lock_tab_at_path(&path, "w1:t1", Some("editor".to_string())).expect("lock tab one");
-        let mut herdr = FakeHerdr {
-            tabs: vec![tab("w1:t2", true)],
-        };
-
-        let outcome = unlock_focused_tab_at_path(&path, &mut herdr).expect("unlock focused tab");
-        let reloaded = LockStore::load(&path).expect("reload lock store");
-
-        assert_eq!(
-            outcome,
-            UnlockFocusedOutcome::NotLocked {
-                tab_id: "w1:t2".to_string()
-            }
-        );
-        assert!(reloaded.is_locked("w1:t1"));
-    }
-
-    #[test]
-    fn unlock_focused_reports_when_no_tab_is_focused() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("locks.json");
-        lock_tab_at_path(&path, "w1:t1", Some("editor".to_string())).expect("lock tab one");
-        let mut herdr = FakeHerdr {
-            tabs: vec![tab("w1:t1", false)],
-        };
-
-        let outcome = unlock_focused_tab_at_path(&path, &mut herdr).expect("unlock focused tab");
-        let reloaded = LockStore::load(&path).expect("reload lock store");
-
-        assert_eq!(outcome, UnlockFocusedOutcome::NoFocusedTab);
-        assert!(reloaded.is_locked("w1:t1"));
-    }
-
-    #[test]
-    fn unlock_all_clears_all_locks() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("locks.json");
-        let mut store = LockStore::default();
-        store.record_plugin_label("w1:t1", "editor");
-        store.record_plugin_label("w1:t2", "server");
-        store.record_plugin_label("w1:t3", "codex");
-        store.lock_tab("w1:t1", Some("custom one".to_string()));
-        store.lock_tab("w1:t2", Some("custom two".to_string()));
-        store.save(&path).expect("save lock store");
-
-        unlock_all_at_path(&path).expect("unlock all");
-        let reloaded = LockStore::load(&path).expect("reload lock store");
-
-        assert!(reloaded.is_empty());
-        assert_eq!(reloaded.last_plugin_label("w1:t1"), None);
-        assert_eq!(reloaded.last_plugin_label("w1:t2"), None);
-        assert_eq!(reloaded.last_plugin_label("w1:t3"), Some("codex"));
-    }
-
-    #[test]
-    fn missing_store_loads_empty_and_saves_only_to_injected_temp_path() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("nested").join("locks.json");
-
-        let store = LockStore::load(&path).expect("missing store loads empty");
-        assert!(store.is_empty());
-
-        unlock_all_at_path(&path).expect("save empty store to injected path");
-        assert!(path.exists());
-        assert!(path.starts_with(temp_dir.path()));
-    }
-
-    #[test]
     fn session_state_isolated_by_lossless_session_identity() {
         let temp_dir = TestTempDir::new();
         let first = SessionSocket::resolve("/tmp/tabby-state-first.sock").expect("first session");
@@ -1214,7 +991,8 @@ mod tests {
         let first = SessionSocket::resolve("/tmp/tabby-state-first.sock").expect("first session");
         let second =
             SessionSocket::resolve("/tmp/tabby-state-second.sock").expect("second session");
-        let path = temp_dir.path().join("injected-state.json");
+        let path = session_tab_state_path(temp_dir.path(), &second.session_key)
+            .expect("second session path");
         let first_store = SessionTabStateStore::at_path(&path, &first).expect("open first state");
         first_store
             .mutate(|state| state.lock_tab("w1:t1", Some("custom".to_string())))
@@ -1239,7 +1017,7 @@ mod tests {
         let store = SessionTabStateStore::open(temp_dir.path(), &session).expect("open state");
 
         store
-            .record_automatic_rename_intent("w1:t1", "shell", "nvim")
+            .record_automatic_rename_intent("w1:t1", "shell", "nvim", test_lifecycle())
             .expect("persist intent before rename");
         assert_eq!(
             store
@@ -1249,7 +1027,7 @@ mod tests {
         );
 
         let outcome = store
-            .reconcile_automatic_rename_intent("w1:t1", "nvim", Some(1))
+            .reconcile_automatic_rename_intent("w1:t1", "nvim", &test_lifecycle())
             .expect("reconcile confirmed rename");
 
         assert_eq!(
@@ -1273,16 +1051,82 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_discards_an_intent_from_a_reused_tab_lifecycle() {
+        let temp_dir = TestTempDir::new();
+        let session = SessionSocket::resolve("/tmp/tabby-state.sock").expect("session");
+        let store = SessionTabStateStore::open(temp_dir.path(), &session).expect("open state");
+        store
+            .record_automatic_rename_intent("w1:t1", "shell", "nvim", test_lifecycle())
+            .expect("persist intent");
+
+        let outcome = store
+            .reconcile_automatic_rename_intent(
+                "w1:t1",
+                "shell",
+                &TabLifecycleEvidence::new("w2", Some(1), "w2:p1", Some(8)),
+            )
+            .expect("reconcile reused lifecycle");
+
+        assert_eq!(outcome, RenameIntentReconciliation::ReusedTab);
+        assert_eq!(
+            store
+                .read(SessionTabState::unresolved_rename_intent_count)
+                .expect("read state"),
+            0
+        );
+    }
+
+    #[test]
+    fn read_only_inspection_does_not_create_the_missing_state_directory() {
+        let temp_dir = TestTempDir::new();
+        let session = SessionSocket::resolve("/tmp/tabby-state.sock").expect("session");
+        let state_directory = temp_dir.path().join("session-tab-state");
+
+        let inspection = SessionTabStateStore::inspect_read_only(temp_dir.path(), &session);
+
+        assert_eq!(inspection, SessionTabStateInspection::Missing);
+        assert!(
+            !state_directory.exists(),
+            "status inspection must not create state directories or lock files"
+        );
+    }
+
+    #[test]
+    fn read_only_inspection_reports_identity_fault_without_repairing_it() {
+        let temp_dir = TestTempDir::new();
+        let first = SessionSocket::resolve("/tmp/tabby-state-first.sock").expect("first");
+        let second = SessionSocket::resolve("/tmp/tabby-state-second.sock").expect("second");
+        let path = session_tab_state_path(temp_dir.path(), &second.session_key)
+            .expect("second session path");
+        let first_store = SessionTabStateStore::at_path(&path, &first).expect("first store");
+        first_store
+            .mutate(|state| state.lock_tab("w1:t1", Some("custom".to_string())))
+            .expect("persist state");
+
+        let inspection = SessionTabStateStore::inspect_read_only(temp_dir.path(), &second);
+
+        assert!(matches!(
+            inspection,
+            SessionTabStateInspection::Fault { diagnostic }
+                if diagnostic.contains("does not belong")
+        ));
+        assert!(
+            path.exists(),
+            "inspection does not rewrite injected evidence"
+        );
+    }
+
+    #[test]
     fn reconciliation_preserves_an_ambiguous_visible_label_as_manual_intent() {
         let temp_dir = TestTempDir::new();
         let session = SessionSocket::resolve("/tmp/tabby-state.sock").expect("session");
         let store = SessionTabStateStore::open(temp_dir.path(), &session).expect("open state");
         store
-            .record_automatic_rename_intent("w1:t1", "shell", "nvim")
+            .record_automatic_rename_intent("w1:t1", "shell", "nvim", test_lifecycle())
             .expect("persist intent");
 
         let outcome = store
-            .reconcile_automatic_rename_intent("w1:t1", "a user label", Some(1))
+            .reconcile_automatic_rename_intent("w1:t1", "a user label", &test_lifecycle())
             .expect("reconcile manual intent");
 
         assert_eq!(
@@ -1304,11 +1148,11 @@ mod tests {
         let session = SessionSocket::resolve("/tmp/tabby-state.sock").expect("session");
         let store = SessionTabStateStore::open(temp_dir.path(), &session).expect("open state");
         store
-            .record_automatic_rename_intent("w1:t1", "shell", "nvim")
+            .record_automatic_rename_intent("w1:t1", "shell", "nvim", test_lifecycle())
             .expect("persist intent");
 
         let outcome = store
-            .reconcile_automatic_rename_intent("w1:t1", "shell", Some(1))
+            .reconcile_automatic_rename_intent("w1:t1", "shell", &test_lifecycle())
             .expect("reconcile unchanged source");
 
         assert_eq!(outcome, RenameIntentReconciliation::SourceUnchanged);
@@ -1332,11 +1176,11 @@ mod tests {
             })
             .expect("persist prior state");
         store
-            .record_automatic_rename_intent("w1:t1", "shell", "nvim")
+            .record_automatic_rename_intent("w1:t1", "shell", "nvim", test_lifecycle())
             .expect("persist intent");
 
         let outcome = store
-            .reconcile_automatic_rename_intent("w1:t1", "1", Some(1))
+            .reconcile_automatic_rename_intent("w1:t1", "1", &test_lifecycle())
             .expect("reconcile reused tab");
 
         assert_eq!(outcome, RenameIntentReconciliation::ReusedTab);
@@ -1375,6 +1219,82 @@ mod tests {
             store
                 .read(SessionTabState::lock_count)
                 .expect("read repaired empty state"),
+            0
+        );
+    }
+
+    #[test]
+    fn repair_discard_leaves_missing_state_missing() {
+        let temp_dir = TestTempDir::new();
+        let session = SessionSocket::resolve("/tmp/tabby-state.sock").expect("session");
+        let store = SessionTabStateStore::open(temp_dir.path(), &session).expect("open state");
+
+        let outcome = store
+            .repair_discard(RepairConfirmation::confirmed())
+            .expect("repair inspection");
+
+        assert_eq!(outcome, RepairDiscardOutcome::NothingToRepair);
+        assert!(!store.path().exists());
+    }
+
+    #[test]
+    fn legacy_global_lock_evidence_fails_closed_until_explicit_repair() {
+        let temp_dir = TestTempDir::new();
+        let session = SessionSocket::resolve("/tmp/tabby-state.sock").expect("session");
+        let legacy_path = temp_dir.path().join("locks.json");
+        fs::write(&legacy_path, b"identity-less evidence").expect("write legacy evidence");
+
+        let inspection = SessionTabStateStore::inspect_read_only(temp_dir.path(), &session);
+        assert!(matches!(
+            inspection,
+            SessionTabStateInspection::Fault { diagnostic }
+                if diagnostic.contains("identity-less")
+        ));
+
+        let store = SessionTabStateStore::open(temp_dir.path(), &session).expect("open state");
+        let outcome = store
+            .repair_discard(RepairConfirmation::confirmed())
+            .expect("archive legacy evidence");
+        assert!(matches!(outcome, RepairDiscardOutcome::Repaired { .. }));
+        assert!(!legacy_path.exists());
+        assert_eq!(
+            SessionTabStateStore::inspect_read_only(temp_dir.path(), &session),
+            SessionTabStateInspection::Valid {
+                manual_locks: 0,
+                baselines: 0,
+                unresolved_rename_intents: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn repair_discard_archives_identity_mismatched_evidence_before_replacing_it() {
+        let temp_dir = TestTempDir::new();
+        let first = SessionSocket::resolve("/tmp/tabby-state-first.sock").expect("first");
+        let second = SessionSocket::resolve("/tmp/tabby-state-second.sock").expect("second");
+        let path = session_tab_state_path(temp_dir.path(), &second.session_key)
+            .expect("second session path");
+        let first_store = SessionTabStateStore::at_path(&path, &first).expect("first store");
+        first_store
+            .mutate(|state| state.lock_tab("w1:t1", Some("custom".to_string())))
+            .expect("persist mismatched state");
+        let second_store = SessionTabStateStore::at_path(&path, &second).expect("second store");
+
+        let outcome = second_store
+            .repair_discard(RepairConfirmation::confirmed())
+            .expect("explicit repair archives mismatched evidence");
+
+        let RepairDiscardOutcome::Repaired {
+            archived_evidence_path,
+        } = outcome
+        else {
+            panic!("identity mismatch requires explicit replacement");
+        };
+        assert!(archived_evidence_path.exists());
+        assert_eq!(
+            second_store
+                .read(SessionTabState::lock_count)
+                .expect("replacement belongs to requested session"),
             0
         );
     }
@@ -1437,96 +1357,6 @@ mod tests {
                 .read(|state| state.is_locked("w1:t1") && state.is_locked("w1:t2"))
                 .expect("read both updates")
         );
-    }
-
-    #[test]
-    fn stale_lock_is_retained_until_explicit_unlock() {
-        let temp_dir = TestTempDir::new();
-        let path = temp_dir.path().join("locks.json");
-        lock_tab_at_path(&path, "stale-tab-id", Some("old custom".to_string()))
-            .expect("lock stale tab id");
-        let mut herdr = FakeHerdr {
-            tabs: vec![tab("current-tab-id", true)],
-        };
-
-        let outcome = unlock_focused_tab_at_path(&path, &mut herdr).expect("unlock focused tab");
-        let reloaded = LockStore::load(&path).expect("reload lock store");
-
-        assert_eq!(
-            outcome,
-            UnlockFocusedOutcome::NotLocked {
-                tab_id: "current-tab-id".to_string()
-            }
-        );
-        assert!(reloaded.is_locked("stale-tab-id"));
-        assert!(!reloaded.is_locked("current-tab-id"));
-    }
-
-    struct FakeHerdr {
-        tabs: Vec<TabInfo>,
-    }
-
-    impl HerdrApi for FakeHerdr {
-        fn list_tabs(&mut self) -> Result<Vec<TabInfo>, HerdrError> {
-            Ok(self.tabs.clone())
-        }
-
-        fn list_panes(&mut self) -> Result<Vec<PaneInfo>, HerdrError> {
-            unreachable!("unlock-focused only needs tab.list")
-        }
-
-        fn observe_focused_tab(
-            &mut self,
-        ) -> Result<Option<crate::herdr_client::FocusedTabObservation>, HerdrError> {
-            let Some(tab) = self.tabs.iter().find(|tab| tab.focused).cloned() else {
-                return Ok(None);
-            };
-            let pane = PaneInfo {
-                pane_id: format!("{}:pane", tab.tab_id),
-                terminal_id: None,
-                workspace_id: tab.workspace_id.clone(),
-                tab_id: tab.tab_id.clone(),
-                focused: true,
-                label: None,
-                title: None,
-                cwd: None,
-                foreground_cwd: None,
-                agent: None,
-                display_agent: None,
-                custom_status: None,
-                agent_status: None,
-                revision: None,
-            };
-            Ok(Some(crate::herdr_client::FocusedTabObservation {
-                working_directory: None,
-                tab,
-                pane,
-            }))
-        }
-
-        fn pane_process_info(&mut self, _pane_id: &str) -> Result<PaneProcessInfo, HerdrError> {
-            unreachable!("unlock-focused only needs tab.list")
-        }
-
-        fn rename_tab(
-            &mut self,
-            _tab_id: &str,
-            _label: &str,
-        ) -> Result<RenameTabResult, HerdrError> {
-            unreachable!("unlock-focused only needs tab.list")
-        }
-    }
-
-    fn tab(tab_id: &str, focused: bool) -> TabInfo {
-        TabInfo {
-            tab_id: tab_id.to_string(),
-            workspace_id: "w1".to_string(),
-            number: None,
-            label: "label".to_string(),
-            focused,
-            pane_count: None,
-            agent_status: None,
-        }
     }
 
     struct TestTempDir {
