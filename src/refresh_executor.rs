@@ -341,7 +341,7 @@ pub enum RefreshExecutionError {
 impl fmt::Display for RefreshExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Herdr(error) => write!(formatter, "refresher Herdr operation failed: {error}"),
+            Self::Herdr(error) => write!(formatter, "refresh Herdr operation failed: {error}"),
             Self::SessionTabState(error) => {
                 write!(formatter, "session tab state operation failed: {error}")
             }

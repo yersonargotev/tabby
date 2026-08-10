@@ -6,7 +6,7 @@ Package runners and wrappers may appear as `node`, shell, or another transient p
 
 ## Tab labels may flap
 
-Fast foreground process changes can cause noisy labels. Mitigation: wait briefly during each One-Shot Refresh before inspecting focus/process state, and prefer Navigation Stability over immediate label freshness.
+Fast foreground process changes can cause noisy labels. Mitigation: each bounded evaluation requires two consecutive equal candidates, retains a short Significant Command grace period, and prefers Navigation Stability over immediate label freshness.
 
 ## Manual lock persistence can surprise users
 
@@ -18,16 +18,16 @@ Inactive tabs may not expose a reliable focused pane. Mitigation: only inspect a
 
 ## Auto-renames can interfere with tab navigation
 
-`tab.rename` mutates Herdr's tab bar. If Tabby performs API work while the user is clicking between tabs, the tab bar can shift or re-render during navigation. Mitigation: remove the continuously polling daemon from normal operation; each trigger runs one short refresh, inspects only the tab focused after a short delay, applies at most one rename, and exits.
+`tab.rename` mutates Herdr's tab bar. If Tabby performs API work while the user is clicking between tabs, the tab bar can shift or re-render during navigation. Mitigation: each actionable focus trigger resets a 1000 ms Focus Quiet Window with no Herdr API work; afterward one bounded evaluation revalidates current focus and applies at most one rename. Periodic work inspects only the focused tab.
 
 ## Plugin trust and installation risk
 
-Herdr plugins run as normal unsandboxed user code. Mitigation: local linking first, no silent auto-update, later releases with checksums and auditable install scripts.
+Herdr plugins run as normal unsandboxed user code. Mitigation: Homebrew release artifacts include checksums, registration remains an explicit `tabby install`, the release manifest resolves its packaged binary, and there is no silent auto-update. Local linking remains available for development.
 
 ## API drift or undocumented behavior
 
 Herdr APIs may change or expose platform-specific fields differently. Mitigation: keep Herdr client isolated, include manual compatibility checks, and treat official docs as the source of truth.
 
-## Restored Herdr Sessions may have stale labels until a trigger fires
+## A crashed runtime waits for supported ingress
 
-Herdr 0.7.3 has documented plugin lifecycle hooks for creation/focus events, but no documented Herdr Session-start or server-started hook. If Herdr restores a session without emitting one of Tabby's accepted Refresh Triggers, labels may remain stale until focus/creation activity or the manual refresh action. Mitigation: document the freshness tradeoff and keep Navigation Stability higher priority than always-current labels.
+Herdr 0.8 runs `[[startup]]` for new and restored sessions, but it is not an external process supervisor. If a Ready Session Runtime crashes while the Herdr server continues, recovery waits for the next lifecycle, focus, creation, or manual hook. Mitigation: every supported ingress crosses the Startup Gate and restores exactly one owner; Runtime Status makes an absent or faulted owner diagnosable.

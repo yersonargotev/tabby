@@ -1,5 +1,7 @@
 # Current Hybrid Session Refresher baseline
 
+Status: Historical, non-normative measurement of the pre-Herdr-0.8 implementation. ADR 0010 and `CONTEXT.md` define the current Session Runtime contract.
+
 ## Question
 
 What CPU, memory, wake-up, RPC, latency, and failure characteristics does the

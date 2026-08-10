@@ -83,8 +83,17 @@ git diff --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 python3 scripts/check-herdr-manifests.py
+python3 -m unittest discover -s scripts/tests
 cargo build
 ```
+
+On macOS with Herdr 0.8.0 installed, run the isolated real-lifecycle harness:
+
+```sh
+python3 scripts/herdr_lifecycle_harness.py
+```
+
+The harness uses temporary HOME/XDG/config roots, exercises default and named Herdr Sessions, writes a sanitized JSONL transcript under `.scratch/`, and removes its temporary sessions and state. It never falls back to the operator's Herdr configuration.
 
 For release planning, also run:
 
@@ -105,5 +114,6 @@ Release setup and tagging details live in [`docs/release.md`](docs/release.md). 
 | [`docs/install.md`](docs/install.md) | User install, verification, trust model, uninstall, and rollback. |
 | [`docs/release.md`](docs/release.md) | Maintainer release process and required GitHub secret. |
 | [`docs/design/architecture.md`](docs/design/architecture.md) | Architecture and module responsibilities. |
+| [`docs/evidence/issue-71-herdr-0.8-lifecycle.md`](docs/evidence/issue-71-herdr-0.8-lifecycle.md) | Recorded real-Herdr 0.8 lifecycle evidence and coverage limits. |
 | [`docs/adr/`](docs/adr/) | Accepted architecture decisions. |
-| [`docs/herdr-tab-title-research.md`](docs/herdr-tab-title-research.md) | Supporting research for Herdr tab-title behavior. |
+| [`docs/herdr-tab-title-research.md`](docs/herdr-tab-title-research.md) | Historical research that preceded the implemented Session Runtime. |

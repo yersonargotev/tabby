@@ -69,7 +69,9 @@ The important checks are:
 - `enabled` is `true`.
 - `plugin_root` is under Homebrew's current `tabby` Cellar version, ending in `share/tabby`.
 - actions run `../../bin/tabby`, so Herdr invokes the binary installed by the same Homebrew package.
-- the `start` action runs `tabby ensure-started`; creation event hooks also run `ensure-started`; focus events are handled inside the running refresher, not by manifest hooks.
+- the `start` action runs `tabby ensure-started`;
+- `workspace.created` and `tab.created` run `tabby signal-created`, which recovers a missing owner through the Startup Gate but does not reset an already Ready owner's quiet window;
+- `pane.focused` runs `tabby signal-focus`, which delivers the focus trigger to the Session Runtime control endpoint.
 
 For a single read-only diagnostic covering these checks plus runtime state, run:
 
@@ -104,6 +106,32 @@ Expected successful `unlock-all` output:
 ```text
 tabby unlock-all: cleared persisted manual locks
 ```
+
+## Detach, stop, and restore
+
+Closing or detaching a Herdr client does not stop its server. The Ready Session Runtime remains owned and continues one bounded focused-tab evaluation every five seconds.
+
+A Session Stop is different: Tabby ends only after the canonical Herdr socket disappears or reports that no server is listening. An RPC timeout or ambiguous transport error ends one evaluation but does not prove a stop. Locks, baselines, and unresolved rename intents remain stored for that Session Identity.
+
+When Herdr restores the session, the manifest's `[[startup]]` command crosses the Startup Gate. Exactly one new Session Runtime becomes Ready and begins its initial evaluation after the Focus Quiet Window. Run `tabby status` with that session selected to inspect the new launch identity and retained state.
+
+## Diagnose and repair state
+
+Start with the read-only command:
+
+```sh
+tabby status
+```
+
+`Absent` means no owner holds the selected session lease. `Starting` means the Startup Gate has not yet proved readiness. `Ready` reports the authoritative lease owner. `Faulted` includes an actionable failure and performs no automatic tab mutation.
+
+If status reports a State Integrity Fault, inspect the preserved evidence first. To explicitly archive the invalid bytes and create clean session state through the owner, run:
+
+```sh
+tabby repair-state --discard
+```
+
+Repair is never implicit and `tabby status` never performs it. To remove valid retained state instead, stop the exact selected Herdr Session, preserve its `HERDR_SOCKET_PATH` as the Session Identity, and run `tabby forget-session`. Tabby refuses to forget a running session or a different identity.
 
 ## Trust model
 

@@ -1,5 +1,7 @@
 # Start with local plugin linking before release packaging
 
+Status: Superseded by ADR 0005 and the implemented Homebrew release path. This is a historical record and is not normative.
+
 The first usable version will be installed locally with `cargo build` and `herdr plugin link .` rather than through a remote installer. Herdr plugins run as normal unsandboxed user code, so local linking keeps the trust and update story explicit while the plugin behavior is still being proven.
 
 ## Consequences

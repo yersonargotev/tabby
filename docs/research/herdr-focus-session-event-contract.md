@@ -1,5 +1,7 @@
 # Herdr focus and session lifecycle event contract
 
+Status: Historical, non-normative Herdr 0.7.3 research. The Herdr 0.8 validation and ADR 0010 supersede its architecture implications.
+
 ## Question
 
 Which Herdr events cover mouse and keyboard focus changes across workspaces,

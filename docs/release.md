@@ -31,7 +31,10 @@ cargo fmt -- --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 python3 scripts/check-herdr-manifests.py
+python3 -m unittest discover -s scripts/tests
 dist plan
 ```
+
+On macOS with Herdr 0.8.0 installed, also run `python3 scripts/herdr_lifecycle_harness.py`. Review its sanitized transcript and the recorded coverage in [`docs/evidence/issue-71-herdr-0.8-lifecycle.md`](evidence/issue-71-herdr-0.8-lifecycle.md) before tagging.
 
 Review `.github/workflows/release.yml` and the generated Homebrew formula output before pushing the first release tag.

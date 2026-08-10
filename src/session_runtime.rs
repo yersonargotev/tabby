@@ -964,7 +964,7 @@ fn run_owned_session(
     let _lease = acquire_runtime_lease(&paths.lifetime_lease, &launch.socket.session_key)?;
 
     let tab_state = crate::locks::SessionTabStateStore::open(launch.state_base, launch.socket)?;
-    let mut refresher_state =
+    let mut refresh_state =
         OneShotRefreshState::new(refresh_executor::RefreshExecutorState::default());
     let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)?;
     let (trigger_tx, trigger_rx) = trigger_mailbox();
@@ -1008,7 +1008,7 @@ fn run_owned_session(
     let mut client = HerdrClient::new(transport);
     let result = run_runtime_loop(
         &mut client,
-        &mut refresher_state,
+        &mut refresh_state,
         &tab_state,
         trigger_rx,
         &paths.metadata,

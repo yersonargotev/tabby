@@ -10,6 +10,7 @@ from typing import Any
 
 DEV_MANIFEST = Path("herdr-plugin.toml")
 RELEASE_MANIFEST = Path("packaging/herdr/herdr-plugin.toml")
+CARGO_MANIFEST = Path("Cargo.toml")
 DEV_BINARY = "target/debug/tabby"
 RELEASE_BINARY = "../../bin/tabby"
 
@@ -63,6 +64,23 @@ def event_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {event["on"]: event for event in events}
 
 
+def cargo_package_version(path: Path) -> str:
+    in_package = False
+    for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+        stripped = line.strip()
+        if stripped == "[package]":
+            in_package = True
+            continue
+        if stripped.startswith("["):
+            in_package = False
+        if in_package and stripped.startswith("version") and "=" in stripped:
+            value = parse_value(stripped.split("=", 1)[1])
+            if isinstance(value, str) and value:
+                return value
+            raise ValueError(f"{path}:{line_number}: invalid package version")
+    raise ValueError(f"{path}: missing [package] version")
+
+
 def check_command_pair(
     errors: list[str],
     kind: str,
@@ -89,6 +107,7 @@ def check_command_pair(
 def main() -> int:
     dev = load_manifest(DEV_MANIFEST)
     release = load_manifest(RELEASE_MANIFEST)
+    package_version = cargo_package_version(CARGO_MANIFEST)
     errors: list[str] = []
 
     allowed_top_level_keys = {
@@ -120,6 +139,12 @@ def main() -> int:
         errors.append(
             f"{DEV_MANIFEST} min_herdr_version must be '0.8.0', "
             f"got {dev.get('min_herdr_version')!r}"
+        )
+
+    if dev.get("version") != package_version:
+        errors.append(
+            f"manifest version {dev.get('version')!r} must match Cargo package version "
+            f"{package_version!r}"
         )
 
     for manifest_path, startup_commands in [
@@ -242,7 +267,10 @@ def main() -> int:
             print(f"error: {error}", file=sys.stderr)
         return 1
 
-    print(f"{DEV_MANIFEST} and {RELEASE_MANIFEST} are in sync")
+    print(
+        f"{DEV_MANIFEST} and {RELEASE_MANIFEST} are in sync and match Cargo package version "
+        f"{package_version}"
+    )
     return 0
 
 

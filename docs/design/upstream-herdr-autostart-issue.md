@@ -1,6 +1,6 @@
 # Draft upstream Herdr issue: plugin session-start/autostart lifecycle
 
-Status: draft only; not filed upstream.
+Status: Historical, non-normative draft; not filed upstream. Herdr 0.8 `[[startup]]` hooks resolved the lifecycle gap described here, and ADR 0010 supersedes the proposed workaround.
 
 ## Problem
 

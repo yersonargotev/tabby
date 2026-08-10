@@ -38,14 +38,13 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
 
 ## Rust module shape
 
-Proposed files/modules for a single Rust crate:
+Implemented files/modules in the Rust crate:
 
 - `src/main.rs` — CLI entrypoint and command dispatch.
 - `src/session_runtime.rs` — lifecycle, Startup Gate, lease, control ingress, scheduling, handoff, and effects.
 - `src/refresh_decision.rs` — pure bounded One-Shot Refresh policy with no Herdr or persistence I/O.
 - `src/refresh_executor.rs` — Herdr and Session-Scoped Tab State effect adapter for Refresh Decisions.
-- `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client and DTOs.
-- `src/process_inspector.rs` — wrapper around `pane.process_info`; failure returns no Significant Command and allows cwd fallback.
+- `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client, DTOs, and Focused Observation/Process Inspector boundary.
 - `src/labeler.rs` — Label Policy and candidate derivation.
 - `src/stability.rs` — anti-flapping state machine.
 - `src/locks.rs` — validated Session-Scoped Tab State and crash-safe rename reconciliation.
@@ -69,14 +68,16 @@ Manual locks persist across plugin runs. Users unlock explicitly with `unlock-fo
 
 ## Distribution model
 
-V1 is local-link only:
+The release path uses `dist`/`cargo-dist` and Homebrew. Homebrew installs the binary and release manifest together; plain `tabby install` relinks that manifest and ensures the installed binary owns the selected Session Runtime, using Cooperative Runtime Handoff when needed.
+
+Local development remains a separate link flow:
 
 ```sh
 cargo build
 herdr plugin link .
 ```
 
-Release/install packaging is intentionally deferred but important. Before broader distribution, add reproducible release builds, macOS binaries first, checksums, and an auditable install script. No silent auto-updates.
+The development manifest invokes `target/debug/tabby`; the release manifest invokes `../../bin/tabby` from the package share directory. `scripts/check-herdr-manifests.py` requires identical startup/event/action semantics and parity with the Cargo package version. Neither path silently auto-updates.
 
 ## Test strategy
 
@@ -89,9 +90,12 @@ Use unit tests for the pure behavior first:
 - manual lock detection;
 - session-scoped state mutations over a temporary state directory.
 
-Then add integration/manual verification against Herdr on macOS:
+The isolated macOS lifecycle harness adds real Herdr 0.8 evidence:
 
-- focused pane behavior for inactive tabs;
-- `pane.process_info` shape for `nvim`, `pnpm dev`, `lazygit`, `codex`, `claude`, `go test`;
-- local `herdr plugin link .` startup behavior;
-- no writes to real user config during automated validation.
+- default and named session startup through `[[startup]]`;
+- concurrent hook coalescing and one Ready owner;
+- Focus Quiet Window and periodic evaluation timing;
+- crash recovery, Session Stop lease release, and Session Restore ownership;
+- temporary HOME/XDG/config roots with no writes to real user configuration.
+
+Deterministic Rust tests cover transport faults, disappearing targets, rename-intent reconciliation, corrupt state, handoff, state isolation, and Forget Session behavior. The recorded real-runtime evidence and its explicit limits live in `docs/evidence/issue-71-herdr-0.8-lifecycle.md`.

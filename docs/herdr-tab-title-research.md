@@ -2,6 +2,8 @@
 
 Date: 2026-07-07
 
+Status: Historical, non-normative research that preceded Tabby's implemented Session Runtime and Herdr 0.8 contract.
+
 ## Question
 
 Can Herdr tabs automatically show the app/command currently running in the tab, and otherwise show only the basename of the current working directory? If yes, should dots solve it with Herdr configuration, by installing/configuring an existing plugin, or by creating a new Herdr plugin?
