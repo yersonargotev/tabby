@@ -9,12 +9,16 @@ Install the packaged plugin through Homebrew:
 ```sh
 brew install yersonargotev/tap/tabby
 tabby install
+tabby status
 ```
 
-Request a focused-tab refresh manually:
+`tabby install` registers the plugin and ensures its Session Runtime is started. The former `tabby install --start` option no longer exists.
+
+Tabby refreshes automatically through Herdr events and periodic evaluation. To test it immediately, optionally run either manual refresh command; both request the same refresh through different paths:
 
 ```sh
 tabby refresh
+# or
 herdr plugin action invoke refresh --plugin yersonargotev.tabby
 ```
 
