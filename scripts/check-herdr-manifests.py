@@ -189,8 +189,13 @@ def check_manifests(
         )
     if canonical.get("version") != package_version:
         errors.append(
-            f"manifest version {canonical.get('version')!r} must match Cargo package "
-            f"version {package_version!r}"
+            f"canonical manifest version {canonical.get('version')!r} must match "
+            f"Cargo package version {package_version!r}"
+        )
+    if homebrew.get("version") != package_version:
+        errors.append(
+            f"Homebrew manifest version {homebrew.get('version')!r} must match "
+            f"Cargo package version {package_version!r}"
         )
     if len(canonical["startup"]) != 1 or len(homebrew["startup"]) != 1:
         errors.append("each manifest must declare exactly one startup command")

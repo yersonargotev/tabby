@@ -101,6 +101,22 @@ class HerdrManifestContractTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("product semantics differ", completed.stderr)
 
+    def test_validator_rejects_homebrew_manifest_version_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            canonical = root / "herdr-plugin.toml"
+            homebrew = root / "homebrew-plugin.toml"
+            cargo = root / "Cargo.toml"
+            shutil.copy2(REPO_ROOT / "herdr-plugin.toml", canonical)
+            shutil.copy2(REPO_ROOT / "packaging/herdr/herdr-plugin.toml", homebrew)
+            shutil.copy2(REPO_ROOT / "Cargo.toml", cargo)
+            homebrew.write_text(homebrew.read_text().replace('version = "0.1.11"', 'version = "0.1.10"'))
+
+            completed = self.run_checker(canonical, homebrew, cargo)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Homebrew manifest version", completed.stderr)
+
     def test_validator_rejects_shared_command_semantic_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

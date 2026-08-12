@@ -22,7 +22,7 @@ Inactive tabs may not expose a reliable focused pane. Mitigation: only inspect a
 
 ## Plugin trust and installation risk
 
-Herdr plugins run as normal unsandboxed user code. Mitigation: Homebrew release artifacts include checksums, registration remains an explicit `tabby install`, the release manifest resolves its packaged binary, and there is no silent auto-update. Local linking remains available for development.
+Herdr plugins run as normal unsandboxed user code. Mitigation: Herdr previews the GitHub-managed build command before registration; the installer accepts only the versioned Apple Silicon archive after its published checksum matches; CI proves the planned and built release contract; Homebrew registration remains an explicit `tabby install`; and there is no silent auto-update. Local linking remains a distinct development flow.
 
 ## API drift or undocumented behavior
 

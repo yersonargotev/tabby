@@ -69,16 +69,17 @@ Manual locks persist across plugin runs. Users unlock explicitly with `unlock-fo
 
 ## Distribution model
 
-The release path uses `dist`/`cargo-dist` and Homebrew. Homebrew installs the binary and release manifest together; plain `tabby install` relinks that manifest and ensures the installed binary owns the selected Session Runtime, using Cooperative Runtime Handoff when needed.
+The primary release path is a GitHub-managed Herdr plugin. Its reviewed build command downloads the cargo-dist Apple Silicon archive and checksum, verifies them, and atomically prepares `.herdr/bin/tabby`. Homebrew remains an alternative adapter; `tabby install` relinks its packaged manifest and ensures that binary owns the selected Session Runtime through Cooperative Runtime Handoff when needed.
 
 Local development remains a separate link flow:
 
 ```sh
 cargo build
+python3 scripts/prepare-herdr-plugin.py
 herdr plugin link .
 ```
 
-The development manifest invokes `target/debug/tabby`; the release manifest invokes `../../bin/tabby` from the package share directory. `scripts/check-herdr-manifests.py` requires identical startup/event/action semantics and parity with the Cargo package version. Neither path silently auto-updates.
+The production-shaped root manifest invokes `.herdr/bin/tabby` for both GitHub-managed installation and local linking; linked development checkouts prepare that path explicitly because Herdr does not run build commands for links. The Homebrew manifest invokes `../../bin/tabby` from the package share directory. Manifest and release-contract checks require identical behavior, aligned versions, the exact native archive/checksum pair, and checksum integrity. No path silently auto-updates.
 
 ## Test strategy
 

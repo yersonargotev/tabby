@@ -106,7 +106,8 @@ The harness prepares `.herdr/bin/tabby` from the existing debug build, links the
 For release planning, also run:
 
 ```sh
-dist plan
+dist plan --output-format=json > plan-dist-manifest.json
+python3 scripts/check-release-contract.py --dist-manifest plan-dist-manifest.json
 ```
 
 ## Release notes
