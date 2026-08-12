@@ -60,6 +60,18 @@ class HerdrManifestContractTests(unittest.TestCase):
         self.assertEqual({command[0] for command in commands}, {CANONICAL_BINARY})
         self.assertNotIn("scaffold", manifest["description"].lower())
 
+    def test_start_action_activates_the_registered_binary(self) -> None:
+        for manifest_path in (
+            REPO_ROOT / "herdr-plugin.toml",
+            REPO_ROOT / "packaging" / "herdr" / "herdr-plugin.toml",
+        ):
+            manifest = checker.load_manifest(manifest_path)
+            start = next(
+                action for action in manifest["actions"] if action["id"] == "start"
+            )
+
+            self.assertEqual(start["command"][1:], ["start"])
+
     def test_canonical_manifest_declares_one_release_install_build_command(self) -> None:
         manifest = checker.load_manifest(REPO_ROOT / "herdr-plugin.toml")
 

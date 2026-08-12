@@ -77,7 +77,7 @@ Expected output for the current installed version is shaped like:
 true
 /opt/homebrew/Cellar/tabby/<version>/share/tabby
 refresh ../../bin/tabby refresh
-start ../../bin/tabby ensure-started
+start ../../bin/tabby start
 unlock-all ../../bin/tabby unlock-all
 unlock-focused ../../bin/tabby unlock-focused
 ```
@@ -87,7 +87,8 @@ The important checks are:
 - `enabled` is `true`.
 - `plugin_root` is under Homebrew's current `tabby` Cellar version, ending in `share/tabby`.
 - actions run `../../bin/tabby`, so Herdr invokes the binary installed by the same Homebrew package.
-- the `start` action runs `tabby ensure-started`;
+- the explicit `start` action runs `tabby start` and activates the binary registered by that manifest;
+- startup and lifecycle hooks run `tabby ensure-started` or the corresponding signal command without replacing a validated owner;
 - `workspace.created` and `tab.created` run `tabby signal-created`, which recovers a missing owner through the Startup Gate but does not reset an already Ready owner's quiet window;
 - `pane.focused` runs `tabby signal-focus`, which delivers the focus trigger to the Session Runtime control endpoint.
 

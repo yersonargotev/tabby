@@ -52,7 +52,8 @@ Implemented files/modules in the Rust crate:
 
 Expected CLI/actions:
 
-- `start` / `ensure-started` cross the Startup Gate;
+- `start` crosses the Startup Gate and activates its invoking registered binary, requesting Cooperative Runtime Handoff when a different validated binary is Ready;
+- `ensure-started` and lifecycle hooks cross the Startup Gate non-destructively, signalling a Ready owner or recovering an absent owner;
 - `refresh` signals the Ready owner;
 - `install` relinks and ensures/hands off to the installed owner;
 - `unlock-focused`, `unlock-all`, and `repair-state --discard` mutate through the owner;

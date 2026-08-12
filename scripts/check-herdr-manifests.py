@@ -18,7 +18,7 @@ CANONICAL_BINARY = ".herdr/bin/tabby"
 HOMEBREW_BINARY = "../../bin/tabby"
 COLLECTIONS = ("build", "startup", "actions", "events")
 ACTION_COMMANDS = {
-    "start": ["ensure-started"],
+    "start": ["start"],
     "refresh": ["refresh"],
     "unlock-focused": ["unlock-focused"],
     "unlock-all": ["unlock-all"],

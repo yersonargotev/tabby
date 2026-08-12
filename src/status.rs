@@ -83,6 +83,7 @@ pub fn render_status(snapshot: &StatusSnapshot) -> String {
                     .join(", ")
             };
             lines.push(format!("Commands: {commands}"));
+            lines.push(format!("Registered command binary: {commands}"));
         }
         None => lines.push(format!("Plugin: {PLUGIN_ID} is not registered")),
     }
@@ -186,6 +187,7 @@ fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
             lines.push(format!(
                 "Session Runtime: Ready pid={pid} version={version} lease_held={lease_held}"
             ));
+            lines.push(format!("Ready owner binary: {}", binary_path.display()));
             lines.push(format!(
                 "Session Runtime details: launch_id={launch_id} binary={} last_evaluation_unix_ms={} next_periodic_unix_ms={} last_failure={}",
                 binary_path.display(),
@@ -235,7 +237,9 @@ fn warnings_and_fixes(snapshot: &StatusSnapshot) -> (Vec<String>, BTreeSet<Strin
         }
         RuntimeInspection::Ready { binary_path, .. } => {
             let binary_identity = startup::binary_identity(binary_path);
+            let mut binary_mismatch = false;
             if binary_identity != snapshot.current_binary {
+                binary_mismatch = true;
                 warnings.push(format!(
                     "Session Runtime binary {} does not match current executable {}",
                     binary_path.display(),
@@ -249,6 +253,7 @@ fn warnings_and_fixes(snapshot: &StatusSnapshot) -> (Vec<String>, BTreeSet<Strin
                     .iter()
                     .any(|path| path == &binary_identity)
             {
+                binary_mismatch = true;
                 warnings.push(format!(
                     "Session Runtime binary {} does not match registered command {}",
                     binary_path.display(),
@@ -258,6 +263,11 @@ fn warnings_and_fixes(snapshot: &StatusSnapshot) -> (Vec<String>, BTreeSet<Strin
                         .map(|path| path.display().to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
+                ));
+            }
+            if binary_mismatch {
+                fixes.insert(format!(
+                    "run `herdr plugin action invoke start --plugin {PLUGIN_ID}` to activate the registered Tabby binary"
                 ));
             }
         }
@@ -631,7 +641,9 @@ mod tests {
         assert!(output.contains("Socket: /tmp/herdr/work.sock"));
         assert!(output.contains("Plugin: enabled, /opt/tabby/herdr-plugin.toml"));
         assert!(output.contains("Commands: /opt/tabby/bin/tabby"));
+        assert!(output.contains("Registered command binary: /opt/tabby/bin/tabby"));
         assert!(output.contains("Session Runtime: Ready pid=42 version=0.1.10 lease_held=true"));
+        assert!(output.contains("Ready owner binary: /opt/tabby/bin/tabby"));
         assert!(output.contains("Focused tab: w1:t1 workspace=w1 number=1 label=codex"));
         assert!(output.contains("Focused pane: w1:p1 cwd=/repo candidate=codex"));
         assert!(
@@ -695,6 +707,7 @@ mod tests {
 
         assert!(output.contains("Session Runtime binary /tmp/local/tabby does not match current executable /opt/tabby/bin/tabby"));
         assert!(output.contains("Session Runtime binary /tmp/local/tabby does not match registered command /opt/tabby/bin/tabby"));
+        assert!(output.contains("herdr plugin action invoke start --plugin yersonargotev.tabby"));
     }
 
     #[test]

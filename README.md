@@ -56,7 +56,8 @@ Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|in
 | --- | --- |
 | `tabby status` | Read authoritative runtime, session-state, registration, and focused-tab diagnostics without changing state. |
 | `tabby refresh` | Deliver a manual Refresh Trigger to the Ready Session Runtime. |
-| `tabby start` / `tabby ensure-started` | Cross the Startup Gate and ensure exactly one Ready Session Runtime. |
+| `tabby start` | Activate the invoking registered binary, using Cooperative Runtime Handoff when another validated binary is Ready. |
+| `tabby ensure-started` | Idempotently signal a Ready owner or recover an absent owner without replacing a different binary. |
 | `tabby install` | Refresh registration and cooperatively ensure the installed binary owns the current Herdr Session. |
 | `tabby unlock-focused` | Clear the manual lock and plugin-label baseline for the focused Herdr tab so automatic naming resumes. |
 | `tabby unlock-all` | Clear all persisted manual locks and their associated plugin-label baselines so automatic naming resumes. |

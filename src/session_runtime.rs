@@ -432,11 +432,11 @@ pub fn signal_manual_refresh_from_env() -> Result<String, SessionRuntimeError> {
     ensure_ready_owner_from_env(RefreshTrigger::Manual)
 }
 
-/// Requests a cooperative replacement after `tabby install` has updated registration.
+/// Ensures the invoking binary owns the selected Herdr Session Runtime.
 ///
 /// A Ready owner receives an authenticated handoff request and exits on its own; this path
 /// never treats a recorded PID as authority to terminate a process.
-pub fn ensure_current_runtime_after_install_from_env() -> Result<String, SessionRuntimeError> {
+pub fn activate_current_runtime_from_env() -> Result<String, SessionRuntimeError> {
     let socket = crate::startup::resolve_socket_from_env()?;
     let state_base = crate::startup::state_base_from_runtime()?;
     let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
@@ -445,25 +445,95 @@ pub fn ensure_current_runtime_after_install_from_env() -> Result<String, Session
         state_base: &state_base,
         binary_path: &binary_path,
     };
-    let paths = RuntimePaths::for_launch(&launch);
     let mut adapter = SystemSessionRuntimeAdapter::default();
-    let _gate = adapter.acquire_startup_gate(&paths.startup_gate)?;
+    activate_current_runtime_with(&launch, &mut adapter)
+}
 
-    match inspect_runtime(&launch)? {
+trait ActivationAdapter {
+    fn acquire_activation_gate(
+        &mut self,
+        path: &Path,
+    ) -> Result<Box<dyn StartupGateGuard>, SessionRuntimeError>;
+    fn inspect_runtime(
+        &mut self,
+        launch: &SessionRuntimeLaunch<'_>,
+    ) -> Result<RuntimeInspection, SessionRuntimeError>;
+    fn request_ready_owner(
+        &mut self,
+        launch: &SessionRuntimeLaunch<'_>,
+        operation: RuntimeControlOperation,
+    ) -> Result<Option<ReadySessionRuntime>, SessionRuntimeError>;
+    fn wait_for_runtime_release(&mut self, paths: &RuntimePaths)
+    -> Result<(), SessionRuntimeError>;
+    fn start_activation_owner(
+        &mut self,
+        launch: &SessionRuntimeLaunch<'_>,
+        trigger: RefreshTrigger,
+    ) -> Result<ReadySessionRuntime, SessionRuntimeError>;
+}
+
+impl ActivationAdapter for SystemSessionRuntimeAdapter {
+    fn acquire_activation_gate(
+        &mut self,
+        path: &Path,
+    ) -> Result<Box<dyn StartupGateGuard>, SessionRuntimeError> {
+        SessionRuntimeAdapter::acquire_startup_gate(self, path)
+    }
+
+    fn inspect_runtime(
+        &mut self,
+        launch: &SessionRuntimeLaunch<'_>,
+    ) -> Result<RuntimeInspection, SessionRuntimeError> {
+        inspect_runtime(launch)
+    }
+
+    fn request_ready_owner(
+        &mut self,
+        launch: &SessionRuntimeLaunch<'_>,
+        operation: RuntimeControlOperation,
+    ) -> Result<Option<ReadySessionRuntime>, SessionRuntimeError> {
+        request_ready_owner(launch, operation)
+    }
+
+    fn wait_for_runtime_release(
+        &mut self,
+        paths: &RuntimePaths,
+    ) -> Result<(), SessionRuntimeError> {
+        wait_for_runtime_release(paths)
+    }
+
+    fn start_activation_owner(
+        &mut self,
+        launch: &SessionRuntimeLaunch<'_>,
+        trigger: RefreshTrigger,
+    ) -> Result<ReadySessionRuntime, SessionRuntimeError> {
+        SessionRuntimeAdapter::start_owner_and_wait_ready(self, launch, trigger)
+    }
+}
+
+fn activate_current_runtime_with(
+    launch: &SessionRuntimeLaunch<'_>,
+    adapter: &mut impl ActivationAdapter,
+) -> Result<String, SessionRuntimeError> {
+    let paths = RuntimePaths::for_launch(launch);
+    let _gate = adapter.acquire_activation_gate(&paths.startup_gate)?;
+
+    match adapter.inspect_runtime(launch)? {
         RuntimeInspection::Ready { binary_path, .. }
             if binary_path == crate::startup::binary_identity(launch.binary_path) =>
         {
-            let owner = request_ready_owner(
-                &launch,
-                RuntimeControlOperation::Signal {
-                    trigger: RefreshTrigger::Startup,
-                },
-            )?
-            .ok_or_else(|| {
-                SessionRuntimeError::Control(
-                    "Ready owner disappeared during install verification".to_string(),
-                )
-            })?;
+            let owner = adapter
+                .request_ready_owner(
+                    launch,
+                    RuntimeControlOperation::Signal {
+                        trigger: RefreshTrigger::Startup,
+                    },
+                )?
+                .ok_or_else(|| {
+                    SessionRuntimeError::Control(
+                        "Ready owner disappeared during activation verification".to_string(),
+                    )
+                })?;
             return Ok(format!(
                 "current Tabby Session Runtime already ready with pid {}",
                 owner.pid
@@ -473,23 +543,24 @@ pub fn ensure_current_runtime_after_install_from_env() -> Result<String, Session
             let replacement_binary_identity = crate::startup::binary_identity(launch.binary_path)
                 .to_string_lossy()
                 .into_owned();
-            request_ready_owner(
-                &launch,
-                RuntimeControlOperation::PrepareHandoff {
-                    replacement_binary_identity,
-                },
-            )?
-            .ok_or_else(|| {
-                SessionRuntimeError::Control(
-                    "Ready owner did not accept cooperative handoff".to_string(),
-                )
-            })?;
-            wait_for_runtime_release(&paths)?;
+            adapter
+                .request_ready_owner(
+                    launch,
+                    RuntimeControlOperation::PrepareHandoff {
+                        replacement_binary_identity,
+                    },
+                )?
+                .ok_or_else(|| {
+                    SessionRuntimeError::Control(
+                        "Ready owner did not accept cooperative handoff".to_string(),
+                    )
+                })?;
+            adapter.wait_for_runtime_release(&paths)?;
         }
         RuntimeInspection::Absent => {}
         RuntimeInspection::Starting { .. } => {
             return Err(SessionRuntimeError::Control(
-                "a Session Runtime is still starting during install".to_string(),
+                "a Session Runtime is still starting during activation".to_string(),
             ));
         }
         RuntimeInspection::Faulted { diagnostic, .. } => {
@@ -497,7 +568,7 @@ pub fn ensure_current_runtime_after_install_from_env() -> Result<String, Session
         }
     }
 
-    let owner = adapter.start_owner_and_wait_ready(&launch, RefreshTrigger::Startup)?;
+    let owner = adapter.start_activation_owner(launch, RefreshTrigger::Startup)?;
     Ok(format!(
         "started current Tabby Session Runtime with pid {} after cooperative handoff",
         owner.pid
@@ -1713,6 +1784,177 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeActivationAdapter {
+        inspection: Option<RuntimeInspection>,
+        requested_operations: Vec<RuntimeControlOperation>,
+        request_owner: Option<ReadySessionRuntime>,
+        request_error: Option<SessionRuntimeError>,
+        release_error: Option<SessionRuntimeError>,
+        starts: usize,
+    }
+
+    impl ActivationAdapter for FakeActivationAdapter {
+        fn acquire_activation_gate(
+            &mut self,
+            _path: &Path,
+        ) -> Result<Box<dyn StartupGateGuard>, SessionRuntimeError> {
+            Ok(Box::new(FakeGuard))
+        }
+
+        fn inspect_runtime(
+            &mut self,
+            _launch: &SessionRuntimeLaunch<'_>,
+        ) -> Result<RuntimeInspection, SessionRuntimeError> {
+            Ok(self.inspection.clone().unwrap_or(RuntimeInspection::Absent))
+        }
+
+        fn request_ready_owner(
+            &mut self,
+            _launch: &SessionRuntimeLaunch<'_>,
+            operation: RuntimeControlOperation,
+        ) -> Result<Option<ReadySessionRuntime>, SessionRuntimeError> {
+            self.requested_operations.push(operation);
+            if let Some(error) = self.request_error.take() {
+                return Err(error);
+            }
+            Ok(self.request_owner.clone())
+        }
+
+        fn wait_for_runtime_release(
+            &mut self,
+            _paths: &RuntimePaths,
+        ) -> Result<(), SessionRuntimeError> {
+            match self.release_error.take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+
+        fn start_activation_owner(
+            &mut self,
+            _launch: &SessionRuntimeLaunch<'_>,
+            _trigger: RefreshTrigger,
+        ) -> Result<ReadySessionRuntime, SessionRuntimeError> {
+            self.starts += 1;
+            Ok(ReadySessionRuntime {
+                pid: 202,
+                launch_id: "replacement-owner".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn activation_signals_a_matching_ready_binary_without_replacement() {
+        let socket = SessionSocket::resolve("/tmp/activation-same.sock").expect("socket");
+        let binary = std::env::current_exe().expect("current executable");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: &binary,
+        };
+        let mut adapter = FakeActivationAdapter {
+            inspection: Some(ready_inspection(&binary)),
+            request_owner: Some(ReadySessionRuntime {
+                pid: 101,
+                launch_id: "same-owner".to_string(),
+            }),
+            ..FakeActivationAdapter::default()
+        };
+
+        let message = activate_current_runtime_with(&launch, &mut adapter).expect("activation");
+
+        assert!(message.contains("already ready with pid 101"));
+        assert!(matches!(
+            adapter.requested_operations.as_slice(),
+            [RuntimeControlOperation::Signal {
+                trigger: RefreshTrigger::Startup
+            }]
+        ));
+        assert_eq!(adapter.starts, 0);
+    }
+
+    #[test]
+    fn activation_fails_closed_for_starting_and_faulted_owners() {
+        let socket = SessionSocket::resolve("/tmp/activation-fault.sock").expect("socket");
+        let binary = std::env::current_exe().expect("current executable");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: &binary,
+        };
+
+        for inspection in [
+            RuntimeInspection::Starting { lease_held: true },
+            RuntimeInspection::Faulted {
+                diagnostic: "invalid owner identity".to_string(),
+                lease_held: true,
+            },
+        ] {
+            let mut adapter = FakeActivationAdapter {
+                inspection: Some(inspection),
+                ..FakeActivationAdapter::default()
+            };
+
+            assert!(activate_current_runtime_with(&launch, &mut adapter).is_err());
+            assert!(adapter.requested_operations.is_empty());
+            assert_eq!(adapter.starts, 0);
+        }
+    }
+
+    #[test]
+    fn activation_preserves_the_owner_when_handoff_validation_or_release_fails() {
+        let socket = SessionSocket::resolve("/tmp/activation-handoff.sock").expect("socket");
+        let binary = std::env::current_exe().expect("current executable");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: Path::new("/tmp/tabby-state"),
+            binary_path: &binary,
+        };
+
+        for (request_error, release_error) in [
+            (
+                Some(SessionRuntimeError::Control(
+                    "invalid replacement peer".to_string(),
+                )),
+                None,
+            ),
+            (
+                None,
+                Some(SessionRuntimeError::Readiness(
+                    "handoff timed out".to_string(),
+                )),
+            ),
+        ] {
+            let mut adapter = FakeActivationAdapter {
+                inspection: Some(ready_inspection(Path::new("/opt/other/tabby"))),
+                request_owner: Some(ReadySessionRuntime {
+                    pid: 101,
+                    launch_id: "old-owner".to_string(),
+                }),
+                request_error,
+                release_error,
+                ..FakeActivationAdapter::default()
+            };
+
+            assert!(activate_current_runtime_with(&launch, &mut adapter).is_err());
+            assert_eq!(adapter.starts, 0);
+        }
+    }
+
+    fn ready_inspection(binary_path: &Path) -> RuntimeInspection {
+        RuntimeInspection::Ready {
+            pid: 101,
+            launch_id: "ready-owner".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            binary_path: crate::startup::binary_identity(binary_path),
+            lease_held: true,
+            last_evaluation_unix_ms: None,
+            last_failure: None,
+            next_periodic_unix_ms: None,
+        }
+    }
+
     #[test]
     fn startup_gate_signals_a_ready_owner_without_spawning() {
         let socket = SessionSocket::resolve("/tmp/herdr.sock").expect("socket");
@@ -2443,6 +2685,14 @@ mod tests {
             binary_path: Path::new("/tmp/tabby"),
         };
         let paths = RuntimePaths::for_launch(&launch);
+        let state_store = crate::locks::SessionTabStateStore::open(&state_base, &socket)
+            .expect("session state store");
+        state_store
+            .mutate(|state| {
+                state.record_plugin_label("tab-1", "nvim");
+                state.lock_tab("tab-1", Some("manual".to_string()));
+            })
+            .expect("persist owner state");
         let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)
             .expect("control listener");
         let (sender, receiver) = trigger_mailbox();
@@ -2457,7 +2707,7 @@ mod tests {
             socket.session_key.clone(),
             socket.identity_hex(),
             "ready-launch".to_string(),
-            owner_identity,
+            owner_identity.clone(),
             sender,
         );
         let declared_identity = PathBuf::from("/bin/sh")
@@ -2483,6 +2733,33 @@ mod tests {
             "subprocess rejected the wrong peer as expected"
         );
         assert!(receiver.recv_until(Some(Instant::now())).is_none());
+
+        let still_ready = send_raw_control_request(
+            &paths.control_socket,
+            ControlRequest {
+                schema_version: CONTROL_SCHEMA_VERSION,
+                session_key: socket.session_key.clone(),
+                socket_identity_hex: socket.identity_hex(),
+                launch_id: "ready-launch".to_string(),
+                request_id: "signal-after-rejected-handoff".to_string(),
+                operation: RuntimeControlOperation::Signal {
+                    trigger: RefreshTrigger::Focus,
+                },
+            },
+        );
+        assert!(still_ready.accepted, "proven owner remains available");
+        assert!(matches!(
+            receiver.recv_until(Some(Instant::now() + Duration::from_secs(1))),
+            Some(RuntimeControlEvent::Trigger(RefreshTrigger::Focus))
+        ));
+        assert_eq!(
+            crate::locks::SessionTabStateStore::inspect_read_only(&state_base, &socket),
+            crate::locks::SessionTabStateInspection::Valid {
+                manual_locks: 1,
+                baselines: 1,
+                unresolved_rename_intents: 0,
+            }
+        );
 
         let _ = fs::remove_file(&paths.control_socket);
         let _ = fs::remove_dir_all(&paths.control_directory);

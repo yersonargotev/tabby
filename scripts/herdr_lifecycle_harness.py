@@ -29,6 +29,7 @@ PLUGIN_ID = "yersonargotev.tabby"
 TRANSCRIPT_SCHEMA_VERSION = 1
 READY_RE = re.compile(
     r"Session Runtime: Ready pid=(?P<pid>\d+).*\n"
+    r"(?:Ready owner binary:.*\n)?"
     r"Session Runtime details: launch_id=(?P<launch>\S+).*"
     r"last_evaluation_unix_ms=(?P<evaluation>\S+)"
 )
@@ -92,7 +93,7 @@ def plan(root: Path) -> Dict[str, Any]:
             "client-attach-detach",
             "manual-lock-stop-restore",
             "runtime-crash-recovery",
-            "release-manifest-handoff",
+            "registered-binary-activation-and-bidirectional-handoff",
         ],
     }
 
@@ -351,7 +352,7 @@ class SessionCase:
 def ready_if_new(case: SessionCase, previous_launch: Optional[str]) -> Optional[ReadyRuntime]:
     try:
         runtime = case.ready_runtime()
-    except (HarnessFailure, OSError):
+    except OSError:
         return None
     return runtime if previous_launch is None or runtime.launch_id != previous_launch else None
 
@@ -461,7 +462,7 @@ def exercise_focused_process_and_manual_lock(
     tab_id = result["tab"]["tab_id"]
 
     expected_actions = {
-        "start": [".herdr/bin/tabby", "ensure-started"],
+        "start": [".herdr/bin/tabby", "start"],
         "refresh": [".herdr/bin/tabby", "refresh"],
         "unlock-focused": [".herdr/bin/tabby", "unlock-focused"],
         "unlock-all": [".herdr/bin/tabby", "unlock-all"],
@@ -612,7 +613,7 @@ def exercise_client_detach(case: SessionCase, owner: ReadyRuntime) -> ReadyRunti
     return after_detach
 
 
-def exercise_release_handoff(
+def exercise_registered_binary_activation(
     root: Path, case: SessionCase, owner: ReadyRuntime
 ) -> ReadyRuntime:
     release_root = root / "release"
@@ -623,20 +624,37 @@ def exercise_release_handoff(
     shutil.copy2(TABBY, release_binary)
     shutil.copy2(REPO_ROOT / "packaging" / "herdr" / "herdr-plugin.toml", release_manifest)
 
-    completed = case.run(
-        "release-install-handoff",
-        [str(release_binary), "install"],
-        environment=case.tabby_environment(),
+    case.herdr("unlink-canonical-plugin", "plugin", "unlink", PLUGIN_ID)
+    case.herdr(
+        "link-homebrew-plugin",
+        "plugin",
+        "link",
+        str(release_manifest.parent),
+        "--enabled",
     )
-    replacement = case.wait_ready("release-owner-ready", owner.launch_id)
-    status = case.tabby("release-binary-status", "status")
+    mismatch = case.tabby("homebrew-mismatch-status", "status")
+    if "plugin action invoke start" not in mismatch.stdout:
+        raise HarnessFailure("status did not recommend the registered start action")
+    case.herdr(
+        "activate-homebrew-binary",
+        "plugin",
+        "action",
+        "invoke",
+        "start",
+        "--plugin",
+        PLUGIN_ID,
+    )
+    replacement = case.wait_ready("homebrew-owner-ready", owner.launch_id)
+    if process_exists(owner.pid):
+        raise HarnessFailure("plugin-root owner remained alive after Homebrew activation")
+    status = case.tabby("homebrew-owner-status", "status")
     if str(release_binary) not in status.stdout:
-        raise HarnessFailure("release manifest did not resolve the packaged binary")
-    if "cooperative handoff" not in completed.stdout:
-        raise HarnessFailure("release install did not report cooperative handoff")
+        raise HarnessFailure("Homebrew manifest did not activate its registered binary")
+    if "1 Manually Locked Tabs" not in status.stdout:
+        raise HarnessFailure("Homebrew activation did not preserve Session-Scoped Tab State")
     evaluation_before_action = replacement.last_evaluation_unix_ms
     case.herdr(
-        "release-manifest-action",
+        "homebrew-manifest-refresh",
         "plugin",
         "action",
         "invoke",
@@ -645,17 +663,43 @@ def exercise_release_handoff(
         PLUGIN_ID,
     )
     wait_for(
-        "release manifest refresh action",
+        "Homebrew manifest refresh action",
         4.0,
         lambda: runtime_after_evaluation(case, evaluation_before_action),
     )
-    case.herdr("release-manifest-action-log", "plugin", "log", "list")
+    case.herdr("homebrew-manifest-action-log", "plugin", "log", "list")
+
+    case.herdr("unlink-homebrew-plugin", "plugin", "unlink", PLUGIN_ID)
+    case.herdr(
+        "relink-canonical-plugin",
+        "plugin",
+        "link",
+        str(REPO_ROOT),
+        "--enabled",
+    )
+    case.herdr(
+        "reactivate-plugin-root-binary",
+        "plugin",
+        "action",
+        "invoke",
+        "start",
+        "--plugin",
+        PLUGIN_ID,
+    )
+    restored = case.wait_ready("plugin-root-owner-ready", replacement.launch_id)
+    if process_exists(replacement.pid):
+        raise HarnessFailure("Homebrew owner remained alive after plugin-root activation")
+    restored_status = case.tabby("plugin-root-owner-status", "status")
+    if str(TABBY) not in restored_status.stdout:
+        raise HarnessFailure("canonical manifest did not reactivate its registered binary")
+    if "1 Manually Locked Tabs" not in restored_status.stdout:
+        raise HarnessFailure("bidirectional handoff did not preserve Session-Scoped Tab State")
     case.recorder.assertion(
         case.name,
-        "release-manifest-handoff",
-        "plain install linked ../../bin/tabby, replaced the prior owner cooperatively, and a Herdr action executed through the release manifest",
+        "registered-binary-activation",
+        "the registered start action moved ownership plugin-root -> Homebrew -> plugin-root, released each old owner before replacement, preserved state, and refreshed through the active manifest",
     )
-    return replacement
+    return restored
 
 
 def write_records(output: Path, records: Iterable[Dict[str, Any]]) -> None:
@@ -702,7 +746,27 @@ def run_live(output: Path) -> None:
             raise HarnessFailure(f"preparation did not create {TABBY}")
         default.start_server("bootstrap-server")
         default.herdr("link-plugin", "plugin", "link", str(REPO_ROOT), "--enabled")
+        default.herdr(
+            "activate-fresh-install",
+            "plugin",
+            "action",
+            "invoke",
+            "start",
+            "--plugin",
+            PLUGIN_ID,
+        )
+        fresh_owner = default.wait_ready("fresh-install-owner-ready")
+        recorder.assertion(
+            "default",
+            "fresh-install-activation",
+            "the registered start action crossed the Startup Gate and confirmed one Ready owner",
+        )
         default.stop_server("bootstrap-stop")
+        wait_for(
+            "fresh install owner lease release",
+            5.0,
+            lambda: not process_exists(fresh_owner.pid),
+        )
 
         for case in cases:
             case.start_server("session-start")
@@ -771,7 +835,9 @@ def run_live(output: Path) -> None:
             "named", "runtime-crash", "supported creation hook restored a new Ready owner"
         )
 
-        owners["default"] = exercise_release_handoff(root, default, owners["default"])
+        owners["default"] = exercise_registered_binary_activation(
+            root, default, owners["default"]
+        )
 
         stopped_owner = owners["default"]
         default.stop_server("session-stop")
