@@ -49,7 +49,7 @@ class ReleaseHarnessPlanTests(unittest.TestCase):
                 "install",
                 "yersonargotev/tabby",
                 "--ref",
-                "v0.1.13",
+                "v0.1.14",
                 "--yes",
             ],
         )

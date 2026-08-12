@@ -18,7 +18,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts" / "install-herdr-plugin.py"
 ASSET = "tabby-aarch64-apple-darwin.tar.xz"
-RELEASE_ROOT = "https://github.com/yersonargotev/tabby/releases/download/v0.1.13"
+RELEASE_ROOT = "https://github.com/yersonargotev/tabby/releases/download/v0.1.14"
 
 installer_spec = importlib.util.spec_from_file_location("install_herdr_plugin", INSTALLER)
 if installer_spec is None or installer_spec.loader is None:
@@ -83,7 +83,7 @@ class FakeAdapter:
 class InstallHerdrPluginTests(unittest.TestCase):
     def plugin_root(self, root: Path) -> None:
         (root / "herdr-plugin.toml").write_text(
-            'id = "yersonargotev.tabby"\nversion = "0.1.13"\n'
+            'id = "yersonargotev.tabby"\nversion = "0.1.14"\n'
         )
 
     def test_installs_the_manifest_version_release_atomically(self) -> None:

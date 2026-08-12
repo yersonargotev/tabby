@@ -1,6 +1,6 @@
 id = "yersonargotev.tabby"
 name = "Tabby"
-version = "0.1.13"
+version = "0.1.14"
 min_herdr_version = "0.8.0"
 description = "Labels the focused tab with a Significant Command or Working Directory Suffix."
 platforms = ["macos"]
