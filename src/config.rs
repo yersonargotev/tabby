@@ -22,6 +22,8 @@ struct ConfigFile {
     labels: LabelsConfig,
     #[serde(default)]
     commands: CommandsConfig,
+    #[serde(default)]
+    directories: DirectoriesConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -37,6 +39,12 @@ struct CommandsConfig {
     additional_significant: Vec<String>,
     additional_ignored: Vec<String>,
     runners: BTreeMap<String, Vec<String>>,
+    aliases: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectoriesConfig {
     aliases: BTreeMap<String, String>,
 }
 
@@ -83,11 +91,15 @@ impl ConfigSource {
 }
 
 pub fn parse(contents: &str) -> Result<LoadedConfig, ConfigError> {
+    parse_with_home(contents, std::env::var_os("HOME").as_deref().map(Path::new))
+}
+
+fn parse_with_home(contents: &str, home: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
     let config: ConfigFile = toml::from_str(contents).map_err(ConfigError::Toml)?;
     if config.version != SCHEMA_VERSION {
         return Err(ConfigError::UnsupportedVersion(config.version));
     }
-    validate(&config)?;
+    let directory_aliases = validate(&config, home)?;
     let runners = config
         .commands
         .runners
@@ -103,6 +115,7 @@ pub fn parse(contents: &str) -> Result<LoadedConfig, ConfigError> {
             config.commands.additional_ignored,
             runners,
             config.commands.aliases,
+            directory_aliases,
             config.labels.max_length.unwrap_or(32),
             config.labels.cwd_components.unwrap_or(1),
         ),
@@ -193,7 +206,10 @@ impl From<crate::paths::StatePathError> for ConfigError {
     }
 }
 
-fn validate(config: &ConfigFile) -> Result<(), ConfigError> {
+fn validate(
+    config: &ConfigFile,
+    home: Option<&Path>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
     validate_range(
         "labels.max_length",
         config.labels.max_length.unwrap_or(32),
@@ -260,7 +276,49 @@ fn validate(config: &ConfigFile) -> Result<(), ConfigError> {
         validate_label_text("commands.aliases", key)?;
         validate_label_text(&format!("commands.aliases.{key}"), value)?;
     }
-    Ok(())
+    normalize_directory_aliases(&config.directories.aliases, home)
+}
+
+fn normalize_directory_aliases(
+    aliases: &BTreeMap<String, String>,
+    home: Option<&Path>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    let mut normalized_aliases = BTreeMap::new();
+    for (selector, alias) in aliases {
+        let field = format!("directories.aliases.{selector}");
+        validate_label_text(&field, alias)?;
+        let path = if selector == "~" {
+            home.map(Path::to_path_buf)
+                .ok_or_else(|| ConfigError::Validation {
+                    field: field.clone(),
+                    reason: "uses `~` but HOME is not set".to_string(),
+                })?
+        } else if let Some(relative) = selector.strip_prefix("~/") {
+            home.map(|home| home.join(relative))
+                .ok_or_else(|| ConfigError::Validation {
+                    field: field.clone(),
+                    reason: "uses `~/` but HOME is not set".to_string(),
+                })?
+        } else {
+            PathBuf::from(selector)
+        };
+        let normalized = crate::labeler::normalize_absolute_path(&path).ok_or_else(|| {
+            ConfigError::Validation {
+                field: field.clone(),
+                reason: "must be an absolute path or start with `~/`".to_string(),
+            }
+        })?;
+        if normalized_aliases
+            .insert(normalized.clone(), alias.clone())
+            .is_some()
+        {
+            return validation_error(
+                &field,
+                format!("duplicates normalized directory selector `{normalized}`"),
+            );
+        }
+    }
+    Ok(normalized_aliases)
 }
 
 fn validate_range(
@@ -384,6 +442,86 @@ pnpm = ["lint"]
     }
 
     #[test]
+    fn directory_aliases_replace_only_the_normalized_working_directory_fallback() {
+        let loaded = parse_with_home(
+            r#"
+version = 1
+
+[labels]
+max_length = 4
+
+[directories.aliases]
+"/Users/me/code/./tabby" = "repository"
+"~/code/notes" = "notes"
+"/Users/me/code/linked" = "linked"
+"/Users/me/code/real" = "real"
+"/Users/me/code/deleted-path" = "gone"
+"#,
+            Some(Path::new("/Users/me")),
+        )
+        .expect("valid directory aliases");
+
+        let mut pane = pane_with_cwd("unrelated");
+        pane.cwd = Some("/Users/me/code/tabby/../tabby".to_string());
+        assert_eq!(label_for(&loaded, &pane, None), "repo");
+
+        pane.foreground_cwd = Some("/Users/me/code/notes".to_string());
+        assert_eq!(label_for(&loaded, &pane, None), "note");
+
+        pane.foreground_cwd = Some("/Users/me/code/linked".to_string());
+        assert_eq!(label_for(&loaded, &pane, None), "link");
+        pane.foreground_cwd = Some("/Users/me/code/real".to_string());
+        assert_eq!(label_for(&loaded, &pane, None), "real");
+
+        pane.foreground_cwd = None;
+        pane.cwd = Some("/Users/me/code/deleted-path".to_string());
+        assert_eq!(label_for(&loaded, &pane, None), "gone");
+
+        pane.cwd = Some("/Users/me/code/tabby".to_string());
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("nvim", &["nvim"]))),
+            "nvim"
+        );
+    }
+
+    #[test]
+    fn directory_alias_validation_reports_the_specific_field() {
+        for (contents, home, field) in [
+            (
+                "version = 1\n[directories.aliases]\nrelative = \"alias\"",
+                Some(Path::new("/Users/me")),
+                "directories.aliases.relative",
+            ),
+            (
+                "version = 1\n[directories.aliases]\n\"~/code\" = \"alias\"",
+                None,
+                "directories.aliases.~/code",
+            ),
+            (
+                "version = 1\n[directories.aliases]\n\"/code\" = \"\"",
+                Some(Path::new("/Users/me")),
+                "directories.aliases./code",
+            ),
+            (
+                "version = 1\n[directories.aliases]\n\"/code/./tabby\" = \"one\"\n\"/code/tabby\" = \"two\"",
+                Some(Path::new("/Users/me")),
+                "directories.aliases./code/tabby",
+            ),
+            (
+                "version = 1\n[directories.aliases]\n\"/code\" = \"bad\\u0000label\"",
+                Some(Path::new("/Users/me")),
+                "directories.aliases./code",
+            ),
+        ] {
+            let error = parse_with_home(contents, home).expect_err("invalid directory alias");
+            assert!(
+                error.to_string().contains(field),
+                "diagnostic `{error}` did not identify `{field}`"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_each_invalid_schema_category_with_a_field_diagnostic() {
         for (contents, field) in [
             ("version = 2", "version"),
@@ -421,6 +559,7 @@ pnpm = ["lint"]
                 "version = 1\n[commands.aliases]\ngit = \"bad\\u0000label\"",
                 "commands.aliases.git",
             ),
+            ("version = 1\n[directories]\nunknown = true", "unknown"),
         ] {
             let error = parse(contents).expect_err("configuration must be rejected");
             assert!(
@@ -482,21 +621,24 @@ pnpm = ["lint"]
         ));
         fs::create_dir_all(&directory).expect("config directory");
         let path = path_in_config_dir(&directory);
-        let active = parse("version = 1\n[commands]\nadditional_significant = [\"btop\"]\n")
-            .expect("initial policy");
+        let active =
+            parse("version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"project\"\n")
+                .expect("initial policy");
         fs::write(&path, "version = 2\n").expect("invalid replacement");
 
         assert!(load(&path).is_err());
-        assert_eq!(candidate(&active, "btop", &["btop"]), "btop");
+        assert_eq!(label_for(&active, &pane_with_cwd("tabby"), None), "project");
 
         fs::write(
             &path,
-            "version = 1\n[commands]\nadditional_significant = [\"yazi\"]\n",
+            "version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"repository\"\n",
         )
         .expect("valid replacement");
         let replacement = load(&path).expect("replace active policy");
-        assert_eq!(candidate(&replacement, "btop", &["btop"]), "tabby");
-        assert_eq!(candidate(&replacement, "yazi", &["yazi"]), "yazi");
+        assert_eq!(
+            label_for(&replacement, &pane_with_cwd("tabby"), None),
+            "repository"
+        );
 
         fs::remove_dir_all(directory).expect("remove config directory");
     }
@@ -509,13 +651,21 @@ pnpm = ["lint"]
         assert_eq!(candidate(&loaded, "unknown", &["unknown"]), "tabby");
     }
 
-    fn candidate(loaded: &LoadedConfig, name: &str, argv: &[&str]) -> String {
+    fn label_for(
+        loaded: &LoadedConfig,
+        pane: &PaneInfo,
+        process_info: Option<&PaneProcessInfo>,
+    ) -> String {
         loaded
             .policy()
-            .candidate_for_pane(&pane_with_cwd("tabby"), Some(&process(name, argv)))
+            .candidate_for_pane(pane, process_info)
             .expect("candidate")
             .label()
             .to_string()
+    }
+
+    fn candidate(loaded: &LoadedConfig, name: &str, argv: &[&str]) -> String {
+        label_for(loaded, &pane_with_cwd("tabby"), Some(&process(name, argv)))
     }
 
     fn pane_with_cwd(basename: &str) -> PaneInfo {
