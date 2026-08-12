@@ -36,7 +36,7 @@ python3 scripts/herdr_release_harness.py
 - Reinstalling the pinned GitHub release rotated the registered executable instance. During explicit `start`, 10 ms sampling first observed prior PID 32449 exit at +261 ms and then replacement PID 32534 Ready at +281 ms; no sample observed overlapping owners. The corresponding launch ids also changed.
 - Two consecutive Runtime Status reads reported `Warnings: none`, retained the same owner, and did not change Session-Scoped Tab State.
 - After a real tmux-hosted Herdr client detached, the same Ready owner completed another periodic evaluation.
-- Session Stop ended that owner. Session Restore created PID 28042 / launch `28040-18caf1ab4d55cfd0-0` and retained the manual label and lock.
+- Session Stop ended that owner. Session Restore created PID 32591 / launch `32590-18caf1ecb73c4050-0` and retained the manual label and lock.
 - `herdr plugin uninstall yersonargotev.tabby` removed the registration. Session-Scoped Tab State remained unchanged under isolated Herdr state and outside the managed source root.
 
 ## Release-path defect found and corrected
