@@ -134,7 +134,7 @@ A local Unix socket used by hooks to signal the Ready Session Runtime without pe
 _Avoid_: public socket, refresh hook, remote API
 
 **Cooperative Runtime Handoff**:
-An authenticated replacement requested by `tabby install` when a different Tabby version already owns the session. The Ready owner finishes or cancels bounded work, closes its Herdr connections and control endpoint, and releases the Session Runtime Lease before the installed version starts. A failed handoff does not authorize killing a process by PID.
+An authenticated replacement requested by the explicit `start` activation path, including activation after `tabby install`, when a different validated Tabby binary already owns the session. The Ready owner finishes or cancels bounded work, closes its Herdr connections and control endpoint, and releases the Session Runtime Lease before the invoking registered binary starts. A failed handoff does not authorize killing a process by PID.
 _Avoid_: force restart, overlapping upgrade, PID kill
 
 **Runtime Status**:
