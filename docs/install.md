@@ -1,8 +1,28 @@
-# Install Tabby with Homebrew
+# Install Tabby
 
-Use this guide to install the released Tabby Herdr plugin from the approved Homebrew tap, register it with Herdr, verify what Herdr will run, and remove or roll back the install.
+Use this guide to install the released Tabby plugin through Herdr on Apple Silicon macOS, or use Homebrew as an alternative distribution adapter.
 
-## Release install
+## Herdr-managed install
+
+Install and register the GitHub-managed plugin:
+
+```sh
+herdr plugin install yersonargotev/tabby
+```
+
+Herdr shows the manifest build command in its trust preview, checks out the source into its managed plugin directory, and runs the command before registration. Tabby's installer reads the requested version from `herdr-plugin.toml`, downloads `tabby-aarch64-apple-darwin.tar.xz` and its published checksum from that version's GitHub Release, verifies SHA-256 before extraction, and atomically places the executable at `.herdr/bin/tabby`. A failure leaves the plugin unregistered and does not replace a previously complete executable with a partial file.
+
+The supported path requires Apple Silicon macOS, network access to `github.com`, and Python 3.9 or newer with standard-library HTTPS, SHA-256, and xz/tar support. It does not require Rust. Only when the matching release archive returns HTTP 404 may the installer run `cargo build --release --locked`. That fallback requires the current stable Rust toolchain, with both `cargo` and `rustc` available on `PATH`; install it through [rustup](https://rustup.rs/) and keep `Cargo.lock` unchanged. Intel macOS, Linux, and Windows are rejected rather than receiving an untested binary.
+
+Start Tabby immediately in the current Herdr Session:
+
+```sh
+herdr plugin action invoke start --plugin yersonargotev.tabby
+```
+
+Re-running `herdr plugin install yersonargotev/tabby` updates the Herdr-managed checkout and rebuilds the same canonical executable contract.
+
+## Homebrew alternative
 
 Install the released package from the approved tap:
 
@@ -16,9 +36,7 @@ Register, or refresh, the Homebrew-managed plugin directory with Herdr:
 tabby install
 ```
 
-This is the v1 release path. Homebrew installs the `tabby` binary and release manifest; registration remains an explicit user command. `tabby install` idempotently relinks the shipped manifest and ensures the current Herdr Session is owned by the installed Session Runtime. When another Tabby binary owns it, the authenticated control endpoint performs a cooperative handoff; Tabby never kills an owner by PID.
-
-Do not use `herdr plugin install yersonargotev/tabby` for the v1 release path. The Herdr marketplace/GitHub install path is intentionally not part of v1.
+Homebrew installs the `tabby` binary and its alternative release manifest; registration remains an explicit user command. `tabby install` idempotently relinks that manifest and ensures the current Herdr Session is owned by the installed Session Runtime. When another Tabby binary owns it, the authenticated control endpoint performs a cooperative handoff; Tabby never kills an owner by PID.
 
 ## Verify the install
 
@@ -135,10 +153,12 @@ Repair is never implicit and `tabby status` never performs it. To remove valid r
 
 ## Trust model
 
-Herdr plugins run their configured commands as normal user code on your machine. Installing and linking Tabby means you trust the `tabby` binary from `yersonargotev/tap/tabby` and the Herdr manifest installed with that package.
+Herdr plugins run their configured commands as normal user code on your machine. A GitHub-managed install runs `python3 scripts/install-herdr-plugin.py` from the reviewed checkout with network access, then executes the verified Tabby binary. The installer contacts only the versioned release URLs under `github.com/yersonargotev/tabby`, downloads an archive and checksum, and writes the canonical executable inside the managed plugin root. The optional source fallback executes the local Rust `cargo` toolchain. Homebrew users instead trust the binary and manifest from `yersonargotev/tap/tabby`.
 
-The v1 release path is intentionally explicit:
+The release paths are intentionally explicit:
 
+- Herdr previews the GitHub-managed build command and aborts before registration on any build failure.
+- Downloaded bytes are never extracted or executed until their published SHA-256 checksum is present, well-formed, and matches.
 - Homebrew installs files only; there is no silent Homebrew postinstall that registers or starts the plugin.
 - `tabby install` is the separate opt-in registration/start step and may perform authenticated cooperative handoff.
 - One lifetime lease keyed by lossless canonical socket identity prevents overlapping owners.
@@ -183,6 +203,12 @@ Disable the plugin without removing the Homebrew package:
 
 ```sh
 herdr plugin disable yersonargotev.tabby
+```
+
+Remove a GitHub-managed checkout and its registration with:
+
+```sh
+herdr plugin uninstall yersonargotev.tabby
 ```
 
 Unregister the Homebrew-linked plugin and uninstall the package:

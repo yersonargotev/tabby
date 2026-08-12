@@ -60,24 +60,13 @@ class HerdrManifestContractTests(unittest.TestCase):
         self.assertEqual({command[0] for command in commands}, {CANONICAL_BINARY})
         self.assertNotIn("scaffold", manifest["description"].lower())
 
-    def test_validator_allows_a_canonical_build_adapter(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            canonical = root / "herdr-plugin.toml"
-            homebrew = root / "homebrew-plugin.toml"
-            cargo = root / "Cargo.toml"
-            shutil.copy2(REPO_ROOT / "herdr-plugin.toml", canonical)
-            shutil.copy2(REPO_ROOT / "packaging/herdr/herdr-plugin.toml", homebrew)
-            shutil.copy2(REPO_ROOT / "Cargo.toml", cargo)
-            canonical.write_text(
-                canonical.read_text()
-                + '\n[[build]]\ncommand = ["python3", "scripts/install-herdr-plugin.py"]\n'
-            )
+    def test_canonical_manifest_declares_one_release_install_build_command(self) -> None:
+        manifest = checker.load_manifest(REPO_ROOT / "herdr-plugin.toml")
 
-            completed = self.run_checker(canonical, homebrew, cargo)
-
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn(str(canonical), completed.stdout)
+        self.assertEqual(
+            manifest["build"],
+            [{"command": ["python3", "scripts/install-herdr-plugin.py"]}],
+        )
 
     def test_validator_rejects_product_semantic_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -8,8 +8,11 @@ platforms = ["macos"]
 # Canonical plugin-root executable contract. Local development flow:
 #   cargo build && python3 scripts/prepare-herdr-plugin.py
 #   herdr plugin link .
-# Herdr plugin link does not run build commands. GitHub-managed installation will
-# prepare this same path through the distribution build adapter.
+# Herdr plugin link does not run build commands. GitHub-managed installation runs
+# this command before registration and prepares the same stable path.
+
+[[build]]
+command = ["python3", "scripts/install-herdr-plugin.py"]
 
 [[startup]]
 command = [".herdr/bin/tabby", "ensure-started"]
