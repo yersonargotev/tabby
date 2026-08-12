@@ -126,5 +126,6 @@ Release setup and tagging details live in [`docs/release.md`](docs/release.md). 
 | [`docs/design/architecture.md`](docs/design/architecture.md) | Architecture and module responsibilities. |
 | [`docs/evidence/issue-71-herdr-0.8-lifecycle.md`](docs/evidence/issue-71-herdr-0.8-lifecycle.md) | Recorded real-Herdr 0.8 lifecycle evidence and coverage limits. |
 | [`docs/evidence/issue-79-herdr-native-release.md`](docs/evidence/issue-79-herdr-native-release.md) | Recorded native release install, activation, lifecycle, and cleanup evidence. |
+| [`docs/evidence/issue-80-herdr-marketplace.md`](docs/evidence/issue-80-herdr-marketplace.md) | Recorded public marketplace discovery and final isolated install smoke evidence. |
 | [`docs/adr/`](docs/adr/) | Accepted architecture decisions. |
 | [`docs/herdr-tab-title-research.md`](docs/herdr-tab-title-research.md) | Historical research that preceded the implemented Session Runtime. |
