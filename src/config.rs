@@ -365,6 +365,25 @@ pnpm = ["lint"]
     }
 
     #[test]
+    fn user_ignored_runner_from_node_shim_falls_back_to_working_directory_suffix() {
+        let loaded = parse("version = 1\n[commands]\nadditional_ignored = [\"pnpm\"]\n")
+            .expect("valid configuration");
+
+        assert_eq!(
+            candidate(
+                &loaded,
+                "node",
+                &[
+                    "node",
+                    "/Users/me/Library/pnpm/.tools/pnpm/11.1.2/node_modules/pnpm/bin/pnpm.mjs",
+                    "dev",
+                ],
+            ),
+            "tabby"
+        );
+    }
+
+    #[test]
     fn rejects_each_invalid_schema_category_with_a_field_diagnostic() {
         for (contents, field) in [
             ("version = 2", "version"),

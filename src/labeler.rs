@@ -161,6 +161,7 @@ impl LabelPolicy {
                 argv.get(1).and_then(|argument| node_runner(argument)),
                 argv.get(2).map(String::as_str),
             )
+            && !self.user_ignored_commands.contains(runner)
             && self.is_runner_subcommand(runner, subcommand)
         {
             return Some(format!("{runner} {subcommand}"));
