@@ -35,10 +35,11 @@ TRANSCRIPT_SCHEMA_VERSION = 1
 
 
 READY_RE = re.compile(
-    r"Session Runtime: Ready pid=(?P<pid>\d+).*[\n]"
-    r"(?:Ready owner binary:.*[\n])?"
-    r"Session Runtime details: launch_id=(?P<launch>\S+).*"
-    r"last_evaluation_unix_ms=(?P<evaluation>\S+)"
+    r"^Session Runtime: Ready pid=(?P<pid>\d+).*\n"
+    r"(?:.*\n)*?"
+    r"^Session Runtime details: launch_id=(?P<launch>\S+).*"
+    r"last_evaluation_unix_ms=(?P<evaluation>\S+)",
+    re.MULTILINE,
 )
 
 
@@ -162,6 +163,9 @@ def assert_registration(
     expected_actions = {
         "start": [".herdr/bin/tabby", "start"],
         "refresh": [".herdr/bin/tabby", "refresh"],
+        "config-path": [".herdr/bin/tabby", "config", "path"],
+        "config-check": [".herdr/bin/tabby", "config", "check"],
+        "config-reload": [".herdr/bin/tabby", "config", "reload"],
         "unlock-focused": [".herdr/bin/tabby", "unlock-focused"],
         "unlock-all": [".herdr/bin/tabby", "unlock-all"],
     }
