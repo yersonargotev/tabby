@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
-"""Check that Tabby's dev and release Herdr manifests only differ where intended."""
+"""Validate Tabby's canonical and Homebrew Herdr manifest adapters."""
 
 from __future__ import annotations
 
+import argparse
 import ast
+import copy
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-DEV_MANIFEST = Path("herdr-plugin.toml")
-RELEASE_MANIFEST = Path("packaging/herdr/herdr-plugin.toml")
+
+CANONICAL_MANIFEST = Path("herdr-plugin.toml")
+HOMEBREW_MANIFEST = Path("packaging/herdr/herdr-plugin.toml")
 CARGO_MANIFEST = Path("Cargo.toml")
-DEV_BINARY = "target/debug/tabby"
-RELEASE_BINARY = "../../bin/tabby"
+CANONICAL_BINARY = ".herdr/bin/tabby"
+HOMEBREW_BINARY = "../../bin/tabby"
+COLLECTIONS = ("build", "startup", "actions", "events")
+ACTION_COMMANDS = {
+    "start": ["ensure-started"],
+    "refresh": ["refresh"],
+    "unlock-focused": ["unlock-focused"],
+    "unlock-all": ["unlock-all"],
+}
+EVENT_COMMANDS = {
+    "pane.focused": ["signal-focus"],
+    "workspace.created": ["signal-created"],
+    "tab.created": ["signal-created"],
+}
 
 
 def parse_value(raw: str) -> Any:
@@ -25,24 +40,21 @@ def parse_value(raw: str) -> Any:
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
-    manifest: dict[str, Any] = {"actions": [], "events": [], "startup": []}
+    manifest: dict[str, Any] = {name: [] for name in COLLECTIONS}
     current_section: dict[str, Any] | None = None
 
     for line_number, line in enumerate(path.read_text().splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if stripped == "[[actions]]":
+        if stripped.startswith("[[") and stripped.endswith("]]"):
+            section_name = stripped[2:-2]
+            if section_name not in COLLECTIONS:
+                raise ValueError(
+                    f"{path}:{line_number}: unsupported TOML section: {stripped!r}"
+                )
             current_section = {}
-            manifest["actions"].append(current_section)
-            continue
-        if stripped == "[[events]]":
-            current_section = {}
-            manifest["events"].append(current_section)
-            continue
-        if stripped == "[[startup]]":
-            current_section = {}
-            manifest["startup"].append(current_section)
+            manifest[section_name].append(current_section)
             continue
         if "=" not in stripped:
             raise ValueError(f"{path}:{line_number}: unsupported TOML line: {line!r}")
@@ -52,16 +64,6 @@ def load_manifest(path: Path) -> dict[str, Any]:
         target[key.strip()] = parse_value(raw_value)
 
     return manifest
-
-
-def action_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    actions = manifest.get("actions", [])
-    return {action["id"]: action for action in actions}
-
-
-def event_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    events = manifest.get("events", [])
-    return {event["on"]: event for event in events}
 
 
 def cargo_package_version(path: Path) -> str:
@@ -81,33 +83,66 @@ def cargo_package_version(path: Path) -> str:
     raise ValueError(f"{path}: missing [package] version")
 
 
-def check_command_pair(
+def entry_name(collection: str, entry: dict[str, Any], index: int) -> str:
+    if collection == "actions":
+        return str(entry.get("id", index))
+    if collection == "events":
+        return str(entry.get("on", index))
+    return str(index)
+
+
+def check_binary_contract(
     errors: list[str],
-    kind: str,
-    name: str,
-    dev_command: list[str],
-    release_command: list[str],
-    expected_args: list[str] | None = None,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    expected_binary: str,
 ) -> None:
-    if not dev_command or dev_command[0] != DEV_BINARY:
-        errors.append(f"dev {kind} {name!r} must invoke {DEV_BINARY!r}, got {dev_command!r}")
-    if not release_command or release_command[0] != RELEASE_BINARY:
-        errors.append(
-            f"release {kind} {name!r} must invoke {RELEASE_BINARY!r}, got {release_command!r}"
-        )
-    if dev_command[1:] != release_command[1:]:
-        errors.append(
-            f"{kind} {name!r} command args differ after binary path: "
-            f"{dev_command[1:]!r} != {release_command[1:]!r}"
-        )
-    if expected_args is not None and dev_command[1:] != expected_args:
-        errors.append(f"{kind} {name!r} must run {' '.join(expected_args)}, got {dev_command[1:]!r}")
+    for collection in ("startup", "actions", "events"):
+        for index, entry in enumerate(manifest[collection]):
+            command = entry.get("command")
+            name = entry_name(collection, entry, index)
+            if not isinstance(command, list) or not command:
+                errors.append(
+                    f"{manifest_path} {collection} {name!r} must declare a command"
+                )
+            elif command[0] != expected_binary:
+                errors.append(
+                    f"{manifest_path} {collection} {name!r} must invoke "
+                    f"{expected_binary!r}, got {command!r}"
+                )
+            if not isinstance(command, list) or not command:
+                continue
+            expected_args = None
+            if collection == "startup":
+                expected_args = ["ensure-started"]
+            elif collection == "actions":
+                expected_args = ACTION_COMMANDS.get(entry.get("id"))
+            elif collection == "events":
+                expected_args = EVENT_COMMANDS.get(entry.get("on"))
+            if expected_args is not None and command[1:] != expected_args:
+                errors.append(
+                    f"{manifest_path} {collection[:-1]} {name!r} must run "
+                    f"{expected_args!r}, got {command[1:]!r}"
+                )
 
 
-def main() -> int:
-    dev = load_manifest(DEV_MANIFEST)
-    release = load_manifest(RELEASE_MANIFEST)
-    package_version = cargo_package_version(CARGO_MANIFEST)
+def normalized_product_semantics(manifest: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(manifest)
+    normalized.pop("build", None)
+    for collection in ("startup", "actions", "events"):
+        for entry in normalized[collection]:
+            command = entry.get("command")
+            if isinstance(command, list) and command:
+                command[0] = "<distribution-binary>"
+    return normalized
+
+
+def check_manifests(
+    canonical_path: Path, homebrew_path: Path, cargo_path: Path
+) -> list[str]:
+    canonical = load_manifest(canonical_path)
+    homebrew = load_manifest(homebrew_path)
+    package_version = cargo_package_version(cargo_path)
     errors: list[str] = []
 
     allowed_top_level_keys = {
@@ -117,150 +152,89 @@ def main() -> int:
         "min_herdr_version",
         "description",
         "platforms",
-        "actions",
-        "events",
-        "startup",
+        *COLLECTIONS,
     }
-    for manifest_path, manifest in [(DEV_MANIFEST, dev), (RELEASE_MANIFEST, release)]:
+    for manifest_path, manifest in (
+        (canonical_path, canonical),
+        (homebrew_path, homebrew),
+    ):
         extra_keys = set(manifest) - allowed_top_level_keys
         if extra_keys:
             errors.append(
                 f"{manifest_path} has unsupported top-level keys: {sorted(extra_keys)}"
             )
 
-    for key in ["id", "name", "version", "min_herdr_version", "platforms"]:
-        if dev.get(key) != release.get(key):
-            errors.append(
-                f"{key} differs: {DEV_MANIFEST} has {dev.get(key)!r}, "
-                f"{RELEASE_MANIFEST} has {release.get(key)!r}"
-            )
+    if homebrew["build"]:
+        errors.append(f"{homebrew_path} must not declare distribution build commands")
+    if len(canonical["build"]) > 1:
+        errors.append(f"{canonical_path} may declare at most one distribution build command")
 
-    if dev.get("min_herdr_version") != "0.8.0":
+    if normalized_product_semantics(canonical) != normalized_product_semantics(homebrew):
         errors.append(
-            f"{DEV_MANIFEST} min_herdr_version must be '0.8.0', "
-            f"got {dev.get('min_herdr_version')!r}"
+            "product semantics differ after allowing only distribution build and "
+            f"executable paths: {canonical_path} != {homebrew_path}"
         )
 
-    if dev.get("version") != package_version:
+    check_binary_contract(errors, canonical_path, canonical, CANONICAL_BINARY)
+    check_binary_contract(errors, homebrew_path, homebrew, HOMEBREW_BINARY)
+
+    if canonical.get("min_herdr_version") != "0.8.0":
         errors.append(
-            f"manifest version {dev.get('version')!r} must match Cargo package version "
-            f"{package_version!r}"
+            f"{canonical_path} min_herdr_version must be '0.8.0', "
+            f"got {canonical.get('min_herdr_version')!r}"
         )
-
-    for manifest_path, startup_commands in [
-        (DEV_MANIFEST, dev.get("startup", [])),
-        (RELEASE_MANIFEST, release.get("startup", [])),
-    ]:
-        if len(startup_commands) != 1:
-            errors.append(
-                f"{manifest_path} must declare exactly one startup command, "
-                f"got {len(startup_commands)}"
-            )
-
-    dev_startup = dev.get("startup", [])
-    release_startup = release.get("startup", [])
-    if len(dev_startup) == len(release_startup) == 1:
-        for manifest_path, startup in [
-            (DEV_MANIFEST, dev_startup[0]),
-            (RELEASE_MANIFEST, release_startup[0]),
-        ]:
-            extra_keys = set(startup) - {"command"}
-            if extra_keys:
-                errors.append(
-                    f"startup command in {manifest_path} has unsupported keys: "
-                    f"{sorted(extra_keys)}"
-                )
-        check_command_pair(
-            errors,
-            "startup",
-            "default",
-            dev_startup[0].get("command", []),
-            release_startup[0].get("command", []),
-            ["ensure-started"],
+    if canonical.get("version") != package_version:
+        errors.append(
+            f"manifest version {canonical.get('version')!r} must match Cargo package "
+            f"version {package_version!r}"
         )
+    if len(canonical["startup"]) != 1 or len(homebrew["startup"]) != 1:
+        errors.append("each manifest must declare exactly one startup command")
 
     expected_actions = {"start", "refresh", "unlock-focused", "unlock-all"}
-    dev_actions = action_map(dev)
-    release_actions = action_map(release)
-    if set(dev_actions) != expected_actions:
-        errors.append(
-            f"dev action ids must be {sorted(expected_actions)}, got {sorted(dev_actions)}"
-        )
-    if set(release_actions) != expected_actions:
-        errors.append(
-            f"release action ids must be {sorted(expected_actions)}, got {sorted(release_actions)}"
-        )
-    if set(dev_actions) != set(release_actions):
-        errors.append(
-            "action ids differ: "
-            f"{DEV_MANIFEST} has {sorted(dev_actions)}, "
-            f"{RELEASE_MANIFEST} has {sorted(release_actions)}"
-        )
+    for manifest_path, manifest in (
+        (canonical_path, canonical),
+        (homebrew_path, homebrew),
+    ):
+        action_ids = [action.get("id") for action in manifest["actions"]]
+        if len(action_ids) != len(set(action_ids)):
+            errors.append(f"{manifest_path} action ids must be unique")
+        if set(action_ids) != expected_actions:
+            errors.append(
+                f"{manifest_path} action ids must be {sorted(expected_actions)}, "
+                f"got {sorted(str(value) for value in set(action_ids))}"
+            )
+        event_names = [event.get("on") for event in manifest["events"]]
+        expected_events = {"pane.focused", "workspace.created", "tab.created"}
+        if len(event_names) != len(set(event_names)):
+            errors.append(f"{manifest_path} event hooks must be unique")
+        if set(event_names) != expected_events:
+            errors.append(
+                f"{manifest_path} event hooks must be {sorted(expected_events)}, "
+                f"got {sorted(str(value) for value in set(event_names))}"
+            )
 
-    for action_id in sorted(set(dev_actions) & set(release_actions)):
-        dev_action = dev_actions[action_id]
-        release_action = release_actions[action_id]
-        for key in ["title", "contexts"]:
-            if dev_action.get(key) != release_action.get(key):
-                errors.append(
-                    f"action {action_id!r} {key} differs: "
-                    f"{dev_action.get(key)!r} != {release_action.get(key)!r}"
-                )
+    return errors
 
-        dev_command = dev_action.get("command", [])
-        release_command = release_action.get("command", [])
-        check_command_pair(
-            errors,
-            "action",
-            action_id,
-            dev_command,
-            release_command,
-            ["ensure-started"]
-            if action_id == "start"
-            else (["refresh"] if action_id == "refresh" else None),
-        )
 
-    expected_events = {"pane.focused", "workspace.created", "tab.created"}
-    dev_events = event_map(dev)
-    release_events = event_map(release)
-    if set(dev_events) != expected_events:
-        errors.append(
-            f"dev event hooks must be {sorted(expected_events)}, got {sorted(dev_events)}"
-        )
-    if set(release_events) != expected_events:
-        errors.append(
-            f"release event hooks must be {sorted(expected_events)}, got {sorted(release_events)}"
-        )
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--canonical-manifest", type=Path, default=CANONICAL_MANIFEST)
+    parser.add_argument("--homebrew-manifest", type=Path, default=HOMEBREW_MANIFEST)
+    parser.add_argument("--cargo-manifest", type=Path, default=CARGO_MANIFEST)
+    return parser.parse_args(argv)
 
-    for event_name in sorted(set(dev_events) & set(release_events)):
-        dev_event = dev_events[event_name]
-        release_event = release_events[event_name]
-        for manifest_path, event in [
-            (DEV_MANIFEST, dev_event),
-            (RELEASE_MANIFEST, release_event),
-        ]:
-            extra_keys = set(event) - {"on", "command"}
-            if extra_keys:
-                errors.append(
-                    f"event {event_name!r} in {manifest_path} has unsupported keys: "
-                    f"{sorted(extra_keys)}"
-                )
 
-        dev_command = dev_event.get("command", [])
-        release_command = release_event.get("command", [])
-        expected_args = (
-            ["signal-focus"]
-            if event_name == "pane.focused"
-            else ["signal-created"]
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        errors = check_manifests(
+            args.canonical_manifest, args.homebrew_manifest, args.cargo_manifest
         )
-        check_command_pair(
-            errors,
-            "event",
-            event_name,
-            dev_command,
-            release_command,
-            expected_args,
-        )
+        package_version = cargo_package_version(args.cargo_manifest)
+    except (OSError, SyntaxError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
 
     if errors:
         for error in errors:
@@ -268,8 +242,8 @@ def main() -> int:
         return 1
 
     print(
-        f"{DEV_MANIFEST} and {RELEASE_MANIFEST} are in sync and match Cargo package version "
-        f"{package_version}"
+        f"{args.canonical_manifest} and {args.homebrew_manifest} have identical product "
+        f"semantics and match Cargo package version {package_version}"
     )
     return 0
 

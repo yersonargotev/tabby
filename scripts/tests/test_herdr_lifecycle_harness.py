@@ -76,6 +76,14 @@ class HarnessPlanTests(unittest.TestCase):
                 "release-manifest-handoff",
             ],
         )
+        self.assertEqual(
+            plan["plugin_root_binary"],
+            str(REPO_ROOT / ".herdr" / "bin" / "tabby"),
+        )
+        self.assertEqual(
+            plan["prepare_command"],
+            [sys.executable, str(REPO_ROOT / "scripts" / "prepare-herdr-plugin.py")],
+        )
 
 
 if __name__ == "__main__":

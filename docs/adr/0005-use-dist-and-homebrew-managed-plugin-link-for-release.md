@@ -1,6 +1,6 @@
 # Use dist and Homebrew-managed plugin linking for releases
 
-Status: Accepted. The packaged registration command is now plain `tabby install`; ADR 0010 defines its ensure/handoff lifecycle behavior.
+Status: Partially superseded by [ADR 0011](0011-use-a-canonical-production-plugin-root.md). Homebrew remains an accepted alternative adapter; the root-manifest-as-development-only decision is superseded. The packaged registration command is plain `tabby install`, and ADR 0010 defines its ensure/handoff lifecycle behavior.
 
 Tabby's first public release path will use `dist`/`cargo-dist` to publish GitHub Release artifacts, SHA-256 checksums, and a Homebrew formula in the general `yersonargotev/homebrew-tap` tap. The v1 release targets Apple Silicon macOS only and installs the `tabby` binary plus release plugin assets through Homebrew; users then explicitly register the plugin with Herdr using a command like `herdr plugin link "$(brew --prefix tabby)/share/tabby"`.
 

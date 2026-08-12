@@ -11,7 +11,7 @@ brew install yersonargotev/tap/tabby
 tabby install
 ```
 
-The Homebrew formula installs the `tabby` binary under the package `bin` directory and installs `packaging/herdr/herdr-plugin.toml` as `share/tabby/herdr-plugin.toml`. The release manifest invokes `../../bin/tabby` relative to `share/tabby`, keeping Herdr actions tied to the binary installed by the same Homebrew package. `tabby install` refreshes Herdr registration by unlinking any prior `yersonargotev.tabby` plugin and linking the current package manifest, which avoids stale versioned Cellar paths after Homebrew cleanup. It then ensures the installed binary owns the selected Session Runtime, using authenticated cooperative handoff when required.
+The Homebrew formula installs the `tabby` binary under the package `bin` directory and installs `packaging/herdr/herdr-plugin.toml` as `share/tabby/herdr-plugin.toml`. The release manifest invokes `../../bin/tabby` relative to `share/tabby`, keeping Herdr actions tied to the binary installed by the same Homebrew package. The canonical root manifest invokes `.herdr/bin/tabby`; manifest validation requires both adapters to have identical product semantics and permits only distribution build declarations and executable paths to differ. `tabby install` refreshes Herdr registration by unlinking any prior `yersonargotev.tabby` plugin and linking the current package manifest, which avoids stale versioned Cellar paths after Homebrew cleanup. It then ensures the installed binary owns the selected Session Runtime, using authenticated cooperative handoff when required.
 
 ## Tap validation
 
