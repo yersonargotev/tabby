@@ -181,24 +181,58 @@ def archive_binary(archive: Path, asset: str, destination: Path) -> None:
 
 def install_atomic(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
+    instances = destination.parent / ".instances"
+    instances_preexisting = instances.exists()
+    try:
+        instances.mkdir(mode=0o700, exist_ok=True)
+        if instances.is_symlink() or not instances.is_dir():
+            raise InstallError(f"executable instances path is not a real directory: {instances}")
+        instances.chmod(0o700)
+    except OSError as error:
+        raise InstallError(f"could not prepare executable instances at {instances}: {error}") from error
+
+    instance: Path | None = None
+    temporary_link: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            prefix=".tabby.", dir=destination.parent, delete=False
+            prefix="tabby.", dir=instances, delete=False
         ) as output:
-            temporary = Path(output.name)
+            instance = Path(output.name)
             with source.open("rb") as input_file:
                 shutil.copyfileobj(input_file, output)
             output.flush()
             os.fsync(output.fileno())
-        temporary.chmod(0o755)
-        os.replace(temporary, destination)
-        temporary = None
+        instance.chmod(0o755)
+
+        with tempfile.NamedTemporaryFile(
+            prefix=".tabby-link.", dir=destination.parent, delete=False
+        ) as link_placeholder:
+            temporary_link = Path(link_placeholder.name)
+        temporary_link.unlink()
+        temporary_link.symlink_to(Path(".instances") / instance.name)
+        os.replace(temporary_link, destination)
+        temporary_link = None
+
+        active_instance = instance
+        instance = None
+        for candidate in instances.iterdir():
+            if candidate != active_instance and candidate.name.startswith("tabby."):
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
     except OSError as error:
         raise InstallError(f"could not install {destination}: {error}") from error
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        if temporary_link is not None:
+            temporary_link.unlink(missing_ok=True)
+        if instance is not None:
+            instance.unlink(missing_ok=True)
+        if not instances_preexisting:
+            try:
+                instances.rmdir()
+            except OSError:
+                pass
 
 
 def install(plugin_root: Path, adapter: InstallerAdapter) -> Path:

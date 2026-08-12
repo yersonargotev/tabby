@@ -18,7 +18,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts" / "install-herdr-plugin.py"
 ASSET = "tabby-aarch64-apple-darwin.tar.xz"
-RELEASE_ROOT = "https://github.com/yersonargotev/tabby/releases/download/v0.1.12"
+RELEASE_ROOT = "https://github.com/yersonargotev/tabby/releases/download/v0.1.13"
 
 installer_spec = importlib.util.spec_from_file_location("install_herdr_plugin", INSTALLER)
 if installer_spec is None or installer_spec.loader is None:
@@ -83,7 +83,7 @@ class FakeAdapter:
 class InstallHerdrPluginTests(unittest.TestCase):
     def plugin_root(self, root: Path) -> None:
         (root / "herdr-plugin.toml").write_text(
-            'id = "yersonargotev.tabby"\nversion = "0.1.12"\n'
+            'id = "yersonargotev.tabby"\nversion = "0.1.13"\n'
         )
 
     def test_installs_the_manifest_version_release_atomically(self) -> None:
@@ -99,13 +99,35 @@ class InstallHerdrPluginTests(unittest.TestCase):
 
             installed = installer.install(root, adapter)
 
-            self.assertEqual(installed, destination.resolve())
+            self.assertEqual(installed, root.resolve() / ".herdr/bin/tabby")
             self.assertEqual(destination.read_bytes(), b"release-tabby")
             self.assertTrue(os.access(destination, os.X_OK))
             self.assertEqual(adapter.source_builds, 0)
             self.assertEqual(
                 sorted(path.name for path in destination.parent.iterdir()),
-                ["tabby"],
+                [".instances", "tabby"],
+            )
+
+    def test_reinstall_rotates_the_canonical_executable_identity(self) -> None:
+        archive = release_archive()
+        adapter = FakeAdapter(release_responses(archive))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.plugin_root(root)
+            destination = root / ".herdr/bin/tabby"
+
+            installer.install(root, adapter)
+            first_identity = destination.resolve()
+            installer.install(root, adapter)
+            second_identity = destination.resolve()
+
+            self.assertTrue(destination.is_symlink())
+            self.assertNotEqual(first_identity, second_identity)
+            self.assertEqual(second_identity.read_bytes(), b"release-tabby")
+            self.assertEqual(
+                [path.resolve() for path in (destination.parent / ".instances").iterdir()],
+                [second_identity],
             )
 
     def test_builds_from_source_only_when_the_release_artifact_is_missing(self) -> None:

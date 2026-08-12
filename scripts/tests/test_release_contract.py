@@ -17,7 +17,7 @@ ASSET = "tabby-aarch64-apple-darwin.tar.xz"
 CHECKSUM = f"{ASSET}.sha256"
 
 
-def plan(version: str = "0.1.12") -> dict[str, object]:
+def plan(version: str = "0.1.13") -> dict[str, object]:
     return {
         "announcement_tag": f"v{version}",
         "releases": [
@@ -62,10 +62,10 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = self.write_plan(Path(temp_dir), plan())
 
-            completed = self.run_checker("--dist-manifest", str(path), "--tag", "v0.1.12")
+            completed = self.run_checker("--dist-manifest", str(path), "--tag", "v0.1.13")
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("release plan matches Tabby 0.1.12", completed.stdout)
+        self.assertIn("release plan matches Tabby 0.1.13", completed.stdout)
 
     def test_rejects_version_tag_artifact_and_pr_build_drift(self) -> None:
         cases = {
@@ -98,7 +98,7 @@ class ReleaseContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = self.write_plan(Path(temp_dir), plan())
-            completed = self.run_checker("--dist-manifest", str(path), "--tag", "0.1.12")
+            completed = self.run_checker("--dist-manifest", str(path), "--tag", "0.1.13")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("Git tag", completed.stderr)
 

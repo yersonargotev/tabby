@@ -8,7 +8,7 @@ GitHub-managed and Homebrew manifests can register different Tabby executable pa
 
 ## Decision
 
-The public `start` action invokes `tabby start`. That command crosses the Startup Gate and ensures its own canonical executable identity becomes the Ready Session Runtime. It signals an already Ready matching owner, starts one when absent, or requests authenticated Cooperative Runtime Handoff from a different validated owner before waiting for lease release and starting the replacement.
+The public `start` action invokes `tabby start`. That command crosses the Startup Gate and ensures its own canonical executable identity becomes the Ready Session Runtime. It signals an already Ready matching owner, starts one when absent, or requests authenticated Cooperative Runtime Handoff from a different validated owner before waiting for lease release and starting the replacement. Canonical identity resolves the stable manifest command to its private per-install executable instance, allowing reinstall/update in a reused managed root to remain distinguishable from the running owner.
 
 Manifest startup hooks continue to invoke `tabby ensure-started`; focus and creation hooks keep their existing signal commands. These paths never request replacement. No path treats PID metadata as termination authority. Runtime Status identifies the current executable, registered command binary, and Ready owner binary, and recommends the distribution-neutral Herdr `start` action when those identities differ.
 
