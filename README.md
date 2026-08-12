@@ -68,14 +68,17 @@ Run `tabby status` first when labels are not updating. It reports Absent, Starti
 
 ## Local development
 
-Build the local debug binary and link this checkout as a Herdr plugin:
+Build the local debug binary, prepare the canonical plugin-root executable, and link this checkout:
 
 ```sh
 cargo build
+python3 scripts/prepare-herdr-plugin.py
 herdr plugin link .
 ```
 
-The root [`herdr-plugin.toml`](herdr-plugin.toml) is the local development manifest. Its actions invoke `target/debug/tabby`, so rebuild after code changes before testing through Herdr.
+The root [`herdr-plugin.toml`](herdr-plugin.toml) is the production-shaped manifest shared by local linking and the GitHub-managed distribution path. Every startup hook, event, and action invokes `.herdr/bin/tabby`. Because `herdr plugin link` intentionally does not run manifest build commands, rerun both `cargo build` and `python3 scripts/prepare-herdr-plugin.py` after code changes. The prepared `.herdr/` directory is local build output and is not committed.
+
+Tabby reads plugin configuration and Session-Scoped Tab State from Herdr-provided configuration/state directories (with XDG fallbacks), never from `.herdr/` or another location inside this checkout.
 
 ## Verification
 
@@ -89,6 +92,7 @@ cargo clippy --all-targets -- -D warnings
 python3 scripts/check-herdr-manifests.py
 python3 -m unittest discover -s scripts/tests
 cargo build
+python3 scripts/prepare-herdr-plugin.py
 ```
 
 On macOS with Herdr 0.8.0 installed, run the isolated real-lifecycle harness:
@@ -97,7 +101,7 @@ On macOS with Herdr 0.8.0 installed, run the isolated real-lifecycle harness:
 python3 scripts/herdr_lifecycle_harness.py
 ```
 
-The harness uses temporary HOME/XDG/config roots, exercises default and named Herdr Sessions, writes a sanitized JSONL transcript under `.scratch/`, and removes its temporary sessions and state. It never falls back to the operator's Herdr configuration.
+The harness prepares `.herdr/bin/tabby` from the existing debug build, links the root manifest, uses temporary HOME/XDG/config roots, exercises default and named Herdr Sessions, writes a sanitized JSONL transcript under `.scratch/`, and removes its temporary sessions and state. It never falls back to the operator's Herdr configuration.
 
 For release planning, also run:
 
@@ -107,7 +111,7 @@ dist plan
 
 ## Release notes
 
-Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. After install or upgrade, `tabby install` refreshes registration and performs a cooperative Session Runtime handoff when needed.
+Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. Its product semantics are validated against the canonical root manifest; only distribution build declarations and executable paths may differ. After install or upgrade, `tabby install` refreshes registration and performs a cooperative Session Runtime handoff when needed.
 
 Release setup and tagging details live in [`docs/release.md`](docs/release.md). The development and release manifests are kept aligned by [`scripts/check-herdr-manifests.py`](scripts/check-herdr-manifests.py).
 

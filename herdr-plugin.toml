@@ -2,49 +2,50 @@ id = "yersonargotev.tabby"
 name = "Tabby"
 version = "0.1.11"
 min_herdr_version = "0.8.0"
-description = "Local-link Herdr plugin scaffold for automatic tab labels."
+description = "Herdr plugin for focused-tab automatic labels."
 platforms = ["macos"]
 
-# Local development flow:
-#   cargo build
+# Canonical plugin-root executable contract. Local development flow:
+#   cargo build && python3 scripts/prepare-herdr-plugin.py
 #   herdr plugin link .
-# Herdr plugin link does not run build commands, so commands target the local debug binary.
+# Herdr plugin link does not run build commands. GitHub-managed installation will
+# prepare this same path through the distribution build adapter.
 
 [[startup]]
-command = ["target/debug/tabby", "ensure-started"]
+command = [".herdr/bin/tabby", "ensure-started"]
 
 [[actions]]
 id = "start"
 title = "Start Tabby"
 contexts = ["workspace"]
-command = ["target/debug/tabby", "ensure-started"]
+command = [".herdr/bin/tabby", "ensure-started"]
 
 [[actions]]
 id = "refresh"
 title = "Refresh Tabby Label"
 contexts = ["tab", "workspace"]
-command = ["target/debug/tabby", "refresh"]
+command = [".herdr/bin/tabby", "refresh"]
 
 [[actions]]
 id = "unlock-focused"
 title = "Unlock focused tab"
 contexts = ["tab"]
-command = ["target/debug/tabby", "unlock-focused"]
+command = [".herdr/bin/tabby", "unlock-focused"]
 
 [[actions]]
 id = "unlock-all"
 title = "Unlock all tabs"
 contexts = ["workspace"]
-command = ["target/debug/tabby", "unlock-all"]
+command = [".herdr/bin/tabby", "unlock-all"]
 
 [[events]]
 on = "pane.focused"
-command = ["target/debug/tabby", "signal-focus"]
+command = [".herdr/bin/tabby", "signal-focus"]
 
 [[events]]
 on = "workspace.created"
-command = ["target/debug/tabby", "signal-created"]
+command = [".herdr/bin/tabby", "signal-created"]
 
 [[events]]
 on = "tab.created"
-command = ["target/debug/tabby", "signal-created"]
+command = [".herdr/bin/tabby", "signal-created"]

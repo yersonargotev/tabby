@@ -22,7 +22,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TABBY = REPO_ROOT / "target" / "debug" / "tabby"
+DEBUG_TABBY = REPO_ROOT / "target" / "debug" / "tabby"
+TABBY = REPO_ROOT / ".herdr" / "bin" / "tabby"
+PREPARE_COMMAND = [sys.executable, str(REPO_ROOT / "scripts" / "prepare-herdr-plugin.py")]
 PLUGIN_ID = "yersonargotev.tabby"
 TRANSCRIPT_SCHEMA_VERSION = 1
 READY_RE = re.compile(
@@ -69,6 +71,8 @@ def plan(root: Path) -> Dict[str, Any]:
     return {
         "root": str(root),
         "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
+        "plugin_root_binary": str(TABBY),
+        "prepare_command": PREPARE_COMMAND,
         "environment": visible_environment,
         "removed_inherited_herdr_variables": sorted(
             name for name in os.environ if name.startswith("HERDR_")
@@ -442,7 +446,7 @@ def runtime_after_evaluation(case: SessionCase, previous: Optional[int]) -> Opti
 
 
 def exercise_focused_process_and_manual_lock(
-    case: SessionCase,
+    case: SessionCase, owner: ReadyRuntime
 ) -> str:
     created = case.herdr(
         "create-focused-workspace",
@@ -455,6 +459,41 @@ def exercise_focused_process_and_manual_lock(
     result = json.loads(created.stdout)["result"]
     pane_id = result["root_pane"]["pane_id"]
     tab_id = result["tab"]["tab_id"]
+
+    expected_actions = {
+        "start": [".herdr/bin/tabby", "ensure-started"],
+        "refresh": [".herdr/bin/tabby", "refresh"],
+        "unlock-focused": [".herdr/bin/tabby", "unlock-focused"],
+        "unlock-all": [".herdr/bin/tabby", "unlock-all"],
+    }
+    for action_id in expected_actions:
+        case.herdr(
+            f"canonical-action-{action_id}",
+            "plugin",
+            "action",
+            "invoke",
+            action_id,
+            "--plugin",
+            PLUGIN_ID,
+        )
+
+    logs = wait_for(
+        f"{case.name} canonical manifest entrypoint logs",
+        5.0,
+        lambda: completed_manifest_entrypoint_logs(case, expected_actions),
+    )
+    after_entrypoints = case.ready_runtime()
+    if (after_entrypoints.pid, after_entrypoints.launch_id) != (
+        owner.pid,
+        owner.launch_id,
+    ):
+        raise HarnessFailure(f"{case.name}: manifest entrypoints replaced the Ready owner")
+    case.herdr("canonical-manifest-entrypoint-logs", "plugin", "log", "list")
+    case.recorder.assertion(
+        case.name,
+        "canonical-manifest-entrypoints",
+        f"all {len(expected_actions)} actions and all 3 lifecycle hooks ran the prepared plugin-root binary successfully behind one Ready owner ({len(logs)} logs)",
+    )
 
     case.wait_for_label(REPO_ROOT.name)
     case.herdr("run-significant-command", "pane", "run", pane_id, "nvim", "--clean", "-u", "NONE")
@@ -484,6 +523,34 @@ def exercise_focused_process_and_manual_lock(
         "manual label became a persisted lock and blocked a later periodic overwrite",
     )
     return tab_id
+
+
+def completed_manifest_entrypoint_logs(
+    case: SessionCase, expected_actions: Dict[str, List[str]]
+) -> Optional[List[Dict[str, Any]]]:
+    completed = subprocess.run(
+        case.herdr_argv("plugin", "log", "list", "--plugin", PLUGIN_ID),
+        cwd=REPO_ROOT,
+        env=case.environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    logs = json.loads(completed.stdout)["result"]["logs"]
+    successful = [log for log in logs if log.get("status") == "succeeded"]
+    actions = {log.get("action_id"): log.get("command") for log in successful}
+    events = {log.get("event"): log.get("command") for log in successful}
+    expected_events = {
+        "startup": [".herdr/bin/tabby", "ensure-started"],
+        "workspace.created": [".herdr/bin/tabby", "signal-created"],
+        "tab.created": [".herdr/bin/tabby", "signal-created"],
+        "pane.focused": [".herdr/bin/tabby", "signal-focus"],
+    }
+    if all(actions.get(name) == command for name, command in expected_actions.items()) and all(
+        events.get(name) == command for name, command in expected_events.items()
+    ):
+        return logs
+    return None
 
 
 def exercise_client_detach(case: SessionCase, owner: ReadyRuntime) -> ReadyRuntime:
@@ -606,7 +673,7 @@ def run_live(output: Path) -> None:
     ).stdout.strip()
     if version != "herdr 0.8.0":
         raise HarnessFailure(f"expected herdr 0.8.0, got {version!r}")
-    if not TABBY.is_file():
+    if not DEBUG_TABBY.is_file():
         raise HarnessFailure("target/debug/tabby is missing; run `cargo build` first")
 
     root = Path(tempfile.mkdtemp(prefix="tabby-herdr-harness.", dir="/tmp"))
@@ -630,6 +697,9 @@ def run_live(output: Path) -> None:
             path.mkdir(parents=True, exist_ok=True)
         Path(environment["HERDR_CONFIG_PATH"]).touch()
 
+        default.run("prepare-plugin-root", PREPARE_COMMAND)
+        if not TABBY.is_file():
+            raise HarnessFailure(f"preparation did not create {TABBY}")
         default.start_server("bootstrap-server")
         default.herdr("link-plugin", "plugin", "link", str(REPO_ROOT), "--enabled")
         default.stop_server("bootstrap-stop")
@@ -649,7 +719,9 @@ def run_live(output: Path) -> None:
             exercise_trigger_burst(case, owners[case.name])
             owners[case.name] = exercise_quiet_and_periodic(case)
 
-        default_tab_id = exercise_focused_process_and_manual_lock(default)
+        default_tab_id = exercise_focused_process_and_manual_lock(
+            default, owners["default"]
+        )
         named_created = named.herdr(
             "create-focused-workspace",
             "workspace",
@@ -673,6 +745,13 @@ def run_live(output: Path) -> None:
             "all",
             "equal-tab-id-isolation",
             "equal tab IDs produced two state directories keyed by distinct Session Identities",
+        )
+        if any(REPO_ROOT in state.parents for state in state_directories):
+            raise HarnessFailure("Session-Scoped Tab State resolved inside the plugin root")
+        recorder.assertion(
+            "all",
+            "plugin-owned-path-isolation",
+            "Session-Scoped Tab State resolved under isolated Herdr state, outside the plugin source root",
         )
 
         owners["default"] = exercise_client_detach(default, owners["default"])

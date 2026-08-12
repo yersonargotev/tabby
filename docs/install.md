@@ -204,5 +204,8 @@ To roll back from the Homebrew release install to the local development link, ke
 herdr plugin unlink yersonargotev.tabby
 brew uninstall tabby
 cargo build
+python3 scripts/prepare-herdr-plugin.py
 herdr plugin link .
 ```
+
+Local linking uses the same `.herdr/bin/tabby` plugin-root executable contract as the production-shaped root manifest. Herdr does not run build commands for linked plugins, so prepare that path explicitly after every debug build.

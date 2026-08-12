@@ -2,7 +2,7 @@ id = "yersonargotev.tabby"
 name = "Tabby"
 version = "0.1.11"
 min_herdr_version = "0.8.0"
-description = "Homebrew-installed Herdr plugin for automatic tab labels."
+description = "Herdr plugin for focused-tab automatic labels."
 platforms = ["macos"]
 
 # Release flow:
