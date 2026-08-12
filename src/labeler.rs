@@ -1,4 +1,5 @@
 use crate::herdr_client::{PaneInfo, PaneProcess, PaneProcessInfo};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const DEFAULT_INTERACTIVE_COMMANDS: &[&str] = &["nvim", "lazygit", "codex", "claude"];
@@ -50,22 +51,57 @@ pub enum LabelCandidateSource {
 
 #[derive(Debug, Clone)]
 pub struct LabelPolicy {
-    interactive_commands: &'static [&'static str],
-    runner_subcommands: &'static [(&'static str, &'static str)],
-    ignored_commands: &'static [&'static str],
+    significant_commands: BTreeSet<String>,
+    runner_subcommands: BTreeSet<(String, String)>,
+    builtin_ignored_commands: BTreeSet<String>,
+    user_ignored_commands: BTreeSet<String>,
+    aliases: BTreeMap<String, String>,
+    max_length: usize,
+    cwd_components: usize,
 }
 
 impl Default for LabelPolicy {
     fn default() -> Self {
         Self {
-            interactive_commands: DEFAULT_INTERACTIVE_COMMANDS,
-            runner_subcommands: DEFAULT_RUNNER_SUBCOMMANDS,
-            ignored_commands: DEFAULT_IGNORED_COMMANDS,
+            significant_commands: DEFAULT_INTERACTIVE_COMMANDS
+                .iter()
+                .map(|command| (*command).to_string())
+                .collect(),
+            runner_subcommands: DEFAULT_RUNNER_SUBCOMMANDS
+                .iter()
+                .map(|(runner, subcommand)| ((*runner).to_string(), (*subcommand).to_string()))
+                .collect(),
+            builtin_ignored_commands: DEFAULT_IGNORED_COMMANDS
+                .iter()
+                .map(|command| (*command).to_string())
+                .collect(),
+            user_ignored_commands: BTreeSet::new(),
+            aliases: BTreeMap::new(),
+            max_length: 32,
+            cwd_components: 1,
         }
     }
 }
 
 impl LabelPolicy {
+    pub(crate) fn configured(
+        additional_significant: impl IntoIterator<Item = String>,
+        additional_ignored: impl IntoIterator<Item = String>,
+        runner_subcommands: impl IntoIterator<Item = (String, String)>,
+        aliases: BTreeMap<String, String>,
+        max_length: usize,
+        cwd_components: usize,
+    ) -> Self {
+        let mut policy = Self::default();
+        policy.significant_commands.extend(additional_significant);
+        policy.user_ignored_commands.extend(additional_ignored);
+        policy.runner_subcommands.extend(runner_subcommands);
+        policy.aliases = aliases;
+        policy.max_length = max_length;
+        policy.cwd_components = cwd_components;
+        policy
+    }
+
     pub fn candidate_for_pane(
         &self,
         pane: &PaneInfo,
@@ -74,10 +110,13 @@ impl LabelPolicy {
         if let Some(process_info) = process_info.filter(|info| info.pane_id == pane.pane_id)
             && let Some(label) = self.significant_command(process_info)
         {
-            return Some(LabelCandidate::significant_command(label));
+            return Some(LabelCandidate::significant_command(
+                self.present_significant_command(&label),
+            ));
         }
 
-        working_directory_basename(pane).map(LabelCandidate::working_directory_basename)
+        self.working_directory_label(pane)
+            .map(|label| LabelCandidate::working_directory_basename(self.truncate(&label)))
     }
 
     fn significant_command(&self, process_info: &PaneProcessInfo) -> Option<String> {
@@ -91,7 +130,7 @@ impl LabelPolicy {
         let argv = normalized_argv(process);
         let command = argv.first().cloned().or_else(|| basename(&process.name))?;
 
-        if self.is_ignored(&command) {
+        if self.user_ignored_commands.contains(&command) {
             return None;
         }
 
@@ -103,6 +142,10 @@ impl LabelPolicy {
             && self.is_runner_subcommand(&command, subcommand)
         {
             return Some(format!("{command} {subcommand}"));
+        }
+
+        if self.builtin_ignored_commands.contains(&command) {
+            return None;
         }
 
         if command == "node"
@@ -119,17 +162,38 @@ impl LabelPolicy {
     }
 
     fn is_interactive(&self, command: &str) -> bool {
-        self.interactive_commands.contains(&command)
+        self.significant_commands.contains(command)
     }
 
     fn is_runner_subcommand(&self, command: &str, subcommand: &str) -> bool {
         self.runner_subcommands
-            .iter()
-            .any(|(runner, expected)| command == *runner && subcommand == *expected)
+            .contains(&(command.to_string(), subcommand.to_string()))
     }
 
-    fn is_ignored(&self, command: &str) -> bool {
-        self.ignored_commands.contains(&command)
+    fn working_directory_label(&self, pane: &PaneInfo) -> Option<String> {
+        let cwd = pane.foreground_cwd.as_deref().or(pane.cwd.as_deref())?;
+        let components = Path::new(cwd)
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let start = components.len().saturating_sub(self.cwd_components);
+        (!components.is_empty()).then(|| components[start..].join("/"))
+    }
+
+    fn present_significant_command(&self, classified: &str) -> String {
+        let label = self
+            .aliases
+            .get(classified)
+            .map(String::as_str)
+            .unwrap_or(classified);
+        self.truncate(label)
+    }
+
+    fn truncate(&self, label: &str) -> String {
+        label.chars().take(self.max_length).collect()
     }
 }
 
@@ -170,13 +234,6 @@ fn basename(command: &str) -> Option<String> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-}
-
-fn working_directory_basename(pane: &PaneInfo) -> Option<String> {
-    pane.foreground_cwd
-        .as_deref()
-        .or(pane.cwd.as_deref())
-        .and_then(basename)
 }
 
 #[cfg(test)]

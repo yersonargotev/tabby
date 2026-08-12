@@ -20,6 +20,9 @@ COLLECTIONS = ("build", "startup", "actions", "events")
 ACTION_COMMANDS = {
     "start": ["start"],
     "refresh": ["refresh"],
+    "config-path": ["config", "path"],
+    "config-check": ["config", "check"],
+    "config-reload": ["config", "reload"],
     "unlock-focused": ["unlock-focused"],
     "unlock-all": ["unlock-all"],
 }
@@ -200,7 +203,15 @@ def check_manifests(
     if len(canonical["startup"]) != 1 or len(homebrew["startup"]) != 1:
         errors.append("each manifest must declare exactly one startup command")
 
-    expected_actions = {"start", "refresh", "unlock-focused", "unlock-all"}
+    expected_actions = {
+        "start",
+        "refresh",
+        "config-path",
+        "config-check",
+        "config-reload",
+        "unlock-focused",
+        "unlock-all",
+    }
     for manifest_path, manifest in (
         (canonical_path, canonical),
         (homebrew_path, homebrew),

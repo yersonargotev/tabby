@@ -30,6 +30,24 @@ contexts = ["tab", "workspace"]
 command = [".herdr/bin/tabby", "refresh"]
 
 [[actions]]
+id = "config-path"
+title = "Show Tabby Config Path"
+contexts = ["workspace"]
+command = [".herdr/bin/tabby", "config", "path"]
+
+[[actions]]
+id = "config-check"
+title = "Check Tabby Config"
+contexts = ["workspace"]
+command = [".herdr/bin/tabby", "config", "check"]
+
+[[actions]]
+id = "config-reload"
+title = "Reload Tabby Config"
+contexts = ["workspace"]
+command = [".herdr/bin/tabby", "config", "reload"]
+
+[[actions]]
 id = "unlock-focused"
 title = "Unlock focused tab"
 contexts = ["tab"]

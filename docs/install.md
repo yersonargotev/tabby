@@ -65,7 +65,7 @@ tabby --help
 Expected output:
 
 ```text
-Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install|unlock-focused|unlock-all|repair-state --discard|forget-session>
+Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install|config <path|check|reload>|unlock-focused|unlock-all|repair-state --discard|forget-session>
 ```
 
 Check Homebrew's install prefix:
@@ -93,6 +93,9 @@ Expected output for the current installed version is shaped like:
 true
 /opt/homebrew/Cellar/tabby/<version>/share/tabby
 refresh ../../bin/tabby refresh
+config-check ../../bin/tabby config check
+config-path ../../bin/tabby config path
+config-reload ../../bin/tabby config reload
 start ../../bin/tabby start
 unlock-all ../../bin/tabby unlock-all
 unlock-focused ../../bin/tabby unlock-focused
@@ -126,6 +129,48 @@ herdr plugin action invoke refresh --plugin yersonargotev.tabby
 ```
 
 The runtime receives manifest hooks instead of opening `events.subscribe`. It suppresses inspection/rename during the 1000 ms Focus Quiet Window, evaluates the focused tab every five seconds, and uses at most three 500 ms samples per bounded attempt.
+
+### Configure the Label Policy
+
+Locate the file without creating it:
+
+```sh
+tabby config path
+```
+
+Create `config.toml` at that path with at least `version = 1`. Every other field is optional; omitted fields preserve the built-in defaults. For example:
+
+```toml
+version = 1
+
+[labels]
+max_length = 32
+cwd_components = 1
+
+[commands]
+additional_significant = ["yazi", "btop"]
+additional_ignored = ["python", "sleep"]
+
+[commands.runners]
+pnpm = ["dev", "test", "lint"]
+cargo = ["run", "test", "watch"]
+
+[commands.aliases]
+"lazygit" = "git"
+"pnpm dev" = "dev"
+```
+
+The built-ins remain Significant Commands `nvim`, `lazygit`, `codex`, and `claude`; runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`; ignored shells/wrappers including `zsh`, `bash`, `tmux`, `env`, and `sudo`; `max_length = 32`; and `cwd_components = 1`. The supported ranges are 1–128 Unicode characters for `max_length` and 1–8 trailing path components for `cwd_components`.
+
+Validate and activate changes with:
+
+```sh
+tabby config check
+tabby config reload
+tabby status
+```
+
+Unknown fields and unsupported versions are errors. Empty or unsafe labels, duplicate/contradictory command entries, and out-of-range values are also rejected. A missing file means built-in defaults. A rejected reload keeps the last valid active policy and appears in `tabby status`; an invalid initial file prevents the Session Runtime from becoming Ready. Configuration cannot change runtime cadence, quiet windows, stability requirements, deadlines, manual-lock behavior, ownership, leases, or persistence.
 
 User-edited labels are treated as manual locks after Tabby has established a plugin label baseline. To clear locks from Herdr actions or the CLI:
 

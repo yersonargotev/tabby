@@ -45,6 +45,7 @@ Implemented files/modules in the Rust crate:
 - `src/refresh_decision.rs` — pure bounded One-Shot Refresh policy with no Herdr or persistence I/O.
 - `src/refresh_executor.rs` — Herdr and Session-Scoped Tab State effect adapter for Refresh Decisions.
 - `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client, DTOs, and Focused Observation/Process Inspector boundary.
+- `src/config.rs` — resolves, parses, validates, and compiles versioned `config.toml` into one Label Policy.
 - `src/labeler.rs` — Label Policy and candidate derivation.
 - `src/stability.rs` — anti-flapping state machine.
 - `src/locks.rs` — validated Session-Scoped Tab State and crash-safe rename reconciliation.
