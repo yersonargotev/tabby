@@ -621,21 +621,24 @@ max_length = 4
         ));
         fs::create_dir_all(&directory).expect("config directory");
         let path = path_in_config_dir(&directory);
-        let active = parse("version = 1\n[commands]\nadditional_significant = [\"btop\"]\n")
-            .expect("initial policy");
+        let active =
+            parse("version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"project\"\n")
+                .expect("initial policy");
         fs::write(&path, "version = 2\n").expect("invalid replacement");
 
         assert!(load(&path).is_err());
-        assert_eq!(candidate(&active, "btop", &["btop"]), "btop");
+        assert_eq!(label_for(&active, &pane_with_cwd("tabby"), None), "project");
 
         fs::write(
             &path,
-            "version = 1\n[commands]\nadditional_significant = [\"yazi\"]\n",
+            "version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"repository\"\n",
         )
         .expect("valid replacement");
         let replacement = load(&path).expect("replace active policy");
-        assert_eq!(candidate(&replacement, "btop", &["btop"]), "tabby");
-        assert_eq!(candidate(&replacement, "yazi", &["yazi"]), "yazi");
+        assert_eq!(
+            label_for(&replacement, &pane_with_cwd("tabby"), None),
+            "repository"
+        );
 
         fs::remove_dir_all(directory).expect("remove config directory");
     }

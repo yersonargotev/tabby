@@ -283,6 +283,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lexical_normalization_clamps_parent_components_at_the_root() {
+        assert_eq!(
+            normalize_absolute_path(Path::new("/../../code/./tabby")),
+            Some("/code/tabby".to_string())
+        );
+        assert_eq!(
+            normalize_absolute_path(Path::new("/code/tabby/../notes")),
+            Some("/code/notes".to_string())
+        );
+    }
+
+    #[test]
     fn labels_interactive_apps_as_significant_commands() {
         for command in ["nvim", "lazygit", "codex", "claude"] {
             let candidate = candidate_for(process(command, &[command]), pane_with_cwd("tabby"));
