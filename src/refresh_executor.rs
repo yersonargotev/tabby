@@ -301,6 +301,11 @@ impl OneShotRefreshState {
         DEFAULT_SESSION_REFRESH_INTERVAL
     }
 
+    #[cfg(test)]
+    pub(crate) fn label_policy(&self) -> &LabelPolicy {
+        &self.runtime.label_policy
+    }
+
     /// Returns the earliest time when the current bounded evaluation needs
     /// another sample. The Session Runtime owns waiting and trigger delivery.
     pub fn next_sample_at(&self) -> Option<Instant> {

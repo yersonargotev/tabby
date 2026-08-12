@@ -1382,27 +1382,13 @@ fn run_runtime_loop(
                             next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
                             Ok(())
                         }
-                        RuntimeMutation::ConfigReload => match crate::config::load(config_path) {
-                            Ok(loaded) => {
-                                let source = loaded.source();
-                                metadata.config_schema_version =
-                                    Some(crate::config::SCHEMA_VERSION);
-                                metadata.config_source = Some(source.as_str().to_string());
-                                metadata.latest_config_error = None;
-                                state.replace_label_policy(loaded.into_policy());
-                                let now = Instant::now();
-                                state.note_refresh_trigger(now);
-                                next_tick_at =
-                                    Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
-                                write_metadata(metadata_path, metadata)?;
-                                Ok(())
-                            }
-                            Err(error) => {
-                                metadata.latest_config_error = Some(error.to_string());
-                                write_metadata(metadata_path, metadata)?;
-                                Err(error.into())
-                            }
-                        },
+                        RuntimeMutation::ConfigReload => {
+                            reload_config(state, config_path, metadata_path, metadata)?;
+                            let now = Instant::now();
+                            state.note_refresh_trigger(now);
+                            next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
+                            Ok(())
+                        }
                     })();
                     let _ = command
                         .completion
@@ -1444,6 +1430,29 @@ fn run_runtime_loop(
         metadata.next_periodic_unix_ms = next_tick_at
             .map(|next| unix_time_after(next.saturating_duration_since(Instant::now())));
         write_metadata(metadata_path, metadata)?;
+    }
+}
+
+fn reload_config(
+    state: &mut OneShotRefreshState,
+    config_path: &Path,
+    metadata_path: &Path,
+    metadata: &mut RuntimeMetadata,
+) -> Result<(), SessionRuntimeError> {
+    match crate::config::load(config_path) {
+        Ok(loaded) => {
+            let source = loaded.source();
+            metadata.config_schema_version = Some(crate::config::SCHEMA_VERSION);
+            metadata.config_source = Some(source.as_str().to_string());
+            metadata.latest_config_error = None;
+            state.replace_label_policy(loaded.into_policy());
+            write_metadata(metadata_path, metadata)
+        }
+        Err(error) => {
+            metadata.latest_config_error = Some(error.to_string());
+            write_metadata(metadata_path, metadata)?;
+            Err(error.into())
+        }
     }
 }
 
@@ -2557,6 +2566,93 @@ mod tests {
         ));
 
         fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn runtime_config_reload_atomically_activates_and_retains_directory_aliases() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let directory = PathBuf::from("/tmp").join(format!(
+            "tby-directory-alias-reload-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("test directory");
+        let config_path = directory.join("config.toml");
+        let metadata_path = directory.join("runtime.json");
+        let mut metadata = RuntimeMetadata {
+            schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+            state: RuntimeMetadataState::Ready,
+            pid: std::process::id(),
+            session_key: "test-session".to_string(),
+            socket_path: "/tmp/test.sock".to_string(),
+            socket_identity_hex: "test-identity".to_string(),
+            launch_id: "directory-alias-reload".to_string(),
+            tabby_version: env!("CARGO_PKG_VERSION").to_string(),
+            binary_path: "/tmp/tabby".to_string(),
+            config_path: config_path.to_string_lossy().into_owned(),
+            config_schema_version: Some(crate::config::SCHEMA_VERSION),
+            config_source: Some("built-in defaults".to_string()),
+            latest_config_error: None,
+            last_evaluation_unix_ms: None,
+            last_failure: None,
+            next_periodic_unix_ms: None,
+        };
+        let mut state = OneShotRefreshState::new(refresh_executor::RefreshExecutorState::default());
+
+        fs::write(
+            &config_path,
+            "version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n",
+        )
+        .expect("initial alias config");
+        reload_config(&mut state, &config_path, &metadata_path, &mut metadata)
+            .expect("activate initial alias");
+        assert_eq!(reload_candidate(&state), "first");
+
+        fs::write(&config_path, "version = 2\n").expect("rejected alias config");
+        assert!(reload_config(&mut state, &config_path, &metadata_path, &mut metadata).is_err());
+        assert_eq!(reload_candidate(&state), "first");
+        assert!(
+            metadata
+                .latest_config_error
+                .as_deref()
+                .is_some_and(|error| error.contains("field `version`"))
+        );
+
+        fs::write(
+            &config_path,
+            "version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"second\"\n",
+        )
+        .expect("replacement alias config");
+        reload_config(&mut state, &config_path, &metadata_path, &mut metadata)
+            .expect("activate replacement alias");
+        assert_eq!(reload_candidate(&state), "second");
+        assert_eq!(metadata.latest_config_error, None);
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    fn reload_candidate(state: &OneShotRefreshState) -> String {
+        let pane = crate::herdr_client::PaneInfo {
+            pane_id: "workspace:pane".to_string(),
+            terminal_id: Some("terminal".to_string()),
+            workspace_id: "workspace".to_string(),
+            tab_id: "workspace:tab".to_string(),
+            focused: true,
+            label: None,
+            title: None,
+            cwd: Some("/Users/me/dev/tabby".to_string()),
+            foreground_cwd: None,
+            agent: None,
+            display_agent: None,
+            custom_status: None,
+            agent_status: None,
+            revision: None,
+        };
+        state
+            .label_policy()
+            .candidate_for_pane(&pane, None)
+            .expect("directory candidate")
+            .label()
+            .to_string()
     }
 
     struct ConcurrentGateAdapter {
