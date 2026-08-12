@@ -158,9 +158,15 @@ cargo = ["run", "test", "watch"]
 [commands.aliases]
 "lazygit" = "git"
 "pnpm dev" = "dev"
+
+[directories.aliases]
+"~/dev/tabby" = "tabby"
+"/Users/me/work/customer-api" = "api"
 ```
 
-The built-ins remain Significant Commands `nvim`, `lazygit`, `codex`, and `claude`; runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`; ignored shells/wrappers including `zsh`, `bash`, `tmux`, `env`, and `sudo`; `max_length = 32`; and `cwd_components = 1`. The supported ranges are 1–128 Unicode characters for `max_length` and 1–8 trailing path components for `cwd_components`.
+The built-ins remain Significant Commands `nvim`, `lazygit`, `codex`, and `claude`; runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`; ignored shells/wrappers including `zsh`, `bash`, `tmux`, `env`, and `sudo`; `max_length = 32`; and `cwd_components = 1`. The supported ranges are 1–128 Unicode characters for `max_length` and 1–8 trailing path components for `cwd_components`. Directory aliases apply only when no Significant Command was classified.
+
+Directory selectors are exact lexical paths. They accept absolute paths and `~/...`, with `~` expanded while loading `config.toml`. Tabby uses `foreground_cwd` before pane `cwd`, collapses lexical `.` and `..` components, and does not access the filesystem. Therefore aliases work for restored or deleted paths, while symlink spellings remain distinct. Globs, prefix matching, case folding, filesystem canonicalization, and automatic symlink resolution are not supported.
 
 Validate and activate changes with:
 
@@ -170,7 +176,7 @@ tabby config reload
 tabby status
 ```
 
-Unknown fields and unsupported versions are errors. Empty or unsafe labels, duplicate/contradictory command entries, and out-of-range values are also rejected. A missing file means built-in defaults. A rejected reload keeps the last valid active policy and appears in `tabby status`; an invalid initial file prevents the Session Runtime from becoming Ready. Configuration cannot change runtime cadence, quiet windows, stability requirements, deadlines, manual-lock behavior, ownership, leases, or persistence.
+Unknown fields and unsupported versions are errors. Empty or unsafe labels, duplicate normalized directory selectors, duplicate/contradictory command entries, and out-of-range values are also rejected. A missing file means built-in defaults. A rejected reload keeps the last valid active policy and appears in `tabby status`; an invalid initial file prevents the Session Runtime from becoming Ready. Configuration cannot change runtime cadence, quiet windows, stability requirements, deadlines, manual-lock behavior, ownership, leases, or persistence.
 
 User-edited labels are treated as manual locks after Tabby has established a plugin label baseline. To clear locks from Herdr actions or the CLI:
 

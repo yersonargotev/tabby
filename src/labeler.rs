@@ -1,6 +1,6 @@
 use crate::herdr_client::{PaneInfo, PaneProcess, PaneProcessInfo};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 const DEFAULT_INTERACTIVE_COMMANDS: &[&str] = &["nvim", "lazygit", "codex", "claude"];
 const DEFAULT_RUNNER_SUBCOMMANDS: &[(&str, &str)] = &[
@@ -56,6 +56,7 @@ pub struct LabelPolicy {
     builtin_ignored_commands: BTreeSet<String>,
     user_ignored_commands: BTreeSet<String>,
     aliases: BTreeMap<String, String>,
+    directory_aliases: BTreeMap<String, String>,
     max_length: usize,
     cwd_components: usize,
 }
@@ -77,6 +78,7 @@ impl Default for LabelPolicy {
                 .collect(),
             user_ignored_commands: BTreeSet::new(),
             aliases: BTreeMap::new(),
+            directory_aliases: BTreeMap::new(),
             max_length: 32,
             cwd_components: 1,
         }
@@ -97,6 +99,7 @@ impl LabelPolicy {
         additional_ignored: impl IntoIterator<Item = String>,
         runner_subcommands: impl IntoIterator<Item = (String, String)>,
         aliases: BTreeMap<String, String>,
+        directory_aliases: BTreeMap<String, String>,
         max_length: usize,
         cwd_components: usize,
     ) -> Self {
@@ -105,6 +108,7 @@ impl LabelPolicy {
         policy.user_ignored_commands.extend(additional_ignored);
         policy.runner_subcommands.extend(runner_subcommands);
         policy.aliases = aliases;
+        policy.directory_aliases = directory_aliases;
         policy.max_length = max_length;
         policy.cwd_components = cwd_components;
         policy
@@ -181,6 +185,11 @@ impl LabelPolicy {
 
     fn working_directory_label(&self, pane: &PaneInfo) -> Option<String> {
         let cwd = pane.foreground_cwd.as_deref().or(pane.cwd.as_deref())?;
+        if let Some(alias) = normalize_absolute_path(Path::new(cwd))
+            .and_then(|path| self.directory_aliases.get(&path))
+        {
+            return Some(alias.clone());
+        }
         let components = Path::new(cwd)
             .components()
             .filter_map(|component| match component {
@@ -204,6 +213,30 @@ impl LabelPolicy {
     fn truncate(&self, label: &str) -> String {
         label.chars().take(self.max_length).collect()
     }
+}
+
+/// Normalizes an absolute path lexically without accessing the filesystem.
+///
+/// This intentionally preserves symlink spellings: only `.`, `..`, and
+/// redundant separators are collapsed.
+pub(crate) fn normalize_absolute_path(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    Some(normalized.to_string_lossy().into_owned())
 }
 
 fn normalized_argv(process: &PaneProcess) -> Vec<String> {

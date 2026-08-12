@@ -95,11 +95,17 @@ go = ["run", "test"]
 "lazygit" = "git"
 "pnpm dev" = "dev"
 "cargo test" = "tests"
+
+[directories.aliases]
+"~/dev/tabby" = "tabby"
+"/Users/me/work/customer-api" = "api"
 ```
 
-All fields except `version` are optional. Additional commands and runner pairs extend the built-ins; aliases change presentation only after classification. Defaults are `max_length = 32`, `cwd_components = 1`, Significant Commands `nvim`, `lazygit`, `codex`, and `claude`, runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`, plus the ignored shell/wrapper list described above. `max_length` accepts 1–128 Unicode characters and `cwd_components` accepts 1–8 trailing components.
+All fields except `version` are optional. Additional commands and runner pairs extend the built-ins; command aliases change presentation only after classification. Directory aliases replace only the Working Directory Suffix fallback, so a Significant Command still wins. Defaults are `max_length = 32`, `cwd_components = 1`, Significant Commands `nvim`, `lazygit`, `codex`, and `claude`, runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`, plus the ignored shell/wrapper list described above. `max_length` accepts 1–128 Unicode characters and `cwd_components` accepts 1–8 trailing components.
 
-Unknown fields, unsupported versions, unsafe labels, duplicates, contradictions, and out-of-range values are rejected. Run `tabby config check`, then `tabby config reload`; a rejected reload keeps the last valid policy and records the diagnostic in `tabby status`. An invalid initial file prevents the Session Runtime from becoming Ready. Runtime timing, Navigation Stability, manual locks, leases, ownership, and persistence are intentionally not configurable.
+Directory alias selectors must be absolute paths or `~/...`; `~` expands when configuration loads. Tabby compares the effective directory (`foreground_cwd`, then pane `cwd`) by exact lexical path after collapsing `.` and `..`. This comparison never reads the filesystem: paths may be nonexistent, and distinct symlink spellings remain distinct. Globs, prefix matching, case folding, canonicalization, and automatic symlink resolution are intentionally unsupported.
+
+Unknown fields, unsupported versions, unsafe labels, duplicate normalized directory selectors, contradictions, and out-of-range values are rejected. Run `tabby config check`, then `tabby config reload`; a rejected reload keeps the last valid policy and records the diagnostic in `tabby status`. An invalid initial file prevents the Session Runtime from becoming Ready. Runtime timing, Navigation Stability, manual locks, leases, ownership, and persistence are intentionally not configurable.
 
 ## Local development
 

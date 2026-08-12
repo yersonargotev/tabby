@@ -20,6 +20,7 @@ SPEC.loader.exec_module(harness)
 class HarnessPlanTests(unittest.TestCase):
     def test_ready_parser_allows_explicit_owner_binary_diagnostic(self) -> None:
         output = """Session Runtime: Ready pid=42 version=0.1.11 lease_held=true
+Configuration: path=/tmp/config.toml active_schema_version=1 active_source=config.toml latest_error=<none>
 Ready owner binary: /opt/tabby/bin/tabby
 Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_evaluation_unix_ms=123 next_periodic_unix_ms=456 last_failure=<none>
 """

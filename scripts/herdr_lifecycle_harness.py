@@ -29,6 +29,7 @@ PLUGIN_ID = "yersonargotev.tabby"
 TRANSCRIPT_SCHEMA_VERSION = 1
 READY_RE = re.compile(
     r"Session Runtime: Ready pid=(?P<pid>\d+).*\n"
+    r"(?:Configuration:.*\n)?"
     r"(?:Ready owner binary:.*\n)?"
     r"Session Runtime details: launch_id=(?P<launch>\S+).*"
     r"last_evaluation_unix_ms=(?P<evaluation>\S+)"

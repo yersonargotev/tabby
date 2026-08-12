@@ -553,6 +553,34 @@ mod tests {
     }
 
     #[test]
+    fn directory_aliases_do_not_override_a_manual_lock() {
+        let temp_dir = TestTempDir::new();
+        let socket = crate::startup::SessionSocket::resolve(temp_dir.path().join("session.sock"))
+            .expect("session socket");
+        let tab_state = SessionTabStateStore::open(temp_dir.path(), &socket).expect("tab state");
+        tab_state
+            .mutate(|state| state.lock_tab("w1:t1".to_string(), Some("manual".to_string())))
+            .expect("manual lock");
+        let policy = crate::config::parse(
+            "version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"project\"\n",
+        )
+        .expect("directory alias policy")
+        .into_policy();
+        let start = Instant::now();
+        let mut herdr = FakeHerdr::new(
+            vec![tab("w1:t1", "manual", true)],
+            vec![pane("w1:p1", "w1:t1", true, "tabby")],
+        );
+        let mut state = OneShotRefreshState::new(RefreshExecutorState::with_label_policy(policy));
+
+        let report =
+            execute_one_shot(&mut herdr, &mut state, &tab_state, start).expect("locked sample");
+
+        assert_eq!(report.tabs[0].action, TabTickAction::SkippedLocked);
+        assert!(herdr.renames.is_empty());
+    }
+
+    #[test]
     fn focused_one_shot_stops_after_three_unstable_samples() {
         let temp_dir = TestTempDir::new();
         let socket = crate::startup::SessionSocket::resolve(temp_dir.path().join("session.sock"))
