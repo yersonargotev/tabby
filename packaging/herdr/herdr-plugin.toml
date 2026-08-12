@@ -2,7 +2,7 @@ id = "yersonargotev.tabby"
 name = "Tabby"
 version = "0.1.13"
 min_herdr_version = "0.8.0"
-description = "Labels the focused tab with a Significant Command or Working Directory Basename."
+description = "Labels the focused tab with a Significant Command or Working Directory Suffix."
 platforms = ["macos"]
 
 # Release flow:
@@ -26,6 +26,24 @@ id = "refresh"
 title = "Refresh Tabby Label"
 contexts = ["tab", "workspace"]
 command = ["../../bin/tabby", "refresh"]
+
+[[actions]]
+id = "config-path"
+title = "Show Tabby Config Path"
+contexts = ["workspace"]
+command = ["../../bin/tabby", "config", "path"]
+
+[[actions]]
+id = "config-check"
+title = "Check Tabby Config"
+contexts = ["workspace"]
+command = ["../../bin/tabby", "config", "check"]
+
+[[actions]]
+id = "config-reload"
+title = "Reload Tabby Config"
+contexts = ["workspace"]
+command = ["../../bin/tabby", "config", "reload"]
 
 [[actions]]
 id = "unlock-focused"

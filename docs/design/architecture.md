@@ -4,7 +4,7 @@ Status: implemented design. ADR 0010 supersedes ADR 0009 while preserving focuse
 
 ## Goal
 
-Build a Herdr plugin that automatically keeps tab labels meaningful. For the currently focused tab, the plugin inspects the tab's Focused Pane, prefers a stable Significant Command as the label, and falls back to the Working Directory Basename when no useful command is present. Inactive tabs keep their last visible label until focused again so the tab bar stays stable while the user navigates.
+Build a Herdr plugin that automatically keeps tab labels meaningful. For the currently focused tab, the plugin inspects the tab's Focused Pane, prefers a stable Significant Command as the label, and falls back to the configured Working Directory Suffix when no useful command is present. Inactive tabs keep their last visible label until focused again so the tab bar stays stable while the user navigates.
 
 ## Inputs and controls
 
@@ -28,7 +28,7 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
    - known interactive apps: `nvim`, `lazygit`, `codex`, `claude`;
    - useful runner/subcommand pairs: `pnpm dev`, `npm test`, `go test`, `cargo run`;
    - ignore shells, opaque wrappers, and transient processes;
-   - fallback to Working Directory Basename.
+   - fallback to Working Directory Suffix.
 8. Pass candidates through stability checks:
    - require two consecutive observations before renaming;
    - keep the last Significant Command for a 2 second grace period before falling back to cwd;
@@ -45,6 +45,7 @@ Implemented files/modules in the Rust crate:
 - `src/refresh_decision.rs` — pure bounded One-Shot Refresh policy with no Herdr or persistence I/O.
 - `src/refresh_executor.rs` — Herdr and Session-Scoped Tab State effect adapter for Refresh Decisions.
 - `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client, DTOs, and Focused Observation/Process Inspector boundary.
+- `src/config.rs` — resolves, parses, validates, and compiles versioned `config.toml` into one Label Policy.
 - `src/labeler.rs` — Label Policy and candidate derivation.
 - `src/stability.rs` — anti-flapping state machine.
 - `src/locks.rs` — validated Session-Scoped Tab State and crash-safe rename reconciliation.
@@ -86,7 +87,7 @@ The production-shaped root manifest invokes `.herdr/bin/tabby` for both GitHub-m
 Use unit tests for the pure behavior first:
 
 - label policy classification;
-- cwd basename fallback;
+- Working Directory Suffix fallback;
 - ignored shell/wrapper behavior;
 - anti-flapping state transitions;
 - manual lock detection;

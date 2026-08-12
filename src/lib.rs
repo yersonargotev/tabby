@@ -1,3 +1,4 @@
+pub mod config;
 pub mod herdr_client;
 pub mod install;
 pub mod labeler;
@@ -12,7 +13,7 @@ pub mod status;
 
 use std::fmt;
 
-pub const USAGE: &str = "Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install|unlock-focused|unlock-all|repair-state --discard|forget-session>";
+pub const USAGE: &str = "Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install|config <path|check|reload>|unlock-focused|unlock-all|repair-state --discard|forget-session>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -24,6 +25,9 @@ pub enum Command {
     SignalCreated,
     Runtime { launch_id: String },
     Install,
+    ConfigPath,
+    ConfigCheck,
+    ConfigReload,
     UnlockFocused,
     UnlockAll,
     RepairStateDiscard,
@@ -58,6 +62,7 @@ pub enum CommandError {
     Install(install::InstallError),
     SessionRuntime(session_runtime::SessionRuntimeError),
     Status(status::StatusError),
+    Config(config::ConfigError),
 }
 
 impl fmt::Display for CommandError {
@@ -66,6 +71,7 @@ impl fmt::Display for CommandError {
             Self::Install(error) => write!(formatter, "install failed: {error}"),
             Self::SessionRuntime(error) => write!(formatter, "session runtime failed: {error}"),
             Self::Status(error) => write!(formatter, "status failed: {error}"),
+            Self::Config(error) => write!(formatter, "configuration failed: {error}"),
         }
     }
 }
@@ -76,6 +82,7 @@ impl std::error::Error for CommandError {
             Self::Install(error) => Some(error),
             Self::SessionRuntime(error) => Some(error),
             Self::Status(error) => Some(error),
+            Self::Config(error) => Some(error),
         }
     }
 }
@@ -98,6 +105,12 @@ impl From<status::StatusError> for CommandError {
     }
 }
 
+impl From<config::ConfigError> for CommandError {
+    fn from(error: config::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub message: &'static str,
@@ -113,6 +126,18 @@ where
 
     match command.as_str() {
         "install" => no_arguments(command, args, Command::Install),
+        "config" => {
+            let action = args
+                .next()
+                .ok_or_else(|| CliError::UnknownCommand("config".to_string()))?;
+            let parsed = match action.as_str() {
+                "path" => Command::ConfigPath,
+                "check" => Command::ConfigCheck,
+                "reload" => Command::ConfigReload,
+                _ => return Err(CliError::UnknownCommand(format!("config {action}"))),
+            };
+            no_arguments(format!("config {action}"), args, parsed)
+        }
         "repair-state" => {
             let argument = args.next().ok_or_else(|| CliError::UnexpectedArgument {
                 command: command.clone(),
@@ -199,6 +224,9 @@ pub fn run_stub(command: Command) -> CommandOutcome {
         Command::Install => {
             "tabby install runtime: use run_command to relink the Herdr plugin and ensure the Session Runtime"
         }
+        Command::ConfigPath => "tabby config path",
+        Command::ConfigCheck => "tabby config check",
+        Command::ConfigReload => "tabby config reload",
         Command::UnlockFocused => {
             "tabby unlock-focused runtime: use run_command to request a control operation from the Session Runtime"
         }
@@ -227,6 +255,9 @@ fn runtime_trigger(command: &Command) -> Option<session_runtime::RefreshTrigger>
         | Command::Start
         | Command::Runtime { .. }
         | Command::Install
+        | Command::ConfigPath
+        | Command::ConfigCheck
+        | Command::ConfigReload
         | Command::UnlockFocused
         | Command::UnlockAll
         | Command::RepairStateDiscard
@@ -263,6 +294,11 @@ pub fn run_command(command: Command) -> Result<String, CommandError> {
             let install_message = install::relink_from_current_exe()?;
             let runtime_message = session_runtime::activate_current_runtime_from_env()?;
             Ok(format!("{install_message}\n{runtime_message}"))
+        }
+        Command::ConfigPath => Ok(config::path_from_env()?.display().to_string()),
+        Command::ConfigCheck => config::check_from_env().map_err(CommandError::from),
+        Command::ConfigReload => {
+            session_runtime::request_config_reload_from_env().map_err(CommandError::from)
         }
         Command::UnlockFocused => {
             session_runtime::request_unlock_focused_from_env().map_err(CommandError::from)
@@ -313,6 +349,20 @@ mod tests {
     #[test]
     fn parses_install_command() {
         assert_eq!(parse_command(["install"]), Ok(Command::Install));
+    }
+
+    #[test]
+    fn parses_config_commands_and_rejects_unknown_config_actions() {
+        assert_eq!(parse_command(["config", "path"]), Ok(Command::ConfigPath));
+        assert_eq!(parse_command(["config", "check"]), Ok(Command::ConfigCheck));
+        assert_eq!(
+            parse_command(["config", "reload"]),
+            Ok(Command::ConfigReload)
+        );
+        assert!(matches!(
+            parse_command(["config", "write"]),
+            Err(CliError::UnknownCommand(_))
+        ));
     }
 
     #[test]

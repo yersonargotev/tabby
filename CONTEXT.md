@@ -5,16 +5,16 @@ Tabby keeps the focused tab label meaningful within each Herdr Session. It prefe
 ## Language
 
 **Tab Label Candidate**:
-A short, user-facing label the plugin may apply to a Herdr tab after inspecting the tab's focused pane. It is either a Significant Command label or a Working Directory Basename.
+A short, user-facing label the plugin may apply to a Herdr tab after inspecting the tab's focused pane. It is either a Significant Command label or a Working Directory Suffix.
 _Avoid_: title, name, tab title
 
 **Significant Command**:
 A foreground app or command that is stable and meaningful enough to represent the tab, such as `nvim`, `lazygit`, `codex`, `claude`, `pnpm dev`, or `go test`. Shells, opaque wrappers, and transient foreground processes are not Significant Commands.
 _Avoid_: foreground process, process name, app
 
-**Working Directory Basename**:
-The final path component of the focused pane's current working directory, used only when there is no Significant Command candidate. For example, `/Users/me/dev/dots` becomes `dots`.
-_Avoid_: full path, cwd label
+**Working Directory Suffix**:
+The configured number of trailing path components from the focused pane's current working directory, used only when there is no Significant Command candidate. It defaults to one component, so `/Users/me/dev/dots` becomes `dots`; with two components it becomes `dev/dots`.
+_Avoid_: Working Directory Basename, full path, cwd label
 
 **Manually Locked Tab**:
 A Herdr tab whose user-facing label changed outside the plugin's own rename operation after Tabby has established a plugin-label baseline, so the plugin must stop auto-renaming it. Manual locks persist across plugin runs until an explicit unlock mechanism removes them.
@@ -106,15 +106,15 @@ A bounded automatic label evaluation started by a Refresh Trigger or periodic fr
 _Avoid_: daemon loop, background polling, continuous refresh
 
 **Focused Pane**:
-The pane within the focused tab that Herdr reports as focused. If no pane in the focused tab is reported as focused, the plugin may use the first listed pane only for Working Directory Basename fallback.
+The pane within the focused tab that Herdr reports as focused. If no pane in the focused tab is reported as focused, the plugin may use the first listed pane only for Working Directory Suffix fallback.
 _Avoid_: active pane, selected pane
 
 **Label Policy**:
-The rules used to turn process and cwd data into a Tab Label Candidate, including Significant Command allowlists, ignored shells/wrappers, and stability timings. Version 1 uses tested built-in defaults; user configuration is a later slice.
+The validated rules used to turn process and cwd data into a Tab Label Candidate, including Significant Command allowlists, ignored commands, runner/subcommand pairs, aliases, maximum label length, and trailing Working Directory components. Version 1 starts from tested built-in defaults and may extend or present them through `config.toml`; runtime timing and safety guarantees are not part of Label Policy configuration.
 _Avoid_: config, preferences, ruleset
 
 **Process Inspector**:
-The boundary that asks Herdr for foreground process details for a selected pane. If process inspection fails or returns no useful Significant Command, the plugin falls back to Working Directory Basename rather than failing the rename loop.
+The boundary that asks Herdr for foreground process details for a selected pane. If process inspection fails or returns no useful Significant Command, the plugin falls back to Working Directory Suffix rather than failing the rename loop.
 _Avoid_: process_info call, ps lookup
 
 **Herdr Session**:

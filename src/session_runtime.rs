@@ -122,6 +122,14 @@ struct RuntimeMetadata {
     launch_id: String,
     tabby_version: String,
     binary_path: String,
+    #[serde(default)]
+    config_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config_schema_version: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_config_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_evaluation_unix_ms: Option<u128>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,10 +163,18 @@ pub enum RuntimeInspection {
         last_evaluation_unix_ms: Option<u128>,
         last_failure: Option<String>,
         next_periodic_unix_ms: Option<u128>,
+        config_path: PathBuf,
+        config_schema_version: Option<u8>,
+        config_source: Option<String>,
+        latest_config_error: Option<String>,
     },
     Faulted {
         diagnostic: String,
         lease_held: bool,
+        config_path: Option<PathBuf>,
+        config_schema_version: Option<u8>,
+        config_source: Option<String>,
+        latest_config_error: Option<String>,
     },
 }
 
@@ -191,6 +207,7 @@ enum RuntimeControlOperation {
     UnlockFocused,
     UnlockAll,
     RepairStateDiscard,
+    ConfigReload,
     PrepareHandoff { replacement_binary_identity: String },
 }
 
@@ -199,6 +216,7 @@ enum RuntimeMutation {
     UnlockFocused,
     UnlockAll,
     RepairStateDiscard,
+    ConfigReload,
     PrepareHandoff { replacement_binary_identity: String },
 }
 
@@ -558,6 +576,14 @@ fn activate_current_runtime_with(
             adapter.wait_for_runtime_release(&paths)?;
         }
         RuntimeInspection::Absent => {}
+        RuntimeInspection::Faulted {
+            lease_held: false,
+            config_path: Some(config_path),
+            latest_config_error: Some(_),
+            ..
+        } => {
+            crate::config::load(&config_path)?;
+        }
         RuntimeInspection::Starting { .. } => {
             return Err(SessionRuntimeError::Control(
                 "a Session Runtime is still starting during activation".to_string(),
@@ -645,6 +671,33 @@ pub fn request_unlock_focused_from_env() -> Result<String, SessionRuntimeError> 
 /// Requests that the Ready Session Runtime clear all manually locked tabs.
 pub fn request_unlock_all_from_env() -> Result<String, SessionRuntimeError> {
     request_runtime_operation_from_env(RuntimeControlOperation::UnlockAll)
+}
+
+/// Asks the Ready Session Runtime to atomically replace its active Label Policy.
+pub fn request_config_reload_from_env() -> Result<String, SessionRuntimeError> {
+    let socket = crate::startup::resolve_socket_from_env()?;
+    let state_base = crate::startup::state_base_from_runtime()?;
+    let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
+    let launch = SessionRuntimeLaunch {
+        socket: &socket,
+        state_base: &state_base,
+        binary_path: &binary_path,
+    };
+    request_config_reload(&launch)
+}
+
+fn request_config_reload(launch: &SessionRuntimeLaunch<'_>) -> Result<String, SessionRuntimeError> {
+    if !matches!(inspect_runtime(launch)?, RuntimeInspection::Ready { .. }) {
+        return Err(SessionRuntimeError::Control(
+            "config reload requires a Ready Session Runtime".to_string(),
+        ));
+    }
+    request_ready_owner(launch, RuntimeControlOperation::ConfigReload)?.ok_or_else(|| {
+        SessionRuntimeError::Control(
+            "Ready owner disappeared before accepting config reload".to_string(),
+        )
+    })?;
+    Ok("tabby config reload: active Label Policy replaced from config.toml".to_string())
 }
 
 fn request_runtime_operation_from_env(
@@ -748,10 +801,11 @@ pub fn inspect_runtime(
         Ok(bytes) => match serde_json::from_slice::<RuntimeMetadata>(&bytes) {
             Ok(metadata) => metadata,
             Err(error) => {
-                return Ok(RuntimeInspection::Faulted {
-                    diagnostic: format!("runtime metadata cannot be decoded: {error}"),
+                return Ok(faulted_inspection(
+                    format!("runtime metadata cannot be decoded: {error}"),
                     lease_held,
-                });
+                    None,
+                ));
             }
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -765,18 +819,17 @@ pub fn inspect_runtime(
     };
 
     if let Err(diagnostic) = validate_runtime_identity(&metadata, launch) {
-        return Ok(RuntimeInspection::Faulted {
-            diagnostic,
-            lease_held,
-        });
+        return Ok(faulted_inspection(diagnostic, lease_held, Some(&metadata)));
     }
     if metadata.state == RuntimeMetadataState::Faulted {
-        return Ok(RuntimeInspection::Faulted {
-            diagnostic: metadata
+        return Ok(faulted_inspection(
+            metadata
                 .last_failure
+                .clone()
                 .unwrap_or_else(|| "Session Runtime entered Faulted state".to_string()),
             lease_held,
-        });
+            Some(&metadata),
+        ));
     }
 
     let control_is_socket = fs::symlink_metadata(&paths.control_socket)
@@ -786,11 +839,11 @@ pub fn inspect_runtime(
         return Ok(RuntimeInspection::Absent);
     }
     if !lease_held || !control_is_socket {
-        return Ok(RuntimeInspection::Faulted {
-            diagnostic: "runtime metadata is Ready but its lease or control endpoint is absent"
-                .to_string(),
+        return Ok(faulted_inspection(
+            "runtime metadata is Ready but its lease or control endpoint is absent".to_string(),
             lease_held,
-        });
+            Some(&metadata),
+        ));
     }
 
     Ok(RuntimeInspection::Ready {
@@ -802,7 +855,28 @@ pub fn inspect_runtime(
         last_evaluation_unix_ms: metadata.last_evaluation_unix_ms,
         last_failure: metadata.last_failure,
         next_periodic_unix_ms: metadata.next_periodic_unix_ms,
+        config_path: PathBuf::from(metadata.config_path),
+        config_schema_version: metadata.config_schema_version,
+        config_source: metadata.config_source,
+        latest_config_error: metadata.latest_config_error,
     })
+}
+
+fn faulted_inspection(
+    diagnostic: String,
+    lease_held: bool,
+    metadata: Option<&RuntimeMetadata>,
+) -> RuntimeInspection {
+    RuntimeInspection::Faulted {
+        diagnostic,
+        lease_held,
+        config_path: metadata
+            .filter(|metadata| !metadata.config_path.is_empty())
+            .map(|metadata| PathBuf::from(&metadata.config_path)),
+        config_schema_version: metadata.and_then(|metadata| metadata.config_schema_version),
+        config_source: metadata.and_then(|metadata| metadata.config_source.clone()),
+        latest_config_error: metadata.and_then(|metadata| metadata.latest_config_error.clone()),
+    }
 }
 
 #[derive(Default)]
@@ -920,6 +994,24 @@ fn request_ready_owner(
         Err(error) => return Err(error.into()),
     };
 
+    validate_runtime_identity(&metadata, launch).map_err(SessionRuntimeError::Control)?;
+    if metadata.state == RuntimeMetadataState::Faulted
+        && metadata.latest_config_error.is_some()
+        && !LifetimeLease::is_held(&paths.lifetime_lease)?
+    {
+        if metadata.config_path.is_empty() {
+            return Err(SessionRuntimeError::Control(
+                metadata.last_failure.unwrap_or_else(|| {
+                    "invalid initial configuration has no resolved config.toml path".to_string()
+                }),
+            ));
+        }
+        match crate::config::load(Path::new(&metadata.config_path)) {
+            Ok(_) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+
     validate_runtime_metadata(&metadata, launch).map_err(SessionRuntimeError::Control)?;
 
     let mut stream = match UnixStream::connect(&paths.control_socket) {
@@ -939,6 +1031,7 @@ fn request_ready_owner(
         RuntimeControlOperation::UnlockFocused
         | RuntimeControlOperation::UnlockAll
         | RuntimeControlOperation::RepairStateDiscard
+        | RuntimeControlOperation::ConfigReload
         | RuntimeControlOperation::PrepareHandoff { .. } => CONTROL_COMMAND_TIMEOUT,
     };
     stream.set_read_timeout(Some(response_timeout))?;
@@ -1034,14 +1127,45 @@ fn run_owned_session(
     ensure_private_directory(&paths.directory)?;
     let _lease = acquire_runtime_lease(&paths.lifetime_lease, &launch.socket.session_key)?;
 
-    let tab_state = crate::locks::SessionTabStateStore::open(launch.state_base, launch.socket)?;
-    let mut refresh_state =
-        OneShotRefreshState::new(refresh_executor::RefreshExecutorState::default());
-    let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)?;
-    let (trigger_tx, trigger_rx) = trigger_mailbox();
     let binary_identity = crate::startup::binary_identity(launch.binary_path)
         .to_string_lossy()
         .into_owned();
+    let config_path = match crate::config::path_from_env() {
+        Ok(path) => path,
+        Err(error) => {
+            write_initial_config_fault(
+                &paths.metadata,
+                launch,
+                launch_id,
+                &binary_identity,
+                "<unresolved>",
+                &error,
+            )?;
+            return Err(error.into());
+        }
+    };
+    let loaded_config = match crate::config::load(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            write_initial_config_fault(
+                &paths.metadata,
+                launch,
+                launch_id,
+                &binary_identity,
+                &config_path.to_string_lossy(),
+                &error,
+            )?;
+            return Err(error.into());
+        }
+    };
+    let config_source = loaded_config.source().as_str().to_string();
+
+    let tab_state = crate::locks::SessionTabStateStore::open(launch.state_base, launch.socket)?;
+    let mut refresh_state = OneShotRefreshState::new(
+        refresh_executor::RefreshExecutorState::with_label_policy(loaded_config.into_policy()),
+    );
+    let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)?;
+    let (trigger_tx, trigger_rx) = trigger_mailbox();
     spawn_control_acceptor(
         listener,
         launch.socket.session_key.clone(),
@@ -1061,6 +1185,10 @@ fn run_owned_session(
         launch_id: launch_id.to_string(),
         tabby_version: env!("CARGO_PKG_VERSION").to_string(),
         binary_path: binary_identity,
+        config_path: config_path.to_string_lossy().into_owned(),
+        config_schema_version: Some(crate::config::SCHEMA_VERSION),
+        config_source: Some(config_source),
+        latest_config_error: None,
         last_evaluation_unix_ms: None,
         last_failure: None,
         next_periodic_unix_ms: Some(unix_time_after(
@@ -1082,6 +1210,7 @@ fn run_owned_session(
         &mut refresh_state,
         &tab_state,
         trigger_rx,
+        &config_path,
         &paths.metadata,
         &mut metadata,
     );
@@ -1093,6 +1222,37 @@ fn run_owned_session(
         artifacts.retain_metadata = true;
     }
     result
+}
+
+fn write_initial_config_fault(
+    metadata_path: &Path,
+    launch: &SessionRuntimeLaunch<'_>,
+    launch_id: &str,
+    binary_identity: &str,
+    config_path: &str,
+    error: &crate::config::ConfigError,
+) -> Result<(), SessionRuntimeError> {
+    write_metadata(
+        metadata_path,
+        &RuntimeMetadata {
+            schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+            state: RuntimeMetadataState::Faulted,
+            pid: std::process::id(),
+            session_key: launch.socket.session_key.clone(),
+            socket_path: launch.socket.socket_path.to_string_lossy().into_owned(),
+            socket_identity_hex: launch.socket.identity_hex(),
+            launch_id: launch_id.to_string(),
+            tabby_version: env!("CARGO_PKG_VERSION").to_string(),
+            binary_path: binary_identity.to_string(),
+            config_path: config_path.to_string(),
+            config_schema_version: None,
+            config_source: None,
+            latest_config_error: Some(error.to_string()),
+            last_evaluation_unix_ms: None,
+            last_failure: Some(format!("invalid initial configuration: {error}")),
+            next_periodic_unix_ms: None,
+        },
+    )
 }
 
 fn acquire_runtime_lease(
@@ -1173,6 +1333,7 @@ fn run_runtime_loop(
     state: &mut OneShotRefreshState,
     tab_state: &crate::locks::SessionTabStateStore,
     triggers: TriggerReceiver,
+    config_path: &Path,
     metadata_path: &Path,
     metadata: &mut RuntimeMetadata,
 ) -> Result<(), SessionRuntimeError> {
@@ -1221,6 +1382,27 @@ fn run_runtime_loop(
                             next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
                             Ok(())
                         }
+                        RuntimeMutation::ConfigReload => match crate::config::load(config_path) {
+                            Ok(loaded) => {
+                                let source = loaded.source();
+                                metadata.config_schema_version =
+                                    Some(crate::config::SCHEMA_VERSION);
+                                metadata.config_source = Some(source.as_str().to_string());
+                                metadata.latest_config_error = None;
+                                state.replace_label_policy(loaded.into_policy());
+                                let now = Instant::now();
+                                state.note_refresh_trigger(now);
+                                next_tick_at =
+                                    Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
+                                write_metadata(metadata_path, metadata)?;
+                                Ok(())
+                            }
+                            Err(error) => {
+                                metadata.latest_config_error = Some(error.to_string());
+                                write_metadata(metadata_path, metadata)?;
+                                Err(error.into())
+                            }
+                        },
                     })();
                     let _ = command
                         .completion
@@ -1436,6 +1618,9 @@ fn handle_control_request(
         RuntimeControlOperation::RepairStateDiscard => {
             Some(triggers.enqueue_mutation(RuntimeMutation::RepairStateDiscard))
         }
+        RuntimeControlOperation::ConfigReload => {
+            Some(triggers.enqueue_mutation(RuntimeMutation::ConfigReload))
+        }
         RuntimeControlOperation::PrepareHandoff {
             replacement_binary_identity,
         } => {
@@ -1607,6 +1792,7 @@ pub enum SessionRuntimeError {
     HerdrContract(String),
     Readiness(String),
     Control(String),
+    Config(crate::config::ConfigError),
 }
 
 impl fmt::Display for SessionRuntimeError {
@@ -1668,6 +1854,9 @@ impl fmt::Display for SessionRuntimeError {
             Self::Control(message) => {
                 write!(formatter, "Session Runtime control failed: {message}")
             }
+            Self::Config(error) => {
+                write!(formatter, "Session Runtime configuration failed: {error}")
+            }
         }
     }
 }
@@ -1719,6 +1908,12 @@ impl From<crate::startup::StartupError> for SessionRuntimeError {
 impl From<RefreshExecutionError> for SessionRuntimeError {
     fn from(error: RefreshExecutionError) -> Self {
         Self::RefreshExecution(error)
+    }
+}
+
+impl From<crate::config::ConfigError> for SessionRuntimeError {
+    fn from(error: crate::config::ConfigError) -> Self {
+        Self::Config(error)
     }
 }
 
@@ -1889,6 +2084,10 @@ mod tests {
             RuntimeInspection::Faulted {
                 diagnostic: "invalid owner identity".to_string(),
                 lease_held: true,
+                config_path: None,
+                config_schema_version: None,
+                config_source: None,
+                latest_config_error: None,
             },
         ] {
             let mut adapter = FakeActivationAdapter {
@@ -1952,6 +2151,10 @@ mod tests {
             last_evaluation_unix_ms: None,
             last_failure: None,
             next_periodic_unix_ms: None,
+            config_path: PathBuf::from("/tmp/config.toml"),
+            config_schema_version: Some(crate::config::SCHEMA_VERSION),
+            config_source: Some("built-in defaults".to_string()),
+            latest_config_error: None,
         }
     }
 
@@ -2203,6 +2406,10 @@ mod tests {
                 launch_id: "stale-launch".to_string(),
                 tabby_version: env!("CARGO_PKG_VERSION").to_string(),
                 binary_path: "/tmp/tabby".to_string(),
+                config_path: "/tmp/config.toml".to_string(),
+                config_schema_version: Some(crate::config::SCHEMA_VERSION),
+                config_source: Some("built-in defaults".to_string()),
+                latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,
                 next_periodic_unix_ms: None,
@@ -2220,6 +2427,85 @@ mod tests {
         );
 
         fs::remove_dir_all(&state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn invalid_initial_configuration_is_a_precise_faulted_runtime_status() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-invalid-config-runtime-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        let config_path = state_base.join("config.toml");
+        fs::write(&config_path, "version = 2\n").expect("invalid config file");
+        let error = crate::config::parse("version = 2\n").expect_err("invalid config");
+        write_initial_config_fault(
+            &paths.metadata,
+            &launch,
+            "invalid-config-launch",
+            "/tmp/tabby",
+            &config_path.to_string_lossy(),
+            &error,
+        )
+        .expect("fault metadata");
+
+        let RuntimeInspection::Faulted {
+            diagnostic,
+            config_path,
+            latest_config_error,
+            ..
+        } = inspect_runtime(&launch).expect("inspect fault")
+        else {
+            panic!("invalid initial config must fail closed");
+        };
+        assert!(diagnostic.contains("invalid initial configuration"));
+        assert_eq!(config_path, Some(state_base.join("config.toml")));
+        assert!(latest_config_error.is_some_and(|error| error.contains("field `version`")));
+
+        fs::write(state_base.join("config.toml"), "version = 1\n").expect("fixed config file");
+        assert_eq!(
+            signal_ready_owner(&launch, RefreshTrigger::Startup)
+                .expect("fixed configuration is retryable"),
+            None
+        );
+
+        fs::remove_dir_all(state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn config_reload_requires_a_ready_runtime_without_starting_one() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-config-reload-absent-test-{}-{unique}",
+            std::process::id()
+        ));
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+
+        let error = request_config_reload(&launch).expect_err("Ready runtime is required");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires a Ready Session Runtime")
+        );
+        assert!(
+            !state_base.exists(),
+            "reload must not start or prepare a runtime"
+        );
     }
 
     #[test]
@@ -2250,6 +2536,10 @@ mod tests {
                 launch_id: "wrong-identity".to_string(),
                 tabby_version: env!("CARGO_PKG_VERSION").to_string(),
                 binary_path: "/tmp/tabby".to_string(),
+                config_path: "/tmp/config.toml".to_string(),
+                config_schema_version: Some(crate::config::SCHEMA_VERSION),
+                config_source: Some("built-in defaults".to_string()),
+                latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,
                 next_periodic_unix_ms: None,
@@ -2429,6 +2719,10 @@ mod tests {
                 launch_id: "ready-launch".to_string(),
                 tabby_version: env!("CARGO_PKG_VERSION").to_string(),
                 binary_path: "/tmp/tabby".to_string(),
+                config_path: "/tmp/config.toml".to_string(),
+                config_schema_version: Some(crate::config::SCHEMA_VERSION),
+                config_source: Some("built-in defaults".to_string()),
+                latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,
                 next_periodic_unix_ms: None,
@@ -2508,6 +2802,9 @@ mod tests {
         let repair = sender
             .enqueue_mutation(RuntimeMutation::RepairStateDiscard)
             .expect("queue repair");
+        let reload = sender
+            .enqueue_mutation(RuntimeMutation::ConfigReload)
+            .expect("queue config reload");
 
         let RuntimeControlEvent::Command(first) = receiver
             .recv_until(Some(Instant::now()))
@@ -2527,8 +2824,18 @@ mod tests {
         assert_eq!(second.mutation, RuntimeMutation::RepairStateDiscard);
         second.completion.send(Ok(())).expect("complete repair");
 
+        let RuntimeControlEvent::Command(third) = receiver
+            .recv_until(Some(Instant::now()))
+            .expect("third mutation")
+        else {
+            panic!("third event is a mutation command");
+        };
+        assert_eq!(third.mutation, RuntimeMutation::ConfigReload);
+        third.completion.send(Ok(())).expect("complete reload");
+
         assert_eq!(unlock.completion.recv().expect("unlock result"), Ok(()));
         assert_eq!(repair.completion.recv().expect("repair result"), Ok(()));
+        assert_eq!(reload.completion.recv().expect("reload result"), Ok(()));
     }
 
     #[test]
@@ -2913,6 +3220,10 @@ mod tests {
                 launch_id: "handoff-owner".to_string(),
                 tabby_version: env!("CARGO_PKG_VERSION").to_string(),
                 binary_path: binary_path.to_string_lossy().into_owned(),
+                config_path: "/tmp/config.toml".to_string(),
+                config_schema_version: Some(crate::config::SCHEMA_VERSION),
+                config_source: Some("built-in defaults".to_string()),
+                latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,
                 next_periodic_unix_ms: None,

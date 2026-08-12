@@ -1,6 +1,6 @@
 # Tabby
 
-Tabby is a Herdr plugin that keeps the focused tab label meaningful within each Herdr Session. One session-owned runtime survives client detach, stops with the Herdr Session, and resumes on restore. It prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, then falls back to the working-directory basename.
+Tabby is a Herdr plugin that keeps the focused tab label meaningful within each Herdr Session. One session-owned runtime survives client detach, stops with the Herdr Session, and resumes on restore. It prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, then falls back to the configured Working Directory Suffix.
 
 ## Quick path
 
@@ -31,7 +31,7 @@ Tabby automatically renames Herdr tabs using this policy:
 | Priority | Label source | Examples |
 | --- | --- | --- |
 | 1 | Significant Command | `nvim`, `lazygit`, `codex`, `claude`, `pnpm dev`, `npm test`, `go test`, `cargo run` |
-| 2 | Working Directory Basename | `/Users/me/dev/tabby` becomes `tabby` |
+| 2 | Working Directory Suffix | `/Users/me/dev/tabby` becomes `tabby` by default, or `dev/tabby` with two components |
 
 It also avoids common shell and wrapper processes such as `zsh`, `bash`, `tmux`, `env`, and `sudo`, so normal shell tabs still get useful directory labels.
 
@@ -50,7 +50,7 @@ Project vocabulary and domain rules live in [`CONTEXT.md`](CONTEXT.md).
 ## Commands
 
 ```text
-Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install|unlock-focused|unlock-all|repair-state --discard|forget-session>
+Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|install|config <path|check|reload>|unlock-focused|unlock-all|repair-state --discard|forget-session>
 ```
 
 | Command | Purpose |
@@ -60,12 +60,46 @@ Usage: tabby <status|refresh|start|ensure-started|signal-focus|signal-created|in
 | `tabby start` | Activate the invoking registered binary, using Cooperative Runtime Handoff when another validated binary is Ready. |
 | `tabby ensure-started` | Idempotently signal a Ready owner or recover an absent owner without replacing a different binary. |
 | `tabby install` | Refresh registration and cooperatively ensure the installed binary owns the current Herdr Session. |
+| `tabby config path` | Print the resolved `config.toml` path without creating it. |
+| `tabby config check` | Parse and validate `config.toml` without changing runtime state. |
+| `tabby config reload` | Ask the Ready Session Runtime to atomically replace its active Label Policy. |
 | `tabby unlock-focused` | Clear the manual lock and plugin-label baseline for the focused Herdr tab so automatic naming resumes. |
 | `tabby unlock-all` | Clear all persisted manual locks and their associated plugin-label baselines so automatic naming resumes. |
 | `tabby repair-state --discard` | Explicitly archive invalid session-state evidence and create clean state. |
 | `tabby forget-session` | Remove retained state for the selected stopped Herdr Session. |
 
 Run `tabby status` first when labels are not updating. It reports Absent, Starting, Ready, or Faulted; lease ownership; runtime identity/version; the latest evaluation/failure and next periodic cycle; and per-session lock, baseline, and intent counts. The command is read-only.
+
+## Label Policy configuration
+
+`tabby config path` resolves the versioned file under Herdr's plugin configuration directory. A missing file uses the built-in defaults and is not an error. A minimal customization is:
+
+```toml
+version = 1
+
+[labels]
+max_length = 32
+cwd_components = 1
+
+[commands]
+additional_significant = ["yazi", "btop", "k9s", "docker"]
+additional_ignored = ["python", "node", "sleep"]
+
+[commands.runners]
+pnpm = ["dev", "test", "lint"]
+npm = ["run", "test"]
+cargo = ["run", "test", "watch"]
+go = ["run", "test"]
+
+[commands.aliases]
+"lazygit" = "git"
+"pnpm dev" = "dev"
+"cargo test" = "tests"
+```
+
+All fields except `version` are optional. Additional commands and runner pairs extend the built-ins; aliases change presentation only after classification. Defaults are `max_length = 32`, `cwd_components = 1`, Significant Commands `nvim`, `lazygit`, `codex`, and `claude`, runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`, plus the ignored shell/wrapper list described above. `max_length` accepts 1–128 Unicode characters and `cwd_components` accepts 1–8 trailing components.
+
+Unknown fields, unsupported versions, unsafe labels, duplicates, contradictions, and out-of-range values are rejected. Run `tabby config check`, then `tabby config reload`; a rejected reload keeps the last valid policy and records the diagnostic in `tabby status`. An invalid initial file prevents the Session Runtime from becoming Ready. Runtime timing, Navigation Stability, manual locks, leases, ownership, and persistence are intentionally not configurable.
 
 ## Local development
 

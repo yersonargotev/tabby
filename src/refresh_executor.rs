@@ -23,9 +23,25 @@ pub const DEFAULT_SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Compatibility re-export while the runtime imports its scheduling interval.
 pub const DEFAULT_FOCUS_QUIET_WINDOW: Duration = crate::refresh_decision::FOCUS_QUIET_WINDOW;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RefreshExecutorState {
     label_policy: LabelPolicy,
+}
+
+impl RefreshExecutorState {
+    pub fn with_label_policy(label_policy: LabelPolicy) -> Self {
+        Self { label_policy }
+    }
+
+    pub fn replace_label_policy(&mut self, label_policy: LabelPolicy) {
+        self.label_policy = label_policy;
+    }
+}
+
+impl Default for RefreshExecutorState {
+    fn default() -> Self {
+        Self::with_label_policy(LabelPolicy::default())
+    }
 }
 
 /// Executes the effects for at most one decision step.
@@ -175,6 +191,7 @@ where
         RefreshDecision::Rename { label } => {
             if revalidate_focused_candidate(
                 herdr,
+                &runtime.label_policy,
                 tab_state,
                 &tab_id,
                 &current_label,
@@ -218,6 +235,7 @@ where
 
 fn revalidate_focused_candidate<C>(
     herdr: &mut C,
+    label_policy: &LabelPolicy,
     tab_state: &SessionTabStateStore,
     expected_tab_id: &str,
     expected_label: &str,
@@ -242,7 +260,7 @@ where
         .focused
         .then(|| herdr.pane_process_info(&observation.pane.pane_id).ok())
         .flatten();
-    Ok(LabelPolicy::default()
+    Ok(label_policy
         .candidate_for_pane(&observation.pane, process_info.as_ref())
         .is_some_and(|candidate| candidate.label() == expected_candidate))
 }
@@ -272,6 +290,11 @@ impl OneShotRefreshState {
 
     pub fn note_refresh_trigger(&mut self, observed_at: Instant) {
         self.decision.note_trigger(observed_at);
+    }
+
+    pub fn replace_label_policy(&mut self, label_policy: LabelPolicy) {
+        self.runtime.replace_label_policy(label_policy);
+        self.decision.stop();
     }
 
     pub fn poll_interval(&self) -> Duration {

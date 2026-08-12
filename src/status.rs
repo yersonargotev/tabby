@@ -183,9 +183,22 @@ fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
             last_evaluation_unix_ms,
             last_failure,
             next_periodic_unix_ms,
+            config_path,
+            config_schema_version,
+            config_source,
+            latest_config_error,
         } => {
             lines.push(format!(
                 "Session Runtime: Ready pid={pid} version={version} lease_held={lease_held}"
+            ));
+            lines.push(format!(
+                "Configuration: path={} active_schema_version={} active_source={} latest_error={}",
+                config_path.display(),
+                config_schema_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "<none>".to_string()),
+                config_source.as_deref().unwrap_or("<none>"),
+                latest_config_error.as_deref().unwrap_or("<none>"),
             ));
             lines.push(format!("Ready owner binary: {}", binary_path.display()));
             lines.push(format!(
@@ -199,9 +212,27 @@ fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
         RuntimeInspection::Faulted {
             diagnostic,
             lease_held,
-        } => lines.push(format!(
-            "Session Runtime: Faulted lease_held={lease_held} diagnostic={diagnostic}"
-        )),
+            config_path,
+            config_schema_version,
+            config_source,
+            latest_config_error,
+        } => {
+            lines.push(format!(
+                "Session Runtime: Faulted lease_held={lease_held} diagnostic={diagnostic}"
+            ));
+            lines.push(format!(
+                "Configuration: path={} active_schema_version={} active_source={} latest_error={}",
+                config_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unresolved>".to_string()),
+                config_schema_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "<none>".to_string()),
+                config_source.as_deref().unwrap_or("<none>"),
+                latest_config_error.as_deref().unwrap_or("<none>"),
+            ));
+        }
     }
 }
 
@@ -644,6 +675,7 @@ mod tests {
         assert!(output.contains("Registered command binary: /opt/tabby/bin/tabby"));
         assert!(output.contains("Session Runtime: Ready pid=42 version=0.1.10 lease_held=true"));
         assert!(output.contains("Ready owner binary: /opt/tabby/bin/tabby"));
+        assert!(output.contains("Configuration: path=/tmp/config.toml active_schema_version=1 active_source=built-in defaults latest_error=<none>"));
         assert!(output.contains("Focused tab: w1:t1 workspace=w1 number=1 label=codex"));
         assert!(output.contains("Focused pane: w1:p1 cwd=/repo candidate=codex"));
         assert!(
@@ -662,6 +694,10 @@ mod tests {
             runtime: RuntimeInspection::Faulted {
                 diagnostic: "control endpoint is absent".to_string(),
                 lease_held: false,
+                config_path: None,
+                config_schema_version: None,
+                config_source: None,
+                latest_config_error: None,
             },
             focused_tab: Some(FocusedTabInspection {
                 workspace_id: "w1".to_string(),
@@ -708,6 +744,27 @@ mod tests {
         assert!(output.contains("Session Runtime binary /tmp/local/tabby does not match current executable /opt/tabby/bin/tabby"));
         assert!(output.contains("Session Runtime binary /tmp/local/tabby does not match registered command /opt/tabby/bin/tabby"));
         assert!(output.contains("herdr plugin action invoke start --plugin yersonargotev.tabby"));
+    }
+
+    #[test]
+    fn reports_the_active_configuration_and_latest_rejected_reload() {
+        let mut snapshot = healthy_snapshot();
+        let RuntimeInspection::Ready {
+            config_source,
+            latest_config_error,
+            ..
+        } = &mut snapshot.runtime
+        else {
+            panic!("healthy fixture has a Ready runtime");
+        };
+        *config_source = Some("config.toml".to_string());
+        *latest_config_error =
+            Some("field `labels.max_length` is invalid: must be between 1 and 128".to_string());
+
+        let output = render_status(&snapshot);
+
+        assert!(output.contains("active_schema_version=1 active_source=config.toml"));
+        assert!(output.contains("latest_error=field `labels.max_length` is invalid"));
     }
 
     #[test]
@@ -802,6 +859,10 @@ mod tests {
             last_evaluation_unix_ms: None,
             last_failure: None,
             next_periodic_unix_ms: None,
+            config_path: PathBuf::from("/tmp/config.toml"),
+            config_schema_version: Some(crate::config::SCHEMA_VERSION),
+            config_source: Some("built-in defaults".to_string()),
+            latest_config_error: None,
         }
     }
 
