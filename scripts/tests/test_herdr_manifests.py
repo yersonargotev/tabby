@@ -70,7 +70,7 @@ class HerdrManifestContractTests(unittest.TestCase):
 
             self.assertIn("focused tab", description)
             self.assertIn("Significant Command", description)
-            self.assertIn("Working Directory Basename", description)
+            self.assertIn("Working Directory Suffix", description)
 
     def test_start_action_activates_the_registered_binary(self) -> None:
         for manifest_path in (

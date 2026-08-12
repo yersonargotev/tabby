@@ -4,7 +4,7 @@ Status: implemented design. ADR 0010 supersedes ADR 0009 while preserving focuse
 
 ## Goal
 
-Build a Herdr plugin that automatically keeps tab labels meaningful. For the currently focused tab, the plugin inspects the tab's Focused Pane, prefers a stable Significant Command as the label, and falls back to the Working Directory Basename when no useful command is present. Inactive tabs keep their last visible label until focused again so the tab bar stays stable while the user navigates.
+Build a Herdr plugin that automatically keeps tab labels meaningful. For the currently focused tab, the plugin inspects the tab's Focused Pane, prefers a stable Significant Command as the label, and falls back to the configured Working Directory Suffix when no useful command is present. Inactive tabs keep their last visible label until focused again so the tab bar stays stable while the user navigates.
 
 ## Inputs and controls
 
@@ -28,7 +28,7 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
    - known interactive apps: `nvim`, `lazygit`, `codex`, `claude`;
    - useful runner/subcommand pairs: `pnpm dev`, `npm test`, `go test`, `cargo run`;
    - ignore shells, opaque wrappers, and transient processes;
-   - fallback to Working Directory Basename.
+   - fallback to Working Directory Suffix.
 8. Pass candidates through stability checks:
    - require two consecutive observations before renaming;
    - keep the last Significant Command for a 2 second grace period before falling back to cwd;
@@ -87,7 +87,7 @@ The production-shaped root manifest invokes `.herdr/bin/tabby` for both GitHub-m
 Use unit tests for the pure behavior first:
 
 - label policy classification;
-- cwd basename fallback;
+- Working Directory Suffix fallback;
 - ignored shell/wrapper behavior;
 - anti-flapping state transitions;
 - manual lock detection;

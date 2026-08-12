@@ -1008,7 +1008,7 @@ mod tests {
         let decision = detect_manual_lock(
             "preexisting custom label",
             None,
-            Some(&LabelCandidate::working_directory_basename("tabby")),
+            Some(&LabelCandidate::working_directory_suffix("tabby")),
         );
 
         assert_eq!(decision, ManualLockDecision::AutoManaged);

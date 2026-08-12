@@ -1,6 +1,6 @@
 # Tabby
 
-Tabby is a Herdr plugin that keeps the focused tab label meaningful within each Herdr Session. One session-owned runtime survives client detach, stops with the Herdr Session, and resumes on restore. It prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, then falls back to the working-directory basename.
+Tabby is a Herdr plugin that keeps the focused tab label meaningful within each Herdr Session. One session-owned runtime survives client detach, stops with the Herdr Session, and resumes on restore. It prefers stable foreground activity such as `nvim`, `codex`, or `pnpm dev`, then falls back to the configured Working Directory Suffix.
 
 ## Quick path
 
@@ -31,7 +31,7 @@ Tabby automatically renames Herdr tabs using this policy:
 | Priority | Label source | Examples |
 | --- | --- | --- |
 | 1 | Significant Command | `nvim`, `lazygit`, `codex`, `claude`, `pnpm dev`, `npm test`, `go test`, `cargo run` |
-| 2 | Working Directory Basename | `/Users/me/dev/tabby` becomes `tabby` |
+| 2 | Working Directory Suffix | `/Users/me/dev/tabby` becomes `tabby` by default, or `dev/tabby` with two components |
 
 It also avoids common shell and wrapper processes such as `zsh`, `bash`, `tmux`, `env`, and `sudo`, so normal shell tabs still get useful directory labels.
 

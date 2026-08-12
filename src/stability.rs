@@ -121,7 +121,7 @@ impl StabilityState {
     ) -> LabelCandidate {
         match candidate.source() {
             LabelCandidateSource::SignificantCommand => candidate,
-            LabelCandidateSource::WorkingDirectoryBasename => self
+            LabelCandidateSource::WorkingDirectorySuffix => self
                 .last_stable_significant
                 .as_ref()
                 .filter(|last_stable_significant| {
@@ -314,6 +314,6 @@ mod tests {
     }
 
     fn cwd(label: &str) -> LabelCandidate {
-        LabelCandidate::working_directory_basename(label)
+        LabelCandidate::working_directory_suffix(label)
     }
 }

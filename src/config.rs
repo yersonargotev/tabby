@@ -230,6 +230,28 @@ fn validate(config: &ConfigFile) -> Result<(), ConfigError> {
             format!("`{command}` is also listed in commands.additional_ignored"),
         );
     }
+    if let Some(command) = config
+        .commands
+        .additional_significant
+        .iter()
+        .find(|command| LabelPolicy::is_builtin_ignored_command(command))
+    {
+        return validation_error(
+            "commands.additional_significant",
+            format!("`{command}` is ignored by the built-in Label Policy"),
+        );
+    }
+    if let Some(command) = config
+        .commands
+        .additional_significant
+        .iter()
+        .find(|command| LabelPolicy::is_builtin_significant_command(command))
+    {
+        return validation_error(
+            "commands.additional_significant",
+            format!("`{command}` duplicates a built-in Significant Command"),
+        );
+    }
     for (runner, subcommands) in &config.commands.runners {
         validate_token("commands.runners", runner)?;
         validate_unique_tokens(&format!("commands.runners.{runner}"), subcommands)?;
@@ -306,7 +328,7 @@ mod tests {
         let candidate = loaded
             .policy()
             .candidate_for_pane(&pane, None)
-            .expect("Working Directory Basename");
+            .expect("Working Directory Suffix");
 
         assert_eq!(candidate.label(), "tabby");
     }
@@ -387,6 +409,28 @@ pnpm = ["lint"]
                 "diagnostic `{error}` did not identify `{field}`"
             );
         }
+    }
+
+    #[test]
+    fn rejects_additional_significant_command_that_is_ignored_by_default() {
+        let error = parse("version = 1\n[commands]\nadditional_significant = [\"zsh\"]\n")
+            .expect_err("configuration must reject an effective policy contradiction");
+
+        assert_eq!(
+            error.to_string(),
+            "field `commands.additional_significant` is invalid: `zsh` is ignored by the built-in Label Policy"
+        );
+    }
+
+    #[test]
+    fn rejects_additional_significant_command_that_duplicates_a_default() {
+        let error = parse("version = 1\n[commands]\nadditional_significant = [\"nvim\"]\n")
+            .expect_err("configuration must reject an effective policy duplicate");
+
+        assert_eq!(
+            error.to_string(),
+            "field `commands.additional_significant` is invalid: `nvim` duplicates a built-in Significant Command"
+        );
     }
 
     #[test]

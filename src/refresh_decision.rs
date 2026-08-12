@@ -150,7 +150,7 @@ impl RefreshDecisionState {
                     let stable_candidate = match &stability_decision {
                         StabilityDecision::Pending => None,
                         StabilityDecision::Rename { label } | StabilityDecision::NoOp { label } => {
-                            Some(LabelCandidate::working_directory_basename(label.clone()))
+                            Some(LabelCandidate::working_directory_suffix(label.clone()))
                         }
                     };
                     match detect_manual_lock(

@@ -495,7 +495,7 @@ def run_live(output: Path) -> None:
         recorder.assertion(
             "release",
             "manual-refresh-and-lock",
-            "manual refresh applied the Working Directory Basename and later preserved manual intent",
+            "manual refresh applied the Working Directory Suffix and later preserved manual intent",
         )
 
         prior_owner = ready_runtime(case, binary)

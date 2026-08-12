@@ -35,10 +35,10 @@ impl LabelCandidate {
         }
     }
 
-    pub(crate) fn working_directory_basename(label: impl Into<String>) -> Self {
+    pub(crate) fn working_directory_suffix(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            source: LabelCandidateSource::WorkingDirectoryBasename,
+            source: LabelCandidateSource::WorkingDirectorySuffix,
         }
     }
 }
@@ -46,7 +46,7 @@ impl LabelCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabelCandidateSource {
     SignificantCommand,
-    WorkingDirectoryBasename,
+    WorkingDirectorySuffix,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +84,14 @@ impl Default for LabelPolicy {
 }
 
 impl LabelPolicy {
+    pub(crate) fn is_builtin_significant_command(command: &str) -> bool {
+        DEFAULT_INTERACTIVE_COMMANDS.contains(&command)
+    }
+
+    pub(crate) fn is_builtin_ignored_command(command: &str) -> bool {
+        DEFAULT_IGNORED_COMMANDS.contains(&command)
+    }
+
     pub(crate) fn configured(
         additional_significant: impl IntoIterator<Item = String>,
         additional_ignored: impl IntoIterator<Item = String>,
@@ -116,7 +124,7 @@ impl LabelPolicy {
         }
 
         self.working_directory_label(pane)
-            .map(|label| LabelCandidate::working_directory_basename(self.truncate(&label)))
+            .map(|label| LabelCandidate::working_directory_suffix(self.truncate(&label)))
     }
 
     fn significant_command(&self, process_info: &PaneProcessInfo) -> Option<String> {
@@ -276,7 +284,7 @@ mod tests {
             assert_eq!(candidate.label(), "tabby");
             assert_eq!(
                 candidate.source(),
-                LabelCandidateSource::WorkingDirectoryBasename
+                LabelCandidateSource::WorkingDirectorySuffix
             );
         }
     }
@@ -293,7 +301,7 @@ mod tests {
             assert_eq!(candidate.label(), "tabby");
             assert_eq!(
                 candidate.source(),
-                LabelCandidateSource::WorkingDirectoryBasename
+                LabelCandidateSource::WorkingDirectorySuffix
             );
         }
     }
@@ -327,37 +335,37 @@ mod tests {
             assert_eq!(candidate.label(), "tabby");
             assert_eq!(
                 candidate.source(),
-                LabelCandidateSource::WorkingDirectoryBasename
+                LabelCandidateSource::WorkingDirectorySuffix
             );
         }
     }
 
     #[test]
-    fn falls_back_to_working_directory_basename_without_process_info() {
+    fn falls_back_to_working_directory_suffix_without_process_info() {
         let pane = pane_with_cwd("tabby");
         let candidate = LabelPolicy::default()
             .candidate_for_pane(&pane, None)
-            .expect("cwd basename candidate");
+            .expect("Working Directory Suffix candidate");
 
         assert_eq!(candidate.label(), "tabby");
         assert_eq!(
             candidate.source(),
-            LabelCandidateSource::WorkingDirectoryBasename
+            LabelCandidateSource::WorkingDirectorySuffix
         );
     }
 
     #[test]
-    fn prefers_foreground_cwd_for_working_directory_basename() {
+    fn prefers_foreground_cwd_for_working_directory_suffix() {
         let mut pane = pane_with_cwd("shell-cwd");
         pane.foreground_cwd = Some("/Users/me/dev/foreground-cwd".to_string());
         let candidate = LabelPolicy::default()
             .candidate_for_pane(&pane, None)
-            .expect("foreground cwd basename candidate");
+            .expect("foreground Working Directory Suffix candidate");
 
         assert_eq!(candidate.label(), "foreground-cwd");
         assert_eq!(
             candidate.source(),
-            LabelCandidateSource::WorkingDirectoryBasename
+            LabelCandidateSource::WorkingDirectorySuffix
         );
     }
 
@@ -369,12 +377,12 @@ mod tests {
 
         let candidate = LabelPolicy::default()
             .candidate_for_pane(&pane, Some(&process_info))
-            .expect("cwd basename candidate");
+            .expect("Working Directory Suffix candidate");
 
         assert_eq!(candidate.label(), "tabby");
         assert_eq!(
             candidate.source(),
-            LabelCandidateSource::WorkingDirectoryBasename
+            LabelCandidateSource::WorkingDirectorySuffix
         );
     }
 
