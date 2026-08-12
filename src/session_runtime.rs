@@ -2685,6 +2685,14 @@ mod tests {
             binary_path: Path::new("/tmp/tabby"),
         };
         let paths = RuntimePaths::for_launch(&launch);
+        let state_store = crate::locks::SessionTabStateStore::open(&state_base, &socket)
+            .expect("session state store");
+        state_store
+            .mutate(|state| {
+                state.record_plugin_label("tab-1", "nvim");
+                state.lock_tab("tab-1", Some("manual".to_string()));
+            })
+            .expect("persist owner state");
         let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)
             .expect("control listener");
         let (sender, receiver) = trigger_mailbox();
@@ -2699,7 +2707,7 @@ mod tests {
             socket.session_key.clone(),
             socket.identity_hex(),
             "ready-launch".to_string(),
-            owner_identity,
+            owner_identity.clone(),
             sender,
         );
         let declared_identity = PathBuf::from("/bin/sh")
@@ -2725,6 +2733,33 @@ mod tests {
             "subprocess rejected the wrong peer as expected"
         );
         assert!(receiver.recv_until(Some(Instant::now())).is_none());
+
+        let still_ready = send_raw_control_request(
+            &paths.control_socket,
+            ControlRequest {
+                schema_version: CONTROL_SCHEMA_VERSION,
+                session_key: socket.session_key.clone(),
+                socket_identity_hex: socket.identity_hex(),
+                launch_id: "ready-launch".to_string(),
+                request_id: "signal-after-rejected-handoff".to_string(),
+                operation: RuntimeControlOperation::Signal {
+                    trigger: RefreshTrigger::Focus,
+                },
+            },
+        );
+        assert!(still_ready.accepted, "proven owner remains available");
+        assert!(matches!(
+            receiver.recv_until(Some(Instant::now() + Duration::from_secs(1))),
+            Some(RuntimeControlEvent::Trigger(RefreshTrigger::Focus))
+        ));
+        assert_eq!(
+            crate::locks::SessionTabStateStore::inspect_read_only(&state_base, &socket),
+            crate::locks::SessionTabStateInspection::Valid {
+                manual_locks: 1,
+                baselines: 1,
+                unresolved_rename_intents: 0,
+            }
+        );
 
         let _ = fs::remove_file(&paths.control_socket);
         let _ = fs::remove_dir_all(&paths.control_directory);
