@@ -1,6 +1,6 @@
 //! Versioned user configuration compiled into one validated Label Policy.
 
-use crate::labeler::LabelPolicy;
+use crate::labeler::{LabelPolicy, LabelPresentation};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 pub const SCHEMA_VERSION: u8 = 1;
 pub const MIN_MAX_LENGTH: usize = 1;
 pub const MAX_MAX_LENGTH: usize = 128;
+pub const MIN_MAX_DISPLAY_WIDTH: usize = 1;
+pub const MAX_MAX_DISPLAY_WIDTH: usize = 256;
 pub const MIN_CWD_COMPONENTS: usize = 1;
 pub const MAX_CWD_COMPONENTS: usize = 8;
 
@@ -30,7 +32,9 @@ struct ConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct LabelsConfig {
     max_length: Option<usize>,
+    max_display_width: Option<usize>,
     cwd_components: Option<usize>,
+    prefixes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -114,10 +118,14 @@ fn parse_with_home(contents: &str, home: Option<&Path>) -> Result<LoadedConfig, 
             config.commands.additional_significant,
             config.commands.additional_ignored,
             runners,
-            config.commands.aliases,
-            directory_aliases,
-            config.labels.max_length.unwrap_or(32),
-            config.labels.cwd_components.unwrap_or(1),
+            LabelPresentation {
+                aliases: config.commands.aliases,
+                directory_aliases,
+                prefixes: config.labels.prefixes,
+                max_length: config.labels.max_length.unwrap_or(32),
+                max_display_width: config.labels.max_display_width,
+                cwd_components: config.labels.cwd_components.unwrap_or(1),
+            },
         ),
         source: ConfigSource::File,
     })
@@ -216,6 +224,14 @@ fn validate(
         MIN_MAX_LENGTH,
         MAX_MAX_LENGTH,
     )?;
+    if let Some(max_display_width) = config.labels.max_display_width {
+        validate_range(
+            "labels.max_display_width",
+            max_display_width,
+            MIN_MAX_DISPLAY_WIDTH,
+            MAX_MAX_DISPLAY_WIDTH,
+        )?;
+    }
     validate_range(
         "labels.cwd_components",
         config.labels.cwd_components.unwrap_or(1),
@@ -276,7 +292,53 @@ fn validate(
         validate_label_text("commands.aliases", key)?;
         validate_label_text(&format!("commands.aliases.{key}"), value)?;
     }
+    validate_prefixes(config)?;
     normalize_directory_aliases(&config.directories.aliases, home)
+}
+
+fn validate_prefixes(config: &ConfigFile) -> Result<(), ConfigError> {
+    let classified_candidates = LabelPolicy::classified_candidates(
+        config
+            .commands
+            .additional_significant
+            .iter()
+            .map(String::as_str),
+        config
+            .commands
+            .runners
+            .iter()
+            .flat_map(|(runner, subcommands)| {
+                subcommands
+                    .iter()
+                    .map(move |subcommand| (runner.as_str(), subcommand.as_str()))
+            }),
+    );
+    for (candidate, prefix) in &config.labels.prefixes {
+        let field = format!("labels.prefixes.{candidate}");
+        validate_label_text(&field, prefix)?;
+        if !classified_candidates.contains(candidate) {
+            return validation_error(
+                &field,
+                "must name a configured Significant Command or runner/subcommand candidate"
+                    .to_string(),
+            );
+        }
+        let command = candidate
+            .split_once(' ')
+            .map_or(candidate.as_str(), |(command, _)| command);
+        if config
+            .commands
+            .additional_ignored
+            .iter()
+            .any(|ignored| ignored == command)
+        {
+            return validation_error(
+                &field,
+                "contradicts commands.additional_ignored and can never be presented".to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn normalize_directory_aliases(
@@ -649,6 +711,66 @@ max_length = 4
             .expect("valid command alias");
 
         assert_eq!(candidate(&loaded, "unknown", &["unknown"]), "tabby");
+    }
+
+    #[test]
+    fn prefixes_keyed_by_classified_candidates_follow_aliases_and_do_not_affect_fallbacks() {
+        let loaded = parse(
+            r#"
+version = 1
+
+[labels]
+max_length = 8
+
+[labels.prefixes]
+"nvim" = "edit: "
+"pnpm lint" = "check: "
+
+[commands.runners]
+pnpm = ["lint"]
+
+[commands.aliases]
+nvim = "vim"
+"pnpm lint" = "style"
+"#,
+        )
+        .expect("valid prefix configuration");
+
+        assert_eq!(candidate(&loaded, "nvim", &["nvim"]), "edit: vi");
+        assert_eq!(candidate(&loaded, "pnpm", &["pnpm", "lint"]), "check: s");
+        assert_eq!(candidate(&loaded, "bash", &["bash"]), "tabby");
+    }
+
+    #[test]
+    fn prefix_and_display_width_validation_identifies_the_specific_field() {
+        for (contents, field) in [
+            (
+                "version = 1\n[labels]\nmax_display_width = 0",
+                "labels.max_display_width",
+            ),
+            (
+                "version = 1\n[labels.prefixes]\nunknown = \"x\"",
+                "labels.prefixes.unknown",
+            ),
+            (
+                "version = 1\n[labels.prefixes]\nnvim = \"\"",
+                "labels.prefixes.nvim",
+            ),
+            (
+                "version = 1\n[labels.prefixes]\nnvim = \"bad\\u0000\"",
+                "labels.prefixes.nvim",
+            ),
+            (
+                "version = 1\n[commands]\nadditional_ignored = [\"nvim\"]\n[labels.prefixes]\nnvim = \"> \"",
+                "labels.prefixes.nvim",
+            ),
+        ] {
+            let error = parse(contents).expect_err("invalid presentation configuration");
+            assert!(
+                error.to_string().contains(field),
+                "diagnostic `{error}` did not identify `{field}`"
+            );
+        }
     }
 
     fn label_for(

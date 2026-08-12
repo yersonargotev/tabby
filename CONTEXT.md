@@ -110,7 +110,7 @@ The pane within the focused tab that Herdr reports as focused. If no pane in the
 _Avoid_: active pane, selected pane
 
 **Label Policy**:
-The validated rules used to turn process and cwd data into a Tab Label Candidate, including Significant Command allowlists, ignored commands, runner/subcommand pairs, command aliases, exact lexical directory aliases, maximum label length, and trailing Working Directory components. Directory aliases apply only to Working Directory Suffix fallback and preserve distinct symlink spellings. Version 1 starts from tested built-in defaults and may extend or present them through `config.toml`; runtime timing and safety guarantees are not part of Label Policy configuration.
+The validated rules used to turn process and cwd data into a Tab Label Candidate, including Significant Command allowlists, ignored commands, runner/subcommand pairs, command aliases, exact lexical directory aliases, explicit classified-candidate prefixes, Unicode-scalar and optional display-cell limits, and trailing Working Directory components. Directory aliases apply only to Working Directory Suffix fallback and preserve distinct symlink spellings. Prefixes apply after command classification and aliases; Tabby forms one final label before enforcing its limits. Version 1 starts from tested built-in defaults and may extend or present them through `config.toml`; runtime timing and safety guarantees are not part of Label Policy configuration.
 _Avoid_: config, preferences, ruleset
 
 **Process Inspector**:

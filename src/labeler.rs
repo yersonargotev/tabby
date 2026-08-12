@@ -1,6 +1,8 @@
 use crate::herdr_client::{PaneInfo, PaneProcess, PaneProcessInfo};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_INTERACTIVE_COMMANDS: &[&str] = &["nvim", "lazygit", "codex", "claude"];
 const DEFAULT_RUNNER_SUBCOMMANDS: &[(&str, &str)] = &[
@@ -49,6 +51,16 @@ pub enum LabelCandidateSource {
     WorkingDirectorySuffix,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct LabelPresentation {
+    pub aliases: BTreeMap<String, String>,
+    pub directory_aliases: BTreeMap<String, String>,
+    pub prefixes: BTreeMap<String, String>,
+    pub max_length: usize,
+    pub max_display_width: Option<usize>,
+    pub cwd_components: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct LabelPolicy {
     significant_commands: BTreeSet<String>,
@@ -57,7 +69,9 @@ pub struct LabelPolicy {
     user_ignored_commands: BTreeSet<String>,
     aliases: BTreeMap<String, String>,
     directory_aliases: BTreeMap<String, String>,
+    prefixes: BTreeMap<String, String>,
     max_length: usize,
+    max_display_width: Option<usize>,
     cwd_components: usize,
 }
 
@@ -79,7 +93,9 @@ impl Default for LabelPolicy {
             user_ignored_commands: BTreeSet::new(),
             aliases: BTreeMap::new(),
             directory_aliases: BTreeMap::new(),
+            prefixes: BTreeMap::new(),
             max_length: 32,
+            max_display_width: None,
             cwd_components: 1,
         }
     }
@@ -98,20 +114,40 @@ impl LabelPolicy {
         additional_significant: impl IntoIterator<Item = String>,
         additional_ignored: impl IntoIterator<Item = String>,
         runner_subcommands: impl IntoIterator<Item = (String, String)>,
-        aliases: BTreeMap<String, String>,
-        directory_aliases: BTreeMap<String, String>,
-        max_length: usize,
-        cwd_components: usize,
+        presentation: LabelPresentation,
     ) -> Self {
         let mut policy = Self::default();
         policy.significant_commands.extend(additional_significant);
         policy.user_ignored_commands.extend(additional_ignored);
         policy.runner_subcommands.extend(runner_subcommands);
-        policy.aliases = aliases;
-        policy.directory_aliases = directory_aliases;
-        policy.max_length = max_length;
-        policy.cwd_components = cwd_components;
+        policy.aliases = presentation.aliases;
+        policy.directory_aliases = presentation.directory_aliases;
+        policy.prefixes = presentation.prefixes;
+        policy.max_length = presentation.max_length;
+        policy.max_display_width = presentation.max_display_width;
+        policy.cwd_components = presentation.cwd_components;
         policy
+    }
+
+    pub(crate) fn classified_candidates<'a>(
+        additional_significant: impl IntoIterator<Item = &'a str>,
+        additional_runners: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> BTreeSet<String> {
+        DEFAULT_INTERACTIVE_COMMANDS
+            .iter()
+            .map(|command| (*command).to_string())
+            .chain(
+                DEFAULT_RUNNER_SUBCOMMANDS
+                    .iter()
+                    .map(|(runner, subcommand)| format!("{runner} {subcommand}")),
+            )
+            .chain(additional_significant.into_iter().map(str::to_string))
+            .chain(
+                additional_runners
+                    .into_iter()
+                    .map(|(runner, subcommand)| format!("{runner} {subcommand}")),
+            )
+            .collect()
     }
 
     pub fn candidate_for_pane(
@@ -128,7 +164,7 @@ impl LabelPolicy {
         }
 
         self.working_directory_label(pane)
-            .map(|label| LabelCandidate::working_directory_suffix(self.truncate(&label)))
+            .map(|label| LabelCandidate::working_directory_suffix(self.truncate_final(&label)))
     }
 
     fn significant_command(&self, process_info: &PaneProcessInfo) -> Option<String> {
@@ -202,16 +238,36 @@ impl LabelPolicy {
     }
 
     fn present_significant_command(&self, classified: &str) -> String {
-        let label = self
+        let alias = self
             .aliases
             .get(classified)
             .map(String::as_str)
             .unwrap_or(classified);
-        self.truncate(label)
+        let prefix = self
+            .prefixes
+            .get(classified)
+            .map(String::as_str)
+            .unwrap_or("");
+        self.truncate_final(&format!("{prefix}{alias}"))
     }
 
-    fn truncate(&self, label: &str) -> String {
-        label.chars().take(self.max_length).collect()
+    fn truncate_final(&self, label: &str) -> String {
+        let scalar_truncated = label.chars().take(self.max_length).collect::<String>();
+        let Some(max_display_width) = self.max_display_width else {
+            return scalar_truncated;
+        };
+
+        let mut display_width = 0;
+        let mut result = String::new();
+        for grapheme in scalar_truncated.graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if display_width + grapheme_width > max_display_width {
+                break;
+            }
+            result.push_str(grapheme);
+            display_width += grapheme_width;
+        }
+        result
     }
 }
 
@@ -441,6 +497,110 @@ mod tests {
 
         assert_eq!(candidate.label(), "pnpm dev");
         assert_eq!(candidate.source(), LabelCandidateSource::SignificantCommand);
+    }
+
+    #[test]
+    fn presents_aliases_before_classified_prefixes_then_truncates_once() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("nvim".to_string(), "editor".to_string());
+        aliases.insert("pnpm dev".to_string(), "serve".to_string());
+        let mut prefixes = BTreeMap::new();
+        prefixes.insert("nvim".to_string(), ">>".to_string());
+        prefixes.insert("pnpm dev".to_string(), "run: ".to_string());
+        let policy = LabelPolicy::configured(
+            [],
+            [],
+            [],
+            LabelPresentation {
+                aliases,
+                directory_aliases: BTreeMap::new(),
+                prefixes,
+                max_length: 5,
+                max_display_width: None,
+                cwd_components: 1,
+            },
+        );
+
+        assert_eq!(
+            policy
+                .candidate_for_pane(&pane_with_cwd("tabby"), Some(&process("nvim", &["nvim"])))
+                .expect("candidate")
+                .label(),
+            ">>edi"
+        );
+        assert_eq!(
+            policy
+                .candidate_for_pane(
+                    &pane_with_cwd("tabby"),
+                    Some(&process("pnpm", &["pnpm", "dev"])),
+                )
+                .expect("candidate")
+                .label(),
+            "run: "
+        );
+        assert_eq!(
+            policy
+                .candidate_for_pane(&pane_with_cwd("tabby"), Some(&process("bash", &["bash"])))
+                .expect("candidate")
+                .label(),
+            "tabby"
+        );
+    }
+
+    #[test]
+    fn display_width_limit_uses_conservative_grapheme_safe_unicode_width() {
+        let label = |policy: &LabelPolicy, command: &str| {
+            policy
+                .candidate_for_pane(&pane_with_cwd("tabby"), Some(&process(command, &[command])))
+                .expect("candidate")
+                .label()
+                .to_string()
+        };
+
+        let mut aliases = BTreeMap::new();
+        aliases.insert("ascii".to_string(), "abcd".to_string());
+        aliases.insert("cjk".to_string(), "甲乙".to_string());
+        aliases.insert("combining".to_string(), "e\u{301}x".to_string());
+        aliases.insert("emoji".to_string(), "👩‍💻x".to_string());
+        aliases.insert("ambiguous".to_string(), "·x".to_string());
+        aliases.insert("private".to_string(), "\u{e000}x".to_string());
+        let with_aliases = |max_display_width| {
+            LabelPolicy::configured(
+                ["ascii", "cjk", "combining", "emoji", "ambiguous", "private"].map(str::to_string),
+                [],
+                [],
+                LabelPresentation {
+                    aliases: aliases.clone(),
+                    directory_aliases: BTreeMap::new(),
+                    prefixes: BTreeMap::new(),
+                    max_length: 32,
+                    max_display_width: Some(max_display_width),
+                    cwd_components: 1,
+                },
+            )
+        };
+
+        assert_eq!(label(&with_aliases(3), "ascii"), "abc");
+        assert_eq!(label(&with_aliases(3), "cjk"), "甲");
+        assert_eq!(label(&with_aliases(1), "combining"), "e\u{301}");
+        assert_eq!(label(&with_aliases(2), "emoji"), "👩‍💻");
+        assert_eq!(label(&with_aliases(1), "ambiguous"), "·");
+        assert_eq!(label(&with_aliases(1), "private"), "\u{e000}");
+
+        let scalar_policy = LabelPolicy::configured(
+            ["combining"].map(str::to_string),
+            [],
+            [],
+            LabelPresentation {
+                aliases: BTreeMap::from([("combining".to_string(), "e\u{301}x".to_string())]),
+                directory_aliases: BTreeMap::new(),
+                prefixes: BTreeMap::new(),
+                max_length: 2,
+                max_display_width: None,
+                cwd_components: 1,
+            },
+        );
+        assert_eq!(label(&scalar_policy, "combining"), "e\u{301}");
     }
 
     fn candidate_for(process_info: PaneProcessInfo, pane: PaneInfo) -> LabelCandidate {
