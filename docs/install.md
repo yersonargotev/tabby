@@ -145,7 +145,12 @@ version = 1
 
 [labels]
 max_length = 32
+max_display_width = 32
 cwd_components = 1
+
+[labels.prefixes]
+"lazygit" = "git: "
+"pnpm dev" = "run: "
 
 [commands]
 additional_significant = ["yazi", "btop"]
@@ -164,7 +169,11 @@ cargo = ["run", "test", "watch"]
 "/Users/me/work/customer-api" = "api"
 ```
 
-The built-ins remain Significant Commands `nvim`, `lazygit`, `codex`, and `claude`; runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`; ignored shells/wrappers including `zsh`, `bash`, `tmux`, `env`, and `sudo`; `max_length = 32`; and `cwd_components = 1`. The supported ranges are 1–128 Unicode characters for `max_length` and 1–8 trailing path components for `cwd_components`. Directory aliases apply only when no Significant Command was classified.
+The built-ins remain Significant Commands `nvim`, `lazygit`, `codex`, and `claude`; runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`; ignored shells/wrappers including `zsh`, `bash`, `tmux`, `env`, and `sudo`; `max_length = 32`; and `cwd_components = 1`. The supported ranges are 1–128 Unicode scalars for `max_length`, 1–256 terminal display cells for optional `max_display_width`, and 1–8 trailing path components for `cwd_components`. Directory aliases apply only when no Significant Command was classified.
+
+`labels.prefixes` keys are classified Significant Command or runner/subcommand candidates, never raw process fields. Tabby applies command aliases first, then adds the prefix keyed by the original classified candidate, then performs one final truncation. Prefixes have no defaults: omit the table to retain plain labels, and Tabby ships no icon or Nerd Font mapping.
+
+`max_length` keeps its original Unicode-scalar meaning. `max_display_width` is an independent optional bound using [`unicode-width` 0.2.2](https://docs.rs/unicode-width/0.2.2/unicode_width/) and its Unicode 17.0.0 tables. Tabby uses the crate's conservative non-CJK width (`width`): ASCII is one cell, CJK wide characters are two, combining sequences are kept together, fully-qualified emoji ZWJ sequences are treated as two, and East Asian ambiguous characters are narrow. Private-use characters are measured conservatively by those tables, but actual rendering remains font- and terminal-dependent; this is a bound, not a promise of font-perfect display width.
 
 Directory selectors are exact lexical paths. They accept absolute paths and `~/...`, with `~` expanded while loading `config.toml`. Tabby uses `foreground_cwd` before pane `cwd`, collapses lexical `.` and `..` components, and does not access the filesystem. Therefore aliases work for restored or deleted paths, while symlink spellings remain distinct. Globs, prefix matching, case folding, filesystem canonicalization, and automatic symlink resolution are not supported.
 
@@ -176,7 +185,7 @@ tabby config reload
 tabby status
 ```
 
-Unknown fields and unsupported versions are errors. Empty or unsafe labels, duplicate normalized directory selectors, duplicate/contradictory command entries, and out-of-range values are also rejected. A missing file means built-in defaults. A rejected reload keeps the last valid active policy and appears in `tabby status`; an invalid initial file prevents the Session Runtime from becoming Ready. Configuration cannot change runtime cadence, quiet windows, stability requirements, deadlines, manual-lock behavior, ownership, leases, or persistence.
+Unknown fields and unsupported versions are errors. Empty or unsafe labels, unknown prefix candidates, duplicate normalized directory selectors, duplicate/contradictory command entries, and out-of-range values are also rejected with their field name. A missing file means built-in defaults. A rejected reload keeps the last valid active policy and appears in `tabby status`; an invalid initial file prevents the Session Runtime from becoming Ready. Configuration cannot change runtime cadence, quiet windows, stability requirements, deadlines, manual-lock behavior, ownership, leases, or persistence.
 
 User-edited labels are treated as manual locks after Tabby has established a plugin label baseline. To clear locks from Herdr actions or the CLI:
 

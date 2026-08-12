@@ -2569,7 +2569,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_reload_atomically_activates_and_retains_directory_aliases() {
+    fn runtime_config_reload_atomically_activates_presentation_and_retains_directory_aliases() {
         let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
         let directory = PathBuf::from("/tmp").join(format!(
             "tby-directory-alias-reload-test-{}-{unique}",
@@ -2600,16 +2600,18 @@ mod tests {
 
         fs::write(
             &config_path,
-            "version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n",
+            "version = 1\n[labels.prefixes]\nnvim = \"first: \"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n",
         )
         .expect("initial alias config");
         reload_config(&mut state, &config_path, &metadata_path, &mut metadata)
             .expect("activate initial alias");
         assert_eq!(reload_candidate(&state), "first");
+        assert_eq!(reload_significant_candidate(&state), "first: nvim");
 
         fs::write(&config_path, "version = 2\n").expect("rejected alias config");
         assert!(reload_config(&mut state, &config_path, &metadata_path, &mut metadata).is_err());
         assert_eq!(reload_candidate(&state), "first");
+        assert_eq!(reload_significant_candidate(&state), "first: nvim");
         assert!(
             metadata
                 .latest_config_error
@@ -2619,12 +2621,13 @@ mod tests {
 
         fs::write(
             &config_path,
-            "version = 1\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"second\"\n",
+            "version = 1\n[labels.prefixes]\nnvim = \"second: \"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"second\"\n",
         )
         .expect("replacement alias config");
         reload_config(&mut state, &config_path, &metadata_path, &mut metadata)
             .expect("activate replacement alias");
         assert_eq!(reload_candidate(&state), "second");
+        assert_eq!(reload_significant_candidate(&state), "second: nvim");
         assert_eq!(metadata.latest_config_error, None);
 
         fs::remove_dir_all(directory).expect("remove test directory");
@@ -2651,6 +2654,45 @@ mod tests {
             .label_policy()
             .candidate_for_pane(&pane, None)
             .expect("directory candidate")
+            .label()
+            .to_string()
+    }
+
+    fn reload_significant_candidate(state: &OneShotRefreshState) -> String {
+        let pane = crate::herdr_client::PaneInfo {
+            pane_id: "workspace:pane".to_string(),
+            terminal_id: Some("terminal".to_string()),
+            workspace_id: "workspace".to_string(),
+            tab_id: "workspace:tab".to_string(),
+            focused: true,
+            label: None,
+            title: None,
+            cwd: Some("/Users/me/dev/tabby".to_string()),
+            foreground_cwd: None,
+            agent: None,
+            display_agent: None,
+            custom_status: None,
+            agent_status: None,
+            revision: None,
+        };
+        let process_info = crate::herdr_client::PaneProcessInfo {
+            pane_id: pane.pane_id.clone(),
+            shell_pid: Some(100),
+            foreground_process_group_id: Some(200),
+            foreground_processes: vec![crate::herdr_client::PaneProcess {
+                pid: 201,
+                name: "nvim".to_string(),
+                argv: Some(vec!["nvim".to_string()]),
+                argv0: Some("nvim".to_string()),
+                cmdline: Some("nvim".to_string()),
+                cwd: pane.cwd.clone(),
+            }],
+            tty: Some("/dev/ttys001".to_string()),
+        };
+        state
+            .label_policy()
+            .candidate_for_pane(&pane, Some(&process_info))
+            .expect("Significant Command candidate")
             .label()
             .to_string()
     }

@@ -79,7 +79,12 @@ version = 1
 
 [labels]
 max_length = 32
+max_display_width = 32
 cwd_components = 1
+
+[labels.prefixes]
+"lazygit" = "git: "
+"pnpm dev" = "run: "
 
 [commands]
 additional_significant = ["yazi", "btop", "k9s", "docker"]
@@ -101,11 +106,13 @@ go = ["run", "test"]
 "/Users/me/work/customer-api" = "api"
 ```
 
-All fields except `version` are optional. Additional commands and runner pairs extend the built-ins; command aliases change presentation only after classification. Directory aliases replace only the Working Directory Suffix fallback, so a Significant Command still wins. Defaults are `max_length = 32`, `cwd_components = 1`, Significant Commands `nvim`, `lazygit`, `codex`, and `claude`, runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`, plus the ignored shell/wrapper list described above. `max_length` accepts 1–128 Unicode characters and `cwd_components` accepts 1–8 trailing components.
+All fields except `version` are optional. Additional commands and runner pairs extend the built-ins; command aliases change presentation only after classification. `labels.prefixes` is keyed by those classified Significant Command and runner/subcommand candidates: aliases apply first, then the candidate's prefix, then Tabby truncates the final label once. There are no prefix or icon defaults. Directory aliases replace only the Working Directory Suffix fallback, so a Significant Command still wins. Defaults are `max_length = 32`, `cwd_components = 1`, Significant Commands `nvim`, `lazygit`, `codex`, and `claude`, runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`, plus the ignored shell/wrapper list described above. `max_length` accepts 1–128 Unicode scalars; optional `max_display_width` accepts 1–256 display cells; and `cwd_components` accepts 1–8 trailing components.
+
+`max_display_width` uses [`unicode-width` 0.2.2](https://docs.rs/unicode-width/0.2.2/unicode_width/) with Unicode 17.0.0 tables. Its conservative non-CJK policy treats ASCII as one cell, CJK wide characters as two, fully-qualified emoji ZWJ sequences as two, and ambiguous-width characters as narrow; it preserves combining sequences. Private-use glyphs are bounded by the Unicode tables, but exact rendering depends on the user's terminal and font, so Tabby does not promise font-perfect widths.
 
 Directory alias selectors must be absolute paths or `~/...`; `~` expands when configuration loads. Tabby compares the effective directory (`foreground_cwd`, then pane `cwd`) by exact lexical path after collapsing `.` and `..`. This comparison never reads the filesystem: paths may be nonexistent, and distinct symlink spellings remain distinct. Globs, prefix matching, case folding, canonicalization, and automatic symlink resolution are intentionally unsupported.
 
-Unknown fields, unsupported versions, unsafe labels, duplicate normalized directory selectors, contradictions, and out-of-range values are rejected. Run `tabby config check`, then `tabby config reload`; a rejected reload keeps the last valid policy and records the diagnostic in `tabby status`. An invalid initial file prevents the Session Runtime from becoming Ready. Runtime timing, Navigation Stability, manual locks, leases, ownership, and persistence are intentionally not configurable.
+Unknown fields, unsupported versions, unsafe labels, unknown or contradictory prefix candidates, duplicate normalized directory selectors, contradictions, and out-of-range values are rejected with field-specific diagnostics. Run `tabby config check`, then `tabby config reload`; a rejected reload keeps the last valid policy and records the diagnostic in `tabby status`. An invalid initial file prevents the Session Runtime from becoming Ready. Runtime timing, Navigation Stability, manual locks, leases, ownership, and persistence are intentionally not configurable.
 
 ## Local development
 
