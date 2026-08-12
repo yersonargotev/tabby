@@ -30,10 +30,10 @@ python3 scripts/herdr_release_harness.py
 
 ## Real release observations
 
-- `herdr plugin install yersonargotev/tabby --yes` resolved commit `69b3477acf2032a3a542b6614be0fae6f96f4082`, ran the declared Python build command, and registered plugin id `yersonargotev.tabby`, the GitHub-managed production root, one startup hook, three events, four actions, and `.herdr/bin/tabby` commands.
+- `herdr plugin install yersonargotev/tabby --ref v0.1.13 --yes` resolved commit `69b3477acf2032a3a542b6614be0fae6f96f4082`, ran the declared Python build command, and registered plugin id `yersonargotev.tabby`, the GitHub-managed production root, one startup hook, three events, four actions, and `.herdr/bin/tabby` commands. Pinning the release tag makes future reruns independent of later `main` changes.
 - The explicit `start` action produced a Ready Session Runtime on the registered `0.1.13` executable with no status warnings.
 - The explicit `refresh` action renamed an eligible focused tab to the `manual-refresh-target` Working Directory Basename. A later `release-manual-lock` label became a Manually Locked Tab and survived periodic freshness.
-- Reinstalling the same GitHub source rotated the registered executable instance. Explicit `start` moved ownership from PID 27711 / launch `27706-18caf1a76e6d0d40-0` to PID 27931 / launch `27911-18caf1a9dcff9f50-1`; the exclusive lease prevented overlap, and the harness confirmed the prior owner no longer existed after activation.
+- Reinstalling the pinned GitHub release rotated the registered executable instance. During explicit `start`, 10 ms sampling first observed prior PID 32449 exit at +261 ms and then replacement PID 32534 Ready at +281 ms; no sample observed overlapping owners. The corresponding launch ids also changed.
 - Two consecutive Runtime Status reads reported `Warnings: none`, retained the same owner, and did not change Session-Scoped Tab State.
 - After a real tmux-hosted Herdr client detached, the same Ready owner completed another periodic evaluation.
 - Session Stop ended that owner. Session Restore created PID 28042 / launch `28040-18caf1ab4d55cfd0-0` and retained the manual label and lock.

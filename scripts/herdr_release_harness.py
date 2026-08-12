@@ -61,12 +61,21 @@ def build_environment(root: Path) -> Dict[str, str]:
 
 def plan(root: Path) -> Dict[str, Any]:
     environment = build_environment(root)
+    release_tag = f"v{manifest_version()}"
     return {
         "root": str(root),
         "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
         "repository": REPOSITORY,
         "plugin_id": PLUGIN_ID,
-        "install_command": ["herdr", "plugin", "install", REPOSITORY, "--yes"],
+        "install_command": [
+            "herdr",
+            "plugin",
+            "install",
+            REPOSITORY,
+            "--ref",
+            release_tag,
+            "--yes",
+        ],
         "environment": {
             name: environment[name]
             for name in (
@@ -147,7 +156,9 @@ def command_binary(plugin: Dict[str, Any]) -> Path:
     return binary
 
 
-def assert_registration(plugin: Dict[str, Any], expected_version: str) -> None:
+def assert_registration(
+    plugin: Dict[str, Any], expected_version: str, expected_commit: str
+) -> None:
     expected_actions = {
         "start": [".herdr/bin/tabby", "start"],
         "refresh": [".herdr/bin/tabby", "refresh"],
@@ -185,8 +196,9 @@ def assert_registration(plugin: Dict[str, Any], expected_version: str) -> None:
         or source.get("kind") != "github"
         or source.get("owner") != "yersonargotev"
         or source.get("repo") != "tabby"
+        or source.get("resolved_commit") != expected_commit
     ):
-        raise HarnessFailure(f"plugin is not GitHub-managed: {source}")
+        raise HarnessFailure(f"plugin does not match the pinned GitHub release: {source}")
 
 
 def binary_environment(case: SessionCase) -> Dict[str, str]:
@@ -270,6 +282,48 @@ def runtime_after_evaluation(
     return runtime
 
 
+def observe_handoff(
+    case: SessionCase,
+    replacement_binary: Path,
+    prior_owner: ReadyRuntime,
+) -> ReadyRuntime:
+    deadline = time.monotonic() + 10.0
+    prior_exit_ms: Optional[int] = None
+    replacement_ready_ms: Optional[int] = None
+    replacement: Optional[ReadyRuntime] = None
+    started = time.monotonic()
+    while time.monotonic() < deadline:
+        prior_exists = process_exists(prior_owner.pid)
+        if not prior_exists and prior_exit_ms is None:
+            prior_exit_ms = int((time.monotonic() - started) * 1000)
+        try:
+            observed = ready_runtime(case, replacement_binary)
+        except (HarnessFailure, OSError):
+            observed = None
+        if observed is not None and observed.launch_id != prior_owner.launch_id:
+            if prior_exists:
+                raise HarnessFailure(
+                    "replacement became Ready while the prior owner still existed"
+                )
+            replacement = observed
+            replacement_ready_ms = int((time.monotonic() - started) * 1000)
+            break
+        time.sleep(0.01)
+    if replacement is None or prior_exit_ms is None or replacement_ready_ms is None:
+        raise HarnessFailure("timed out observing ordered Cooperative Runtime Handoff")
+    if replacement.pid == prior_owner.pid:
+        raise HarnessFailure("reinstall activation reused the prior owner PID")
+    case.recorder.assertion(
+        case.name,
+        "cooperative-runtime-handoff-ordering",
+        f"prior owner pid={prior_owner.pid} exit observed at +{prior_exit_ms} ms; "
+        f"replacement pid={replacement.pid} Ready observed at +{replacement_ready_ms} ms; "
+        "no sample observed overlapping owners",
+    )
+    run_binary(case, replacement_binary, "ready-after-reinstall", "status")
+    return replacement
+
+
 def state_snapshot(state_root: Path) -> Dict[str, str]:
     if not state_root.is_dir():
         raise HarnessFailure(f"Session-Scoped Tab State is missing: {state_root}")
@@ -340,6 +394,16 @@ def run_live(output: Path) -> None:
         raise HarnessFailure(f"expected herdr 0.8.0, got {herdr_version!r}")
 
     expected_version = manifest_version()
+    release_tag = f"v{expected_version}"
+    expected_commit = subprocess.run(
+        ["git", "rev-list", "-n", "1", release_tag],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if not expected_commit:
+        raise HarnessFailure(f"release tag does not resolve locally: {release_tag}")
     root = Path(tempfile.mkdtemp(prefix="tabby-release-harness.", dir="/tmp"))
     recorder = Recorder(root)
     environment = build_environment(root)
@@ -367,9 +431,17 @@ def run_live(output: Path) -> None:
         )
 
         case.start_server("clean-session-start")
-        case.herdr("clean-native-install", "plugin", "install", REPOSITORY, "--yes")
+        case.herdr(
+            "clean-native-install",
+            "plugin",
+            "install",
+            REPOSITORY,
+            "--ref",
+            release_tag,
+            "--yes",
+        )
         plugin = installed_plugin(case, "inspect-registration")
-        assert_registration(plugin, expected_version)
+        assert_registration(plugin, expected_version, expected_commit)
         managed_root = Path(str(plugin["plugin_root"])).resolve()
         binary = command_binary(plugin)
         recorder.assertion(
@@ -427,9 +499,17 @@ def run_live(output: Path) -> None:
         )
 
         prior_owner = ready_runtime(case, binary)
-        case.herdr("reinstall-native-plugin", "plugin", "install", REPOSITORY, "--yes")
+        case.herdr(
+            "reinstall-native-plugin",
+            "plugin",
+            "install",
+            REPOSITORY,
+            "--ref",
+            release_tag,
+            "--yes",
+        )
         replacement_plugin = installed_plugin(case, "inspect-reinstalled-registration")
-        assert_registration(replacement_plugin, expected_version)
+        assert_registration(replacement_plugin, expected_version, expected_commit)
         replacement_binary = command_binary(replacement_plugin)
         case.herdr(
             "activate-reinstalled-plugin",
@@ -440,20 +520,11 @@ def run_live(output: Path) -> None:
             "--plugin",
             PLUGIN_ID,
         )
-        replacement = wait_ready(
-            case,
-            replacement_binary,
-            "ready-after-reinstall",
-            prior_owner.launch_id,
-        )
-        if process_exists(prior_owner.pid):
-            raise HarnessFailure("the prior Ready owner still exists after reinstall activation")
-        if replacement.pid == prior_owner.pid:
-            raise HarnessFailure("reinstall activation reused the prior owner PID")
+        replacement = observe_handoff(case, replacement_binary, prior_owner)
         recorder.assertion(
             "release",
             "cooperative-runtime-handoff",
-            "reinstall registered a new binary identity; explicit start released the prior owner before replacement became Ready",
+            "reinstall registered a new binary identity; observed prior-owner exit preceded replacement readiness",
         )
         binary = replacement_binary
         owner = replacement

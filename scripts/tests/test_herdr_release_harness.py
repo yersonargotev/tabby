@@ -43,7 +43,15 @@ class ReleaseHarnessPlanTests(unittest.TestCase):
         self.assertEqual(plan["plugin_id"], "yersonargotev.tabby")
         self.assertEqual(
             plan["install_command"],
-            ["herdr", "plugin", "install", "yersonargotev/tabby", "--yes"],
+            [
+                "herdr",
+                "plugin",
+                "install",
+                "yersonargotev/tabby",
+                "--ref",
+                "v0.1.13",
+                "--yes",
+            ],
         )
         self.assertEqual(
             plan["scenarios"],
