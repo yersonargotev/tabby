@@ -166,8 +166,12 @@ def check_manifests(
 
     if homebrew["build"]:
         errors.append(f"{homebrew_path} must not declare distribution build commands")
-    if len(canonical["build"]) > 1:
-        errors.append(f"{canonical_path} may declare at most one distribution build command")
+    expected_build = [{"command": ["python3", "scripts/install-herdr-plugin.py"]}]
+    if canonical["build"] != expected_build:
+        errors.append(
+            f"{canonical_path} must declare exactly one distribution build command: "
+            f"{expected_build[0]['command']!r}"
+        )
 
     if normalized_product_semantics(canonical) != normalized_product_semantics(homebrew):
         errors.append(

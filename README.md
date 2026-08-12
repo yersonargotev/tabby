@@ -4,15 +4,14 @@ Tabby is a Herdr plugin that keeps the focused tab label meaningful within each 
 
 ## Quick path
 
-Install the packaged plugin through Homebrew:
+Install the plugin through Herdr on Apple Silicon macOS:
 
 ```sh
-brew install yersonargotev/tap/tabby
-tabby install
-tabby status
+herdr plugin install yersonargotev/tabby
+herdr plugin action invoke start --plugin yersonargotev.tabby
 ```
 
-`tabby install` registers the plugin and ensures its Session Runtime is started. The former `tabby install --start` option no longer exists.
+Herdr previews and runs the repository's single build command before registration. It installs the checksum-verified release binary at `.herdr/bin/tabby`; Rust is needed only when that release has no matching Apple Silicon artifact. Homebrew remains an alternative installation path.
 
 Tabby refreshes automatically through Herdr events and periodic evaluation. To test it immediately, optionally run either manual refresh command; both request the same refresh through different paths:
 
@@ -111,7 +110,7 @@ dist plan
 
 ## Release notes
 
-Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts and a Homebrew formula for Apple Silicon macOS. The release package installs a separate Herdr manifest at `share/tabby/herdr-plugin.toml` whose actions run the Homebrew-installed binary via `../../bin/tabby`. Its product semantics are validated against the canonical root manifest; only distribution build declarations and executable paths may differ. After install or upgrade, `tabby install` refreshes registration and performs a cooperative Session Runtime handoff when needed.
+Tabby's release path uses `dist`/`cargo-dist` to publish an Apple Silicon macOS archive, its SHA-256 checksum, and a Homebrew formula. Herdr-managed installation derives the release version from the canonical manifest, verifies the published checksum, and atomically prepares `.herdr/bin/tabby` before registration. The Homebrew package remains an alternative adapter whose product semantics are validated against the canonical root manifest.
 
 Release setup and tagging details live in [`docs/release.md`](docs/release.md). The development and release manifests are kept aligned by [`scripts/check-herdr-manifests.py`](scripts/check-herdr-manifests.py).
 

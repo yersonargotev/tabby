@@ -1,17 +1,16 @@
 # Release process
 
-Tabby's v1 release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts, SHA-256 checksums, and a Homebrew formula for Apple Silicon macOS.
+Tabby's release path uses `dist`/`cargo-dist` to publish GitHub Release artifacts, SHA-256 checksums, and a Homebrew formula for Apple Silicon macOS. The canonical Herdr-managed adapter consumes the archive and checksum directly; Homebrew remains an alternative adapter.
 
 ## User install flow
 
-User-facing install, verification, trust-model, stop, uninstall, and rollback instructions live in [`docs/install.md`](install.md). The v1 release path remains:
+User-facing install, verification, trust-model, stop, uninstall, and rollback instructions live in [`docs/install.md`](install.md). The primary install command is:
 
 ```sh
-brew install yersonargotev/tap/tabby
-tabby install
+herdr plugin install yersonargotev/tabby
 ```
 
-The Homebrew formula installs the `tabby` binary under the package `bin` directory and installs `packaging/herdr/herdr-plugin.toml` as `share/tabby/herdr-plugin.toml`. The release manifest invokes `../../bin/tabby` relative to `share/tabby`, keeping Herdr actions tied to the binary installed by the same Homebrew package. The canonical root manifest invokes `.herdr/bin/tabby`; manifest validation requires both adapters to have identical product semantics and permits only distribution build declarations and executable paths to differ. `tabby install` refreshes Herdr registration by unlinking any prior `yersonargotev.tabby` plugin and linking the current package manifest, which avoids stale versioned Cellar paths after Homebrew cleanup. It then ensures the installed binary owns the selected Session Runtime, using authenticated cooperative handoff when required.
+The canonical manifest runs `python3 scripts/install-herdr-plugin.py` before registration. The installer derives the release tag from the manifest version and consumes `tabby-aarch64-apple-darwin.tar.xz` plus its `.sha256` sidecar. Release validation must keep the Cargo package version, both manifest versions, tag, archive name, and checksum aligned. The Homebrew formula installs the `tabby` binary under the package `bin` directory and installs `packaging/herdr/herdr-plugin.toml` as `share/tabby/herdr-plugin.toml`; manifest validation requires identical product semantics and permits only the build declaration and executable paths to differ.
 
 ## Tap validation
 
@@ -32,6 +31,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 python3 scripts/check-herdr-manifests.py
 python3 -m unittest discover -s scripts/tests
+python3 scripts/install-herdr-plugin.py --plugin-root /path/to/temporary-clean-checkout
 dist plan
 ```
 
