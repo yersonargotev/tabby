@@ -2,7 +2,7 @@ id = "yersonargotev.tabby"
 name = "Tabby"
 version = "0.1.13"
 min_herdr_version = "0.8.0"
-description = "Herdr plugin for focused-tab automatic labels."
+description = "Labels the focused tab with a Significant Command or Working Directory Basename."
 platforms = ["macos"]
 
 # Release flow:

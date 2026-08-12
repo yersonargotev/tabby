@@ -4,14 +4,15 @@ Tabby is a Herdr plugin that keeps the focused tab label meaningful within each 
 
 ## Quick path
 
-Install the plugin through Herdr on Apple Silicon macOS:
+Find Tabby in the [Herdr community marketplace](https://herdr.dev/plugins/) through
+the `herdr-plugin` topic, then install it on Apple Silicon macOS:
 
 ```sh
 herdr plugin install yersonargotev/tabby
 herdr plugin action invoke start --plugin yersonargotev.tabby
 ```
 
-Herdr previews and runs the repository's single build command before registration. It installs the checksum-verified release binary at `.herdr/bin/tabby`; Rust is needed only when that release has no matching Apple Silicon artifact. Homebrew remains an alternative installation path.
+The marketplace is an automatic community index; a listing is not a security review or endorsement by Herdr. Its install action resolves to the same `yersonargotev/tabby` source shown above. Herdr previews and runs the repository's single build command before registration. It installs the checksum-verified release binary at `.herdr/bin/tabby`; Rust is needed only when that release has no matching Apple Silicon artifact. Homebrew remains an optional alternative, not a prerequisite.
 
 Tabby refreshes automatically through Herdr events and periodic evaluation. To test it immediately, optionally run either manual refresh command; both request the same refresh through different paths:
 
@@ -124,5 +125,6 @@ Release setup and tagging details live in [`docs/release.md`](docs/release.md). 
 | [`docs/release.md`](docs/release.md) | Maintainer release process and required GitHub secret. |
 | [`docs/design/architecture.md`](docs/design/architecture.md) | Architecture and module responsibilities. |
 | [`docs/evidence/issue-71-herdr-0.8-lifecycle.md`](docs/evidence/issue-71-herdr-0.8-lifecycle.md) | Recorded real-Herdr 0.8 lifecycle evidence and coverage limits. |
+| [`docs/evidence/issue-79-herdr-native-release.md`](docs/evidence/issue-79-herdr-native-release.md) | Recorded native release install, activation, lifecycle, and cleanup evidence. |
 | [`docs/adr/`](docs/adr/) | Accepted architecture decisions. |
 | [`docs/herdr-tab-title-research.md`](docs/herdr-tab-title-research.md) | Historical research that preceded the implemented Session Runtime. |

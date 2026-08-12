@@ -1,10 +1,17 @@
 # Install Tabby
 
-Use this guide to install the released Tabby plugin through Herdr on Apple Silicon macOS, or use Homebrew as an alternative distribution adapter.
+Use this guide to install the released Tabby plugin through Herdr on Apple Silicon macOS. Homebrew remains an optional alternative, not a prerequisite.
 
-## Herdr-managed install
+## Marketplace discovery and Herdr-managed install
 
-Install and register the GitHub-managed plugin:
+Tabby is discoverable in the [Herdr community marketplace](https://herdr.dev/plugins/)
+because its public GitHub repository carries the `herdr-plugin` topic. The
+marketplace is an automatic community index: a listing is not a security review
+or endorsement by Herdr. Review the repository, manifest, build command, and
+trust surface below before installing.
+
+The marketplace points to `yersonargotev/tabby`; its install action uses the
+same GitHub-managed command as a direct installation:
 
 ```sh
 herdr plugin install yersonargotev/tabby
@@ -163,7 +170,7 @@ Repair is never implicit and `tabby status` never performs it. To remove valid r
 
 ## Trust model
 
-Herdr plugins run their configured commands as normal user code on your machine. A GitHub-managed install runs `python3 scripts/install-herdr-plugin.py` from the reviewed checkout with network access, then executes the verified Tabby binary. The installer contacts only the versioned release URLs under `github.com/yersonargotev/tabby`, downloads an archive and checksum, and writes the canonical executable inside the managed plugin root. The optional source fallback executes the local Rust `cargo` toolchain. Homebrew users instead trust the binary and manifest from `yersonargotev/tap/tabby`.
+Herdr plugins execute unsandboxed as normal user code on your machine. Marketplace discovery does not change that trust boundary. A GitHub-managed install runs `python3 scripts/install-herdr-plugin.py` from the reviewed checkout with network access, then executes the verified Tabby binary. The installer contacts only the versioned release URLs under `github.com/yersonargotev/tabby`, downloads an archive and checksum, and writes the canonical executable inside the managed plugin root. The optional source fallback executes the local Rust `cargo` toolchain. Homebrew users instead trust the binary and manifest from `yersonargotev/tap/tabby`.
 
 The release paths are intentionally explicit:
 
@@ -178,6 +185,22 @@ The release paths are intentionally explicit:
 ```sh
 herdr plugin config-dir yersonargotev.tabby
 ```
+
+Herdr supplies that plugin-owned configuration/state location, with XDG
+fallbacks when needed. Tabby stores Session-Scoped Tab State there, never in the
+marketplace index, managed checkout, or Homebrew package. Registration and
+runtime activation remain explicit: install first, then invoke the `start`
+action shown above.
+
+## Release evidence
+
+The current production source is release
+[`v0.1.13`](https://github.com/yersonargotev/tabby/releases/tag/v0.1.13). Its
+[native Herdr install evidence](https://github.com/yersonargotev/tabby/blob/main/docs/evidence/issue-79-herdr-native-release.md)
+records checksum-verified installation, registration, explicit activation,
+status, lifecycle behavior, uninstall, retained state, and isolated cleanup.
+The earlier [Herdr 0.8 lifecycle evidence](https://github.com/yersonargotev/tabby/blob/main/docs/evidence/issue-71-herdr-0.8-lifecycle.md)
+documents the underlying Session Runtime lifecycle and its coverage limits.
 
 ## Migrate between released distributions
 

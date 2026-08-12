@@ -60,6 +60,18 @@ class HerdrManifestContractTests(unittest.TestCase):
         self.assertEqual({command[0] for command in commands}, {CANONICAL_BINARY})
         self.assertNotIn("scaffold", manifest["description"].lower())
 
+    def test_manifests_describe_the_focused_tab_label_policy(self) -> None:
+        for manifest_path in (
+            REPO_ROOT / "herdr-plugin.toml",
+            REPO_ROOT / "packaging" / "herdr" / "herdr-plugin.toml",
+        ):
+            manifest = checker.load_manifest(manifest_path)
+            description = manifest["description"]
+
+            self.assertIn("focused tab", description)
+            self.assertIn("Significant Command", description)
+            self.assertIn("Working Directory Basename", description)
+
     def test_start_action_activates_the_registered_binary(self) -> None:
         for manifest_path in (
             REPO_ROOT / "herdr-plugin.toml",
