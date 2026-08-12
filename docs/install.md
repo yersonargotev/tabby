@@ -20,7 +20,16 @@ Start Tabby immediately in the current Herdr Session:
 herdr plugin action invoke start --plugin yersonargotev.tabby
 ```
 
-Re-running `herdr plugin install yersonargotev/tabby` updates the Herdr-managed checkout and rebuilds the same canonical executable contract.
+To update or reinstall the Herdr-managed plugin, run the install command again, explicitly activate the registered binary, and verify the selected Session Runtime:
+
+```sh
+herdr plugin install yersonargotev/tabby
+herdr plugin action invoke start --plugin yersonargotev.tabby
+plugin_root="$(herdr plugin list --plugin yersonargotev.tabby --json | jq -r '.result.plugins[0].plugin_root')"
+"$plugin_root/.herdr/bin/tabby" status
+```
+
+The repeated install updates the managed checkout and rebuilds the same canonical executable contract. The `start` action cooperatively hands ownership to that registered binary if another released distribution currently owns the Session Runtime.
 
 ## Homebrew alternative
 
@@ -170,6 +179,33 @@ The release paths are intentionally explicit:
 herdr plugin config-dir yersonargotev.tabby
 ```
 
+## Migrate between released distributions
+
+Session-Scoped Tab State belongs to the Herdr Session rather than either installation root, so locks, baselines, and rename intents survive migration. In both directions, explicit activation uses Cooperative Runtime Handoff through the authenticated control endpoint: the proven owner releases its lease before the replacement starts, and Tabby never kills an owner by PID.
+
+To migrate from Homebrew to the primary Herdr-managed installation:
+
+```sh
+herdr plugin unlink yersonargotev.tabby
+herdr plugin install yersonargotev/tabby
+herdr plugin action invoke start --plugin yersonargotev.tabby
+plugin_root="$(herdr plugin list --plugin yersonargotev.tabby --json | jq -r '.result.plugins[0].plugin_root')"
+"$plugin_root/.herdr/bin/tabby" status
+brew uninstall tabby
+```
+
+Only uninstall Homebrew after status identifies the managed plugin root and `.herdr/bin/tabby` as the Ready owner. If activation fails, the prior proven owner remains intact; relink the Homebrew adapter with `tabby install` before retrying.
+
+To migrate from a Herdr-managed installation to Homebrew:
+
+```sh
+brew install yersonargotev/tap/tabby
+tabby install
+tabby status
+```
+
+`tabby install` unregisters the prior adapter, links Homebrew's current `share/tabby` manifest, and cooperatively activates the Homebrew binary for the selected Herdr Session. After status shows the Homebrew registered command and Ready owner, the managed checkout is no longer registered. If you need to remove retained managed files separately, follow the Herdr version's documented plugin cleanup command only after verifying the Homebrew owner.
+
 ## Update or relink after Homebrew upgrades
 
 Homebrew installs each version in a versioned Cellar directory and may remove old versions during cleanup. Herdr stores the resolved plugin root, so an old registration can point at a directory that no longer exists after `brew upgrade`.
@@ -236,3 +272,15 @@ herdr plugin link .
 ```
 
 Local linking uses the same `.herdr/bin/tabby` plugin-root executable contract as the production-shaped root manifest. Herdr does not run build commands for linked plugins, so prepare that path explicitly after every debug build.
+
+To roll back the Herdr-managed path to an earlier released version, check out the desired release tag in a reviewed local clone, prepare its verified plugin-root binary, and link it as an explicit local rollback:
+
+```sh
+git checkout v<version>
+python3 scripts/install-herdr-plugin.py
+herdr plugin uninstall yersonargotev.tabby
+herdr plugin link .
+herdr plugin action invoke start --plugin yersonargotev.tabby
+```
+
+This rollback is intentionally distinct from routine managed updates and local development. Review the selected tag and its manifest build command before running it; use the migration procedures above when changing only between the current Herdr-managed and Homebrew releases.

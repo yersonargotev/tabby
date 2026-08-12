@@ -19,6 +19,8 @@ hosting = "github"
 tap = "yersonargotev/homebrew-tap"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
+# Build and checksum the production archive on pull requests without publishing it.
+pr-run-mode = "upload"
 # Plan jobs to run in CI
 plan-jobs = ["./check-herdr-manifests"]
 # Extra static files to include in each App (path relative to this Cargo.toml's dir)

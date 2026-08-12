@@ -55,6 +55,7 @@ jobs:
       publishing: ${{ !github.event.pull_request }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ !github.event.pull_request && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -81,6 +82,14 @@ jobs:
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Check native Herdr release contract
+        shell: bash
+        run: |
+          contract_args=(--dist-manifest plan-dist-manifest.json)
+          if [[ -n "$RELEASE_TAG" ]]; then
+            contract_args+=(--tag "$RELEASE_TAG")
+          fi
+          python3 scripts/check-release-contract.py "${contract_args[@]}"
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@v7
         with:
@@ -149,6 +158,8 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: Check native Herdr archive checksum
+        run: python3 scripts/check-release-contract.py --artifact-dir target/distrib
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -209,6 +220,8 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: Check complete native and Homebrew release contract
+        run: python3 scripts/check-release-contract.py --artifact-dir target/distrib --require-homebrew-formula
       - name: "Upload artifacts"
         uses: actions/upload-artifact@v7
         with:
