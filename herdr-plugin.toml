@@ -21,7 +21,7 @@ command = [".herdr/bin/tabby", "ensure-started"]
 id = "start"
 title = "Start Tabby"
 contexts = ["workspace"]
-command = [".herdr/bin/tabby", "ensure-started"]
+command = [".herdr/bin/tabby", "start"]
 
 [[actions]]
 id = "refresh"

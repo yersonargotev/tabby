@@ -220,10 +220,11 @@ pub fn run_stub(command: Command) -> CommandOutcome {
 fn runtime_trigger(command: &Command) -> Option<session_runtime::RefreshTrigger> {
     match command {
         Command::Refresh => Some(session_runtime::RefreshTrigger::Manual),
-        Command::Start | Command::EnsureStarted => Some(session_runtime::RefreshTrigger::Startup),
+        Command::EnsureStarted => Some(session_runtime::RefreshTrigger::Startup),
         Command::SignalFocus => Some(session_runtime::RefreshTrigger::Focus),
         Command::SignalCreated => Some(session_runtime::RefreshTrigger::Creation),
         Command::Status
+        | Command::Start
         | Command::Runtime { .. }
         | Command::Install
         | Command::UnlockFocused
@@ -252,12 +253,15 @@ pub fn run_command(command: Command) -> Result<String, CommandError> {
 
     match command {
         Command::Status => status::run_from_env().map_err(CommandError::from),
+        Command::Start => {
+            session_runtime::activate_current_runtime_from_env().map_err(CommandError::from)
+        }
         Command::Runtime { launch_id } => {
             session_runtime::run_owned_session_from_env(launch_id).map_err(CommandError::from)
         }
         Command::Install => {
             let install_message = install::relink_from_current_exe()?;
-            let runtime_message = session_runtime::ensure_current_runtime_after_install_from_env()?;
+            let runtime_message = session_runtime::activate_current_runtime_from_env()?;
             Ok(format!("{install_message}\n{runtime_message}"))
         }
         Command::UnlockFocused => {
@@ -274,7 +278,6 @@ pub fn run_command(command: Command) -> Result<String, CommandError> {
         }
         Command::Help => Ok(USAGE.to_string()),
         Command::Refresh
-        | Command::Start
         | Command::EnsureStarted
         | Command::SignalFocus
         | Command::SignalCreated => unreachable!("runtime ingress handled before dispatch"),

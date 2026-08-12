@@ -432,11 +432,11 @@ pub fn signal_manual_refresh_from_env() -> Result<String, SessionRuntimeError> {
     ensure_ready_owner_from_env(RefreshTrigger::Manual)
 }
 
-/// Requests a cooperative replacement after `tabby install` has updated registration.
+/// Ensures the invoking binary owns the selected Herdr Session Runtime.
 ///
 /// A Ready owner receives an authenticated handoff request and exits on its own; this path
 /// never treats a recorded PID as authority to terminate a process.
-pub fn ensure_current_runtime_after_install_from_env() -> Result<String, SessionRuntimeError> {
+pub fn activate_current_runtime_from_env() -> Result<String, SessionRuntimeError> {
     let socket = crate::startup::resolve_socket_from_env()?;
     let state_base = crate::startup::state_base_from_runtime()?;
     let binary_path = std::env::current_exe().map_err(SessionRuntimeError::CurrentExe)?;
@@ -461,7 +461,7 @@ pub fn ensure_current_runtime_after_install_from_env() -> Result<String, Session
             )?
             .ok_or_else(|| {
                 SessionRuntimeError::Control(
-                    "Ready owner disappeared during install verification".to_string(),
+                    "Ready owner disappeared during activation verification".to_string(),
                 )
             })?;
             return Ok(format!(
@@ -489,7 +489,7 @@ pub fn ensure_current_runtime_after_install_from_env() -> Result<String, Session
         RuntimeInspection::Absent => {}
         RuntimeInspection::Starting { .. } => {
             return Err(SessionRuntimeError::Control(
-                "a Session Runtime is still starting during install".to_string(),
+                "a Session Runtime is still starting during activation".to_string(),
             ));
         }
         RuntimeInspection::Faulted { diagnostic, .. } => {

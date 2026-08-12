@@ -19,7 +19,7 @@ command = ["../../bin/tabby", "ensure-started"]
 id = "start"
 title = "Start Tabby"
 contexts = ["workspace"]
-command = ["../../bin/tabby", "ensure-started"]
+command = ["../../bin/tabby", "start"]
 
 [[actions]]
 id = "refresh"

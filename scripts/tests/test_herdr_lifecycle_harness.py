@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import importlib.util
 import subprocess
 import sys
 import unittest
@@ -9,9 +10,28 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HARNESS = REPO_ROOT / "scripts" / "herdr_lifecycle_harness.py"
+SPEC = importlib.util.spec_from_file_location("herdr_lifecycle_harness", HARNESS)
+assert SPEC is not None and SPEC.loader is not None
+harness = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = harness
+SPEC.loader.exec_module(harness)
 
 
 class HarnessPlanTests(unittest.TestCase):
+    def test_ready_parser_allows_explicit_owner_binary_diagnostic(self) -> None:
+        output = """Session Runtime: Ready pid=42 version=0.1.11 lease_held=true
+Ready owner binary: /opt/tabby/bin/tabby
+Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_evaluation_unix_ms=123 next_periodic_unix_ms=456 last_failure=<none>
+"""
+
+        match = harness.READY_RE.search(output)
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.group("pid"), "42")
+        self.assertEqual(match.group("launch"), "launch-1")
+        self.assertEqual(match.group("evaluation"), "123")
+
     def test_plan_isolates_default_and_named_sessions(self) -> None:
         sandbox_root = Path("/tmp/tabby-harness-contract")
         completed = subprocess.run(
@@ -73,7 +93,7 @@ class HarnessPlanTests(unittest.TestCase):
                 "client-attach-detach",
                 "manual-lock-stop-restore",
                 "runtime-crash-recovery",
-                "release-manifest-handoff",
+                "registered-binary-activation-and-bidirectional-handoff",
             ],
         )
         self.assertEqual(
