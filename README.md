@@ -114,6 +114,33 @@ Directory alias selectors must be absolute paths or `~/...`; `~` expands when co
 
 Unknown fields, unsupported versions, unsafe labels, unknown or contradictory prefix candidates, duplicate normalized directory selectors, contradictions, and out-of-range values are rejected with field-specific diagnostics. Run `tabby config check`, then `tabby config reload`; a rejected reload keeps the last valid policy and records the diagnostic in `tabby status`. An invalid initial file prevents the Session Runtime from becoming Ready. Runtime timing, Navigation Stability, manual locks, leases, ownership, and persistence are intentionally not configurable.
 
+### Per-Session profiles
+
+The global policy above is the fallback for sessions without a selector. A selected profile is instead compiled from built-in defaults and its optional profile inheritance; it does not inherit the global policy. Child scalar fields override their parent, command lists add entries, and duplicate map keys across inheritance are rejected rather than silently shadowed.
+
+```toml
+[profiles.work]
+extends = "engineering"
+
+[profiles.work.labels]
+cwd_components = 2
+
+[profiles.engineering.commands]
+additional_significant = ["yazi"]
+
+[[session_selectors]]
+profile = "work"
+identity = "/Users/me/.config/herdr/sessions/work/herdr.sock"
+
+[[session_selectors]]
+profile = "personal"
+named_session = "personal"
+```
+
+Each selector has exactly one of `identity`, `identity_hex`, or `named_session`. `identity` is an absolute readable socket path. `identity_hex` is the lowercase, lossless byte encoding printed by `tabby status` and supports identities that cannot be represented as UTF-8. `named_session` expands from the receiving runtime's documented socket root to `sessions/<name>/herdr.sock`, and is rejected for custom socket layouts where that root cannot be derived. All forms match against Tabby's exact resolved Session Identity. Duplicate resolved selectors, unknown profiles, invalid inheritance, and cycles are errors.
+
+`tabby config reload` is session-local: it recompiles and atomically replaces only the receiving Ready runtime's selected policy. It never reloads every session or changes locks, baselines, rename intents, leases, ownership, or Session Identity. `tabby status` reports the selected profile and `policy_source` for the active valid policy and retains both when a later reload is rejected.
+
 ## Local development
 
 Build the local debug binary, prepare the canonical plugin-root executable, and link this checkout:

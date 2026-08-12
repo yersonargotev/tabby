@@ -93,6 +93,7 @@ def plan(root: Path) -> Dict[str, Any]:
             "fixed-focus-command-and-cwd-fallback",
             "client-attach-detach",
             "manual-lock-stop-restore",
+            "session-policy-profile-selection-and-local-reload",
             "runtime-crash-recovery",
             "registered-binary-activation-and-bidirectional-handoff",
         ],
@@ -708,6 +709,25 @@ def write_records(output: Path, records: Iterable[Dict[str, Any]]) -> None:
     output.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
 
 
+def write_session_profile_config(path: Path, named_alias: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[profiles.named.directories.aliases]",
+                f"{json.dumps(str(REPO_ROOT))} = {json.dumps(named_alias)}",
+                "",
+                "[[session_selectors]]",
+                'profile = "named"',
+                'named_session = "tabby-lifecycle-named"',
+                "",
+            ]
+        )
+    )
+
+
 def run_live(output: Path) -> None:
     if platform.system() != "Darwin":
         raise HarnessFailure("the real lifecycle harness requires macOS")
@@ -741,6 +761,16 @@ def run_live(output: Path) -> None:
             require_descendant(path, root)
             path.mkdir(parents=True, exist_ok=True)
         Path(environment["HERDR_CONFIG_PATH"]).touch()
+        tabby_config = (
+            root
+            / "xdg-config"
+            / "herdr"
+            / "plugins"
+            / "config"
+            / PLUGIN_ID
+            / "config.toml"
+        )
+        write_session_profile_config(tabby_config, "named-policy")
 
         default.run("prepare-plugin-root", PREPARE_COMMAND)
         if not TABBY.is_file():
@@ -779,6 +809,15 @@ def run_live(output: Path) -> None:
             "session-isolation",
             "default and named Herdr Sessions have distinct socket identities and Ready owners",
         )
+        if "selected_profile=global policy_source=global" not in default.tabby_status_text():
+            raise HarnessFailure("default session did not select the global Label Policy")
+        if "selected_profile=named policy_source=profile:named" not in named.tabby_status_text():
+            raise HarnessFailure("named session did not select its named Label Policy profile")
+        recorder.assertion(
+            "all",
+            "session-policy-selection",
+            "default and named runtimes compiled distinct policies from one config.toml",
+        )
 
         for case in cases:
             exercise_trigger_burst(case, owners[case.name])
@@ -796,7 +835,7 @@ def run_live(output: Path) -> None:
             "--focus",
         )
         named_tab_id = json.loads(named_created.stdout)["result"]["tab"]["tab_id"]
-        named.wait_for_label(REPO_ROOT.name)
+        named.wait_for_label("named-policy")
         if default_tab_id != named_tab_id:
             raise HarnessFailure("expected equal first tab IDs in default and named sessions")
         state_directories = list(
@@ -819,6 +858,31 @@ def run_live(output: Path) -> None:
             "Session-Scoped Tab State resolved under isolated Herdr state, outside the plugin source root",
         )
 
+        write_session_profile_config(tabby_config, "named-policy-v2")
+        named.tabby("reload-named-policy", "config", "reload")
+        named.wait_for_label("named-policy-v2")
+        if default.focused_tab_label() != "manual-contract":
+            raise HarnessFailure("named-session reload changed the default session label")
+        tabby_config.write_text("version = 2\n")
+        rejected = named.tabby("reject-named-policy-reload", "config", "reload", check=False)
+        if rejected.returncode == 0:
+            raise HarnessFailure("invalid named-session reload was accepted")
+        if named.focused_tab_label() != "named-policy-v2":
+            raise HarnessFailure("rejected reload replaced the last valid named policy")
+        named_status = named.tabby_status_text()
+        if "selected_profile=named policy_source=profile:named" not in named_status:
+            raise HarnessFailure("rejected reload discarded the last valid profile selection")
+        if "latest_error=<none>" in named_status:
+            raise HarnessFailure("rejected reload was not reported through Runtime Status")
+        if "latest_error=<none>" not in default.tabby_status_text():
+            raise HarnessFailure("named-session reload error leaked into the default runtime")
+        write_session_profile_config(tabby_config, "named-policy-v2")
+        recorder.assertion(
+            "all",
+            "session-local-policy-reload",
+            "named reload and rejection retained its policy without changing the default runtime",
+        )
+
         owners["default"] = exercise_client_detach(default, owners["default"])
 
         crashed_owner = owners["named"]
@@ -832,6 +896,8 @@ def run_live(output: Path) -> None:
         owners["named"] = named.wait_ready(
             "ready-after-crash", crashed_owner.launch_id
         )
+        if "selected_profile=named policy_source=profile:named" not in named.tabby_status_text():
+            raise HarnessFailure("restored named runtime did not reselect its profile")
         recorder.assertion(
             "named", "runtime-crash", "supported creation hook restored a new Ready owner"
         )
