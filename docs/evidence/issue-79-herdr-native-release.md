@@ -1,8 +1,8 @@
 # Issue 79 Herdr-native release evidence
 
-Date: 2026-08-11 (America/Bogota), 2026-08-12 UTC  
-Host contract: Apple Silicon macOS, Herdr 0.8.0, protocol 19  
-Tested release: `v0.1.13` at `69b3477acf2032a3a542b6614be0fae6f96f4082`  
+Date: 2026-08-11 (America/Bogota), 2026-08-12 UTC
+Host contract: Apple Silicon macOS, Herdr 0.8.0, protocol 19
+Tested release: `v0.1.13` at `69b3477acf2032a3a542b6614be0fae6f96f4082`
 Result: passed
 
 ## Published release
