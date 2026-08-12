@@ -129,6 +129,8 @@ struct RuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     config_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_config_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_evaluation_unix_ms: Option<u128>,
@@ -166,6 +168,7 @@ pub enum RuntimeInspection {
         config_path: PathBuf,
         config_schema_version: Option<u8>,
         config_source: Option<String>,
+        selected_profile: Option<String>,
         latest_config_error: Option<String>,
     },
     Faulted {
@@ -174,6 +177,7 @@ pub enum RuntimeInspection {
         config_path: Option<PathBuf>,
         config_schema_version: Option<u8>,
         config_source: Option<String>,
+        selected_profile: Option<String>,
         latest_config_error: Option<String>,
     },
 }
@@ -229,6 +233,12 @@ struct RuntimeCommand {
 struct QueuedControlCommand {
     completion: mpsc::Receiver<Result<(), String>>,
     handoff_reply_written: Option<mpsc::SyncSender<()>>,
+}
+
+struct RuntimeConfigContext<'a> {
+    path: &'a Path,
+    session: &'a SessionSocket,
+    metadata_path: &'a Path,
 }
 
 enum RuntimeControlEvent {
@@ -582,7 +592,7 @@ fn activate_current_runtime_with(
             latest_config_error: Some(_),
             ..
         } => {
-            crate::config::load(&config_path)?;
+            crate::config::load_for_session(&config_path, launch.socket)?;
         }
         RuntimeInspection::Starting { .. } => {
             return Err(SessionRuntimeError::Control(
@@ -858,6 +868,7 @@ pub fn inspect_runtime(
         config_path: PathBuf::from(metadata.config_path),
         config_schema_version: metadata.config_schema_version,
         config_source: metadata.config_source,
+        selected_profile: metadata.selected_profile,
         latest_config_error: metadata.latest_config_error,
     })
 }
@@ -875,6 +886,7 @@ fn faulted_inspection(
             .map(|metadata| PathBuf::from(&metadata.config_path)),
         config_schema_version: metadata.and_then(|metadata| metadata.config_schema_version),
         config_source: metadata.and_then(|metadata| metadata.config_source.clone()),
+        selected_profile: metadata.and_then(|metadata| metadata.selected_profile.clone()),
         latest_config_error: metadata.and_then(|metadata| metadata.latest_config_error.clone()),
     }
 }
@@ -1006,7 +1018,7 @@ fn request_ready_owner(
                 }),
             ));
         }
-        match crate::config::load(Path::new(&metadata.config_path)) {
+        match crate::config::load_for_session(Path::new(&metadata.config_path), launch.socket) {
             Ok(_) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
@@ -1144,7 +1156,7 @@ fn run_owned_session(
             return Err(error.into());
         }
     };
-    let loaded_config = match crate::config::load(&config_path) {
+    let loaded_config = match crate::config::load_for_session(&config_path, launch.socket) {
         Ok(config) => config,
         Err(error) => {
             write_initial_config_fault(
@@ -1159,6 +1171,7 @@ fn run_owned_session(
         }
     };
     let config_source = loaded_config.source().as_str().to_string();
+    let selected_profile = loaded_config.selected_profile().map(str::to_string);
 
     let tab_state = crate::locks::SessionTabStateStore::open(launch.state_base, launch.socket)?;
     let mut refresh_state = OneShotRefreshState::new(
@@ -1188,6 +1201,7 @@ fn run_owned_session(
         config_path: config_path.to_string_lossy().into_owned(),
         config_schema_version: Some(crate::config::SCHEMA_VERSION),
         config_source: Some(config_source),
+        selected_profile,
         latest_config_error: None,
         last_evaluation_unix_ms: None,
         last_failure: None,
@@ -1205,13 +1219,17 @@ fn run_owned_session(
 
     let transport = UnixSocketTransport::new(&launch.socket.socket_path);
     let mut client = HerdrClient::new(transport);
+    let runtime_config = RuntimeConfigContext {
+        path: &config_path,
+        session: launch.socket,
+        metadata_path: &paths.metadata,
+    };
     let result = run_runtime_loop(
         &mut client,
         &mut refresh_state,
         &tab_state,
         trigger_rx,
-        &config_path,
-        &paths.metadata,
+        &runtime_config,
         &mut metadata,
     );
     if let Err(error) = &result {
@@ -1247,6 +1265,7 @@ fn write_initial_config_fault(
             config_path: config_path.to_string(),
             config_schema_version: None,
             config_source: None,
+            selected_profile: None,
             latest_config_error: Some(error.to_string()),
             last_evaluation_unix_ms: None,
             last_failure: Some(format!("invalid initial configuration: {error}")),
@@ -1333,8 +1352,7 @@ fn run_runtime_loop(
     state: &mut OneShotRefreshState,
     tab_state: &crate::locks::SessionTabStateStore,
     triggers: TriggerReceiver,
-    config_path: &Path,
-    metadata_path: &Path,
+    config: &RuntimeConfigContext<'_>,
     metadata: &mut RuntimeMetadata,
 ) -> Result<(), SessionRuntimeError> {
     // A newly spawned owner always begins with an initial quiet evaluation. This is what makes
@@ -1383,7 +1401,7 @@ fn run_runtime_loop(
                             Ok(())
                         }
                         RuntimeMutation::ConfigReload => {
-                            reload_config(state, config_path, metadata_path, metadata)?;
+                            reload_config(state, config, metadata)?;
                             let now = Instant::now();
                             state.note_refresh_trigger(now);
                             next_tick_at = Some(now + refresh_executor::DEFAULT_FOCUS_QUIET_WINDOW);
@@ -1429,28 +1447,28 @@ fn run_runtime_loop(
         ));
         metadata.next_periodic_unix_ms = next_tick_at
             .map(|next| unix_time_after(next.saturating_duration_since(Instant::now())));
-        write_metadata(metadata_path, metadata)?;
+        write_metadata(config.metadata_path, metadata)?;
     }
 }
 
 fn reload_config(
     state: &mut OneShotRefreshState,
-    config_path: &Path,
-    metadata_path: &Path,
+    config: &RuntimeConfigContext<'_>,
     metadata: &mut RuntimeMetadata,
 ) -> Result<(), SessionRuntimeError> {
-    match crate::config::load(config_path) {
+    match crate::config::load_for_session(config.path, config.session) {
         Ok(loaded) => {
             let source = loaded.source();
             metadata.config_schema_version = Some(crate::config::SCHEMA_VERSION);
             metadata.config_source = Some(source.as_str().to_string());
+            metadata.selected_profile = loaded.selected_profile().map(str::to_string);
             metadata.latest_config_error = None;
             state.replace_label_policy(loaded.into_policy());
-            write_metadata(metadata_path, metadata)
+            write_metadata(config.metadata_path, metadata)
         }
         Err(error) => {
             metadata.latest_config_error = Some(error.to_string());
-            write_metadata(metadata_path, metadata)?;
+            write_metadata(config.metadata_path, metadata)?;
             Err(error.into())
         }
     }
@@ -2096,6 +2114,7 @@ mod tests {
                 config_path: None,
                 config_schema_version: None,
                 config_source: None,
+                selected_profile: None,
                 latest_config_error: None,
             },
         ] {
@@ -2163,6 +2182,7 @@ mod tests {
             config_path: PathBuf::from("/tmp/config.toml"),
             config_schema_version: Some(crate::config::SCHEMA_VERSION),
             config_source: Some("built-in defaults".to_string()),
+            selected_profile: None,
             latest_config_error: None,
         }
     }
@@ -2418,6 +2438,7 @@ mod tests {
                 config_path: "/tmp/config.toml".to_string(),
                 config_schema_version: Some(crate::config::SCHEMA_VERSION),
                 config_source: Some("built-in defaults".to_string()),
+                selected_profile: None,
                 latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,
@@ -2548,6 +2569,7 @@ mod tests {
                 config_path: "/tmp/config.toml".to_string(),
                 config_schema_version: Some(crate::config::SCHEMA_VERSION),
                 config_source: Some("built-in defaults".to_string()),
+                selected_profile: None,
                 latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,
@@ -2578,40 +2600,49 @@ mod tests {
         fs::create_dir(&directory).expect("test directory");
         let config_path = directory.join("config.toml");
         let metadata_path = directory.join("runtime.json");
+        let session =
+            SessionSocket::resolve("/tmp/tabby-directory-alias-reload.sock").expect("session");
         let mut metadata = RuntimeMetadata {
             schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
             state: RuntimeMetadataState::Ready,
             pid: std::process::id(),
-            session_key: "test-session".to_string(),
-            socket_path: "/tmp/test.sock".to_string(),
-            socket_identity_hex: "test-identity".to_string(),
+            session_key: session.session_key.clone(),
+            socket_path: session.socket_path.to_string_lossy().into_owned(),
+            socket_identity_hex: session.identity_hex(),
             launch_id: "directory-alias-reload".to_string(),
             tabby_version: env!("CARGO_PKG_VERSION").to_string(),
             binary_path: "/tmp/tabby".to_string(),
             config_path: config_path.to_string_lossy().into_owned(),
             config_schema_version: Some(crate::config::SCHEMA_VERSION),
             config_source: Some("built-in defaults".to_string()),
+            selected_profile: None,
             latest_config_error: None,
             last_evaluation_unix_ms: None,
             last_failure: None,
             next_periodic_unix_ms: None,
         };
         let mut state = OneShotRefreshState::new(refresh_executor::RefreshExecutorState::default());
+        let runtime_config = RuntimeConfigContext {
+            path: &config_path,
+            session: &session,
+            metadata_path: &metadata_path,
+        };
 
         fs::write(
             &config_path,
-            "version = 1\n[labels.prefixes]\nnvim = \"first: \"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n",
+            "version = 1\n[profiles.first.labels.prefixes]\nnvim = \"first: \"\n[profiles.first.directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n[[session_selectors]]\nprofile = \"first\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
         )
         .expect("initial alias config");
-        reload_config(&mut state, &config_path, &metadata_path, &mut metadata)
-            .expect("activate initial alias");
+        reload_config(&mut state, &runtime_config, &mut metadata).expect("activate initial alias");
         assert_eq!(reload_candidate(&state), "first");
         assert_eq!(reload_significant_candidate(&state), "first: nvim");
+        assert_eq!(metadata.selected_profile.as_deref(), Some("first"));
 
         fs::write(&config_path, "version = 2\n").expect("rejected alias config");
-        assert!(reload_config(&mut state, &config_path, &metadata_path, &mut metadata).is_err());
+        assert!(reload_config(&mut state, &runtime_config, &mut metadata).is_err());
         assert_eq!(reload_candidate(&state), "first");
         assert_eq!(reload_significant_candidate(&state), "first: nvim");
+        assert_eq!(metadata.selected_profile.as_deref(), Some("first"));
         assert!(
             metadata
                 .latest_config_error
@@ -2621,13 +2652,14 @@ mod tests {
 
         fs::write(
             &config_path,
-            "version = 1\n[labels.prefixes]\nnvim = \"second: \"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"second\"\n",
+            "version = 1\n[profiles.second.labels.prefixes]\nnvim = \"second: \"\n[profiles.second.directories.aliases]\n\"/Users/me/dev/tabby\" = \"second\"\n[[session_selectors]]\nprofile = \"second\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
         )
         .expect("replacement alias config");
-        reload_config(&mut state, &config_path, &metadata_path, &mut metadata)
+        reload_config(&mut state, &runtime_config, &mut metadata)
             .expect("activate replacement alias");
         assert_eq!(reload_candidate(&state), "second");
         assert_eq!(reload_significant_candidate(&state), "second: nvim");
+        assert_eq!(metadata.selected_profile.as_deref(), Some("second"));
         assert_eq!(metadata.latest_config_error, None);
 
         fs::remove_dir_all(directory).expect("remove test directory");
@@ -2860,6 +2892,7 @@ mod tests {
                 config_path: "/tmp/config.toml".to_string(),
                 config_schema_version: Some(crate::config::SCHEMA_VERSION),
                 config_source: Some("built-in defaults".to_string()),
+                selected_profile: None,
                 latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,
@@ -3361,6 +3394,7 @@ mod tests {
                 config_path: "/tmp/config.toml".to_string(),
                 config_schema_version: Some(crate::config::SCHEMA_VERSION),
                 config_source: Some("built-in defaults".to_string()),
+                selected_profile: None,
                 latest_config_error: None,
                 last_evaluation_unix_ms: None,
                 last_failure: None,

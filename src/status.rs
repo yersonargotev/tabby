@@ -58,6 +58,12 @@ pub fn render_status(snapshot: &StatusSnapshot) -> String {
     let mut lines = vec![
         format!("Tabby status for Herdr Session {session}"),
         format!("Socket: {}", snapshot.socket_path.display()),
+        format!(
+            "Session Identity: {}",
+            SessionSocket::resolve(&snapshot.socket_path)
+                .map(|socket| socket.identity_hex())
+                .unwrap_or_else(|_| "<unresolved>".to_string())
+        ),
         format!("Current executable: {}", snapshot.current_binary.display()),
     ];
 
@@ -186,18 +192,25 @@ fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
             config_path,
             config_schema_version,
             config_source,
+            selected_profile,
             latest_config_error,
         } => {
             lines.push(format!(
                 "Session Runtime: Ready pid={pid} version={version} lease_held={lease_held}"
             ));
             lines.push(format!(
-                "Configuration: path={} active_schema_version={} active_source={} latest_error={}",
+                "Configuration: path={} active_schema_version={} active_source={} selected_profile={} policy_source={} latest_error={}",
                 config_path.display(),
                 config_schema_version
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "<none>".to_string()),
                 config_source.as_deref().unwrap_or("<none>"),
+                config_schema_version
+                    .map(|_| selected_profile.as_deref().unwrap_or("global"))
+                    .unwrap_or("<none>"),
+                config_schema_version
+                    .map(|_| selected_profile.as_deref().map(|profile| format!("profile:{profile}")).unwrap_or_else(|| "global".to_string()))
+                    .unwrap_or_else(|| "<none>".to_string()),
                 latest_config_error.as_deref().unwrap_or("<none>"),
             ));
             lines.push(format!("Ready owner binary: {}", binary_path.display()));
@@ -215,13 +228,14 @@ fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
             config_path,
             config_schema_version,
             config_source,
+            selected_profile,
             latest_config_error,
         } => {
             lines.push(format!(
                 "Session Runtime: Faulted lease_held={lease_held} diagnostic={diagnostic}"
             ));
             lines.push(format!(
-                "Configuration: path={} active_schema_version={} active_source={} latest_error={}",
+                "Configuration: path={} active_schema_version={} active_source={} selected_profile={} policy_source={} latest_error={}",
                 config_path
                     .as_ref()
                     .map(|path| path.display().to_string())
@@ -230,6 +244,12 @@ fn render_runtime(lines: &mut Vec<String>, runtime: &RuntimeInspection) {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "<none>".to_string()),
                 config_source.as_deref().unwrap_or("<none>"),
+                config_schema_version
+                    .map(|_| selected_profile.as_deref().unwrap_or("global"))
+                    .unwrap_or("<none>"),
+                config_schema_version
+                    .map(|_| selected_profile.as_deref().map(|profile| format!("profile:{profile}")).unwrap_or_else(|| "global".to_string()))
+                    .unwrap_or_else(|| "<none>".to_string()),
                 latest_config_error.as_deref().unwrap_or("<none>"),
             ));
         }
@@ -675,7 +695,7 @@ mod tests {
         assert!(output.contains("Registered command binary: /opt/tabby/bin/tabby"));
         assert!(output.contains("Session Runtime: Ready pid=42 version=0.1.10 lease_held=true"));
         assert!(output.contains("Ready owner binary: /opt/tabby/bin/tabby"));
-        assert!(output.contains("Configuration: path=/tmp/config.toml active_schema_version=1 active_source=built-in defaults latest_error=<none>"));
+        assert!(output.contains("Configuration: path=/tmp/config.toml active_schema_version=1 active_source=built-in defaults selected_profile=global policy_source=global latest_error=<none>"));
         assert!(output.contains("Focused tab: w1:t1 workspace=w1 number=1 label=codex"));
         assert!(output.contains("Focused pane: w1:p1 cwd=/repo candidate=codex"));
         assert!(
@@ -697,6 +717,7 @@ mod tests {
                 config_path: None,
                 config_schema_version: None,
                 config_source: None,
+                selected_profile: None,
                 latest_config_error: None,
             },
             focused_tab: Some(FocusedTabInspection {
@@ -751,6 +772,7 @@ mod tests {
         let mut snapshot = healthy_snapshot();
         let RuntimeInspection::Ready {
             config_source,
+            selected_profile,
             latest_config_error,
             ..
         } = &mut snapshot.runtime
@@ -758,12 +780,15 @@ mod tests {
             panic!("healthy fixture has a Ready runtime");
         };
         *config_source = Some("config.toml".to_string());
+        *selected_profile = Some("work".to_string());
         *latest_config_error =
             Some("field `labels.max_length` is invalid: must be between 1 and 128".to_string());
 
         let output = render_status(&snapshot);
 
         assert!(output.contains("active_schema_version=1 active_source=config.toml"));
+        assert!(output.contains("selected_profile=work"));
+        assert!(output.contains("policy_source=profile:work"));
         assert!(output.contains("latest_error=field `labels.max_length` is invalid"));
     }
 
@@ -862,6 +887,7 @@ mod tests {
             config_path: PathBuf::from("/tmp/config.toml"),
             config_schema_version: Some(crate::config::SCHEMA_VERSION),
             config_source: Some("built-in defaults".to_string()),
+            selected_profile: None,
             latest_config_error: None,
         }
     }

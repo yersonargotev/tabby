@@ -93,6 +93,7 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
                 "fixed-focus-command-and-cwd-fallback",
                 "client-attach-detach",
                 "manual-lock-stop-restore",
+                "session-policy-profile-selection-and-local-reload",
                 "runtime-crash-recovery",
                 "registered-binary-activation-and-bidirectional-handoff",
             ],

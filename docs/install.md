@@ -187,6 +187,31 @@ tabby status
 
 Unknown fields and unsupported versions are errors. Empty or unsafe labels, unknown prefix candidates, duplicate normalized directory selectors, duplicate/contradictory command entries, and out-of-range values are also rejected with their field name. A missing file means built-in defaults. A rejected reload keeps the last valid active policy and appears in `tabby status`; an invalid initial file prevents the Session Runtime from becoming Ready. Configuration cannot change runtime cadence, quiet windows, stability requirements, deadlines, manual-lock behavior, ownership, leases, or persistence.
 
+### Configure Session profiles
+
+The global policy is used when no selector matches. A selected profile is compiled only from built-in defaults and its `extends` chain; it does not overlay the global policy. Child scalar fields override inherited values, command lists add entries, and duplicate map keys across inheritance are rejected.
+
+```toml
+[profiles.work]
+extends = "engineering"
+
+[profiles.work.labels]
+cwd_components = 2
+
+[profiles.engineering.commands]
+additional_significant = ["yazi"]
+
+[[session_selectors]]
+profile = "work"
+identity = "/Users/me/.config/herdr/sessions/work/herdr.sock"
+
+[[session_selectors]]
+profile = "personal"
+named_session = "personal"
+```
+
+Every selector needs exactly one of `identity`, `identity_hex`, or `named_session`. `identity` is an absolute socket path. `identity_hex` is the lowercase, lossless byte encoding shown by `tabby status`, for identities that cannot be represented as UTF-8. The named shorthand derives `sessions/<name>/herdr.sock` from the receiving runtime's documented socket root and is rejected for a custom socket layout. Every form matches Tabby's exact resolved Session Identity. Reload is local to that Ready runtime only; it does not provide reload-all and does not change persisted locks, baselines, intents, leases, ownership, or identity. Status shows the selected profile and policy source and preserves the last valid values after a rejected reload.
+
 User-edited labels are treated as manual locks after Tabby has established a plugin label baseline. To clear locks from Herdr actions or the CLI:
 
 ```sh
