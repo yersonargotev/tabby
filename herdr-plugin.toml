@@ -1,6 +1,6 @@
 id = "yersonargotev.tabby"
 name = "Tabby"
-version = "0.1.11"
+version = "0.1.12"
 min_herdr_version = "0.8.0"
 description = "Herdr plugin for focused-tab automatic labels."
 platforms = ["macos"]
