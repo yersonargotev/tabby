@@ -1,0 +1,54 @@
+# Issue 94 Herdr contract matrix evidence
+
+Date: 2026-08-19  
+Host contract: Apple Silicon macOS  
+Tabby implementation commit: `33e3bac61c462bb28ba1d158c46198bab8ef6522`  
+Result: passed
+
+## Tested binaries
+
+| Herdr version | Protocol | Binary source | Result |
+| --- | ---: | --- | --- |
+| 0.8.0 | 19 | Existing Homebrew installation at `/opt/homebrew/bin/herdr` | Passed |
+| 0.8.2 | 20 | Official Apple Silicon binary from the [Herdr v0.8.2 release](https://github.com/herdrdev/herdr/releases/tag/v0.8.2), SHA-256 `a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574` | Passed |
+
+The 0.8.2 binary ran from an isolated temporary directory. The operator's installed 0.8.0 binary was not replaced or modified.
+
+## Reproduction
+
+Each binary must be selected through `PATH`; the explicit expectations prevent a different installed version from being accepted accidentally:
+
+```sh
+PATH="/path/to/herdr-0.8.0/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  python3 scripts/herdr_lifecycle_harness.py \
+    --expected-herdr-version 0.8.0 \
+    --expected-herdr-protocol 19 \
+    --output /tmp/tabby-herdr-0.8.0-19.jsonl
+
+PATH="/path/to/herdr-0.8.2/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  python3 scripts/herdr_lifecycle_harness.py \
+    --expected-herdr-version 0.8.2 \
+    --expected-herdr-protocol 20 \
+    --output /tmp/tabby-herdr-0.8.2-20.jsonl
+```
+
+Both sanitized schema-version 1 transcripts contained 106 records and 25 passing assertions. Neither run contained a failed assertion. The one nonzero command in each transcript was the deliberate invalid configuration reload used to prove that the active policy remains intact.
+
+## Observed lifecycle coverage
+
+The two runs exercised the same behavior matrix against the default and named Herdr sessions:
+
+| Contract | Recorded observation |
+| --- | --- |
+| Startup Gate | The registered `start` action reached one Ready owner only after the selected Herdr version, protocol, and socket matched. |
+| Concurrent hook ingress | Sixteen concurrent startup, creation, manual, and focus signals per session returned through the Ready owner. |
+| Focus quiet and periodic freshness | No evaluation advanced during the quiet interval; focused labels changed on the delayed and periodic evaluations. |
+| Significant command and cwd fallback | A real focused tab changed to `nvim` while the command ran and returned to the repository basename afterward. |
+| Manual rename intent | `manual-contract` became a persisted manual lock and blocked periodic overwrite. |
+| Session isolation and policy reload | Default and named sessions retained separate state for equal tab ids; a valid named policy reload applied, while an invalid reload was rejected without replacing it. |
+| Client detach | A real tmux-hosted Herdr client detached and the same Ready owner completed another periodic evaluation. |
+| Crash recovery | Killing the named owner released its lease; the next creation signal started a different owner and returned it to Ready. |
+| Registered binary handoff | A Homebrew-shaped binary became the sole Ready owner, then control returned to the plugin-root binary without overlapping owners. |
+| Session stop and restore | The default owner stopped with the Herdr server; restore created a different owner and retained the manual label and lock. |
+
+The harness removed only its validated temporary roots after stopping both isolated servers. The deterministic runtime-status tests complement this live proof with rejected older, crossed, mismatched, and unknown version/protocol fixtures, including protocols 18 and 21.

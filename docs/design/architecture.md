@@ -20,7 +20,7 @@ Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not fin
 
 The Session Runtime validates the running server before becoming Ready. Support belongs to an explicit version/protocol matrix rather than semantic-version ordering because Herdr's protocol number covers an incompatible attached-client wire format while Tabby consumes a smaller local JSON socket interface. The verified pairs are Herdr `0.8.0 / protocol 19` and `0.8.2 / protocol 20`; all other pairs fail closed with the supported matrix in the diagnostic.
 
-Adding a pair requires auditing the tagged JSON socket schema and rerunning the isolated lifecycle harness with explicit expected version/protocol inputs. The manifest retains `min_herdr_version = "0.8.0"` as its install-time lower bound, while the runtime matrix is the authoritative compatibility gate. See ADR 0014.
+Adding a pair requires auditing the tagged JSON socket schema and rerunning the isolated lifecycle harness with explicit expected version/protocol inputs. The manifest retains `min_herdr_version = "0.8.0"` as its install-time lower bound, while the runtime matrix is the authoritative compatibility gate. See ADR 0014 and the [contract-matrix lifecycle evidence](../evidence/issue-94-herdr-contract-matrix.md).
 
 ## Core behavior
 

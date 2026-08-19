@@ -48,15 +48,19 @@ release_tag="v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0
 python3 scripts/check-release-contract.py --dist-manifest plan-dist-manifest.json --tag "$release_tag"
 ```
 
-On macOS, run the lifecycle harness against every supported Herdr contract available to the release operator. The current stable command is:
+On Apple Silicon macOS, run the lifecycle harness against every supported Herdr contract before tagging. Both binaries are required release inputs; do not tag when either contract cannot be exercised. Run the matrix explicitly so the harness cannot silently use its default:
 
 ```sh
+python3 scripts/herdr_lifecycle_harness.py \
+  --expected-herdr-version 0.8.0 \
+  --expected-herdr-protocol 19
+
 python3 scripts/herdr_lifecycle_harness.py \
   --expected-herdr-version 0.8.2 \
   --expected-herdr-protocol 20
 ```
 
-The previously verified `0.8.0 / 19` pair remains the harness default. Review each sanitized transcript and the recorded coverage in [`docs/evidence/issue-71-herdr-0.8-lifecycle.md`](evidence/issue-71-herdr-0.8-lifecycle.md) before tagging.
+The `0.8.0 / 19` pair remains the harness default for local convenience, but the release proof must pass both explicit commands. Review each sanitized transcript and the recorded coverage in [`docs/evidence/issue-94-herdr-contract-matrix.md`](evidence/issue-94-herdr-contract-matrix.md) before tagging.
 
 After publishing a tag, run `python3 scripts/herdr_release_harness.py` against the real repository and release assets, passing the same `--expected-herdr-version` and `--expected-herdr-protocol` pair. The first completed native release proof and its coverage limits are recorded in [`docs/evidence/issue-79-herdr-native-release.md`](evidence/issue-79-herdr-native-release.md).
 

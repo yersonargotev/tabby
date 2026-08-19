@@ -14,7 +14,7 @@ herdr plugin action invoke start --plugin yersonargotev.tabby
 
 The marketplace is an automatic community index; a listing is not a security review or endorsement by Herdr. Its install action resolves to the same `yersonargotev/tabby` source shown above. Herdr previews and runs the repository's single build command before registration. It installs the checksum-verified release binary at `.herdr/bin/tabby`; Rust is needed only when that release has no matching Apple Silicon artifact. Homebrew remains an optional alternative, not a prerequisite.
 
-Tabby accepts only Herdr runtime contracts verified end to end: Herdr 0.8.0 with protocol 19 and Herdr 0.8.2 with protocol 20. The manifest keeps `min_herdr_version = "0.8.0"`, while the Startup Gate rejects unverified version/protocol pairs with an actionable diagnostic instead of assuming every later protocol is compatible.
+Tabby accepts only Herdr runtime contracts verified end to end: Herdr 0.8.0 with protocol 19 and Herdr 0.8.2 with protocol 20. The manifest keeps `min_herdr_version = "0.8.0"`, while the Startup Gate rejects unverified version/protocol pairs with an actionable diagnostic instead of assuming every later protocol is compatible. The Apple Silicon lifecycle proof is recorded in [`docs/evidence/issue-94-herdr-contract-matrix.md`](docs/evidence/issue-94-herdr-contract-matrix.md).
 
 Tabby refreshes automatically through Herdr events and periodic evaluation. To test it immediately, optionally run either manual refresh command; both request the same refresh through different paths:
 
