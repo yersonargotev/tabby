@@ -1,8 +1,11 @@
 # Issue 94 Herdr contract matrix evidence
 
-Date: 2026-08-19  
-Host contract: Apple Silicon macOS  
-Tabby implementation commit: `33e3bac61c462bb28ba1d158c46198bab8ef6522`  
+Date: 2026-08-19
+
+Host contract: Apple Silicon macOS
+
+Tabby implementation commit: `33e3bac61c462bb28ba1d158c46198bab8ef6522`
+
 Result: passed
 
 ## Tested binaries
