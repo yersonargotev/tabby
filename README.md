@@ -14,6 +14,8 @@ herdr plugin action invoke start --plugin yersonargotev.tabby
 
 The marketplace is an automatic community index; a listing is not a security review or endorsement by Herdr. Its install action resolves to the same `yersonargotev/tabby` source shown above. Herdr previews and runs the repository's single build command before registration. It installs the checksum-verified release binary at `.herdr/bin/tabby`; Rust is needed only when that release has no matching Apple Silicon artifact. Homebrew remains an optional alternative, not a prerequisite.
 
+Tabby accepts only Herdr runtime contracts verified end to end: Herdr 0.8.0 with protocol 19 and Herdr 0.8.2 with protocol 20. The manifest keeps `min_herdr_version = "0.8.0"`, while the Startup Gate rejects unverified version/protocol pairs with an actionable diagnostic instead of assuming every later protocol is compatible.
+
 Tabby refreshes automatically through Herdr events and periodic evaluation. To test it immediately, optionally run either manual refresh command; both request the same refresh through different paths:
 
 ```sh
@@ -170,13 +172,15 @@ cargo build
 python3 scripts/prepare-herdr-plugin.py
 ```
 
-On macOS with Herdr 0.8.0 installed, run the isolated real-lifecycle harness:
+On macOS, run the isolated real-lifecycle harness with the exact installed Herdr contract. For the current stable Herdr 0.8.2:
 
 ```sh
-python3 scripts/herdr_lifecycle_harness.py
+python3 scripts/herdr_lifecycle_harness.py \
+  --expected-herdr-version 0.8.2 \
+  --expected-herdr-protocol 20
 ```
 
-The harness prepares `.herdr/bin/tabby` from the existing debug build, links the root manifest, uses temporary HOME/XDG/config roots, exercises default and named Herdr Sessions, writes a sanitized JSONL transcript under `.scratch/`, and removes its temporary sessions and state. It never falls back to the operator's Herdr configuration.
+The legacy verified pair remains available with the default `0.8.0 / 19` arguments. The harness prepares `.herdr/bin/tabby` from the existing debug build, links the root manifest, uses temporary HOME/XDG/config roots, exercises default and named Herdr Sessions, writes a sanitized JSONL transcript under `.scratch/`, and removes its temporary sessions and state. It never falls back to the operator's Herdr configuration.
 
 For release planning, also run:
 

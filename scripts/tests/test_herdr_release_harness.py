@@ -74,6 +74,10 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
                 "--plan",
                 "--root",
                 str(sandbox_root),
+                "--expected-herdr-version",
+                "0.8.2",
+                "--expected-herdr-protocol",
+                "20",
             ],
             cwd=REPO_ROOT,
             check=True,
@@ -90,6 +94,10 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
 
         plan = json.loads(completed.stdout)
         self.assertEqual(plan["transcript_schema_version"], 1)
+        self.assertEqual(
+            plan["expected_herdr_contract"],
+            {"version": "0.8.2", "protocol": 20},
+        )
         self.assertEqual(plan["repository"], "yersonargotev/tabby")
         self.assertEqual(plan["plugin_id"], "yersonargotev.tabby")
         self.assertEqual(

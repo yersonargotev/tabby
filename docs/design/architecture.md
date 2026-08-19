@@ -16,6 +16,12 @@ Primary Herdr APIs:
 
 Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not final design.
 
+## Herdr compatibility gate
+
+The Session Runtime validates the running server before becoming Ready. Support belongs to an explicit version/protocol matrix rather than semantic-version ordering because Herdr's protocol number covers an incompatible attached-client wire format while Tabby consumes a smaller local JSON socket interface. The verified pairs are Herdr `0.8.0 / protocol 19` and `0.8.2 / protocol 20`; all other pairs fail closed with the supported matrix in the diagnostic.
+
+Adding a pair requires auditing the tagged JSON socket schema and rerunning the isolated lifecycle harness with explicit expected version/protocol inputs. The manifest retains `min_herdr_version = "0.8.0"` as its install-time lower bound, while the runtime matrix is the authoritative compatibility gate. See ADR 0014.
+
 ## Core behavior
 
 1. Run one lease-owned Session Runtime per Herdr Session through a session-scoped Startup Gate.
@@ -93,7 +99,7 @@ Use unit tests for the pure behavior first:
 - manual lock detection;
 - session-scoped state mutations over a temporary state directory.
 
-The isolated macOS lifecycle harness adds real Herdr 0.8 evidence:
+The isolated macOS lifecycle harness accepts an explicit expected Herdr version/protocol pair and adds real evidence for each supported contract:
 
 - default and named session startup through `[[startup]]`;
 - concurrent hook coalescing and one Ready owner;

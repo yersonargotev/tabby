@@ -1,6 +1,6 @@
 # Adopt a session-owned runtime for Herdr 0.8
 
-Status: Accepted. Supersedes ADR 0009 and replaces ADR 0006's registration-only install decision. Preserves ADR 0007's focused-tab-only rule and ADR 0001's manual-intent priority.
+Status: Accepted. Supersedes ADR 0009 and replaces ADR 0006's registration-only install decision. Preserves ADR 0007's focused-tab-only rule and ADR 0001's manual-intent priority. ADR 0014 extends its initial Herdr 0.8.0/protocol 19 compatibility decision with an explicit verified-contract matrix.
 
 ## Context
 

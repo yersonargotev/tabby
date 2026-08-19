@@ -42,6 +42,10 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
                 "--plan",
                 "--root",
                 str(sandbox_root),
+                "--expected-herdr-version",
+                "0.8.2",
+                "--expected-herdr-protocol",
+                "20",
             ],
             cwd=REPO_ROOT,
             check=True,
@@ -58,6 +62,10 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
 
         plan = json.loads(completed.stdout)
         self.assertEqual(plan["transcript_schema_version"], 1)
+        self.assertEqual(
+            plan["expected_herdr_contract"],
+            {"version": "0.8.2", "protocol": 20},
+        )
         self.assertEqual([case["name"] for case in plan["cases"]], ["default", "named"])
         self.assertEqual(plan["cases"][0]["herdr_session_args"], [])
         self.assertEqual(

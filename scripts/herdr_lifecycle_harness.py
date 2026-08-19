@@ -40,6 +40,38 @@ class HarnessFailure(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class ExpectedHerdrContract:
+    version: str
+    protocol: int
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"version": self.version, "protocol": self.protocol}
+
+
+def add_expected_herdr_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--expected-herdr-version",
+        default="0.8.0",
+        help="exact Herdr server version required by this run",
+    )
+    parser.add_argument(
+        "--expected-herdr-protocol",
+        type=int,
+        default=19,
+        help="exact Herdr server protocol required by this run",
+    )
+
+
+def expected_herdr_contract(args: argparse.Namespace) -> ExpectedHerdrContract:
+    if not args.expected_herdr_version or args.expected_herdr_protocol < 1:
+        raise HarnessFailure("the expected Herdr version and protocol must be positive")
+    return ExpectedHerdrContract(
+        version=args.expected_herdr_version,
+        protocol=args.expected_herdr_protocol,
+    )
+
+
 def build_environment(root: Path) -> Dict[str, str]:
     environment = dict(os.environ)
     for name in [name for name in environment if name.startswith("HERDR_")]:
@@ -57,7 +89,7 @@ def build_environment(root: Path) -> Dict[str, str]:
     return environment
 
 
-def plan(root: Path) -> Dict[str, Any]:
+def plan(root: Path, expected_herdr: ExpectedHerdrContract) -> Dict[str, Any]:
     environment = build_environment(root)
     visible_environment = {
         name: environment[name]
@@ -73,6 +105,7 @@ def plan(root: Path) -> Dict[str, Any]:
     return {
         "root": str(root),
         "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
+        "expected_herdr_contract": expected_herdr.as_dict(),
         "plugin_root_binary": str(TABBY),
         "prepare_command": PREPARE_COMMAND,
         "environment": visible_environment,
@@ -166,11 +199,13 @@ class SessionCase:
         session_args: Sequence[str],
         environment: Dict[str, str],
         recorder: Recorder,
+        expected_herdr: ExpectedHerdrContract,
     ) -> None:
         self.name = name
         self.session_args = list(session_args)
         self.environment = environment
         self.recorder = recorder
+        self.expected_herdr = expected_herdr
         self.server_process: Optional[subprocess.Popen[str]] = None
         self.socket_path: Optional[str] = None
 
@@ -259,13 +294,17 @@ class SessionCase:
             self.running_status,
         )
         server = status["server"]
-        if server.get("version") != "0.8.0" or server.get("protocol") != 19:
+        if (
+            server.get("version") != self.expected_herdr.version
+            or server.get("protocol") != self.expected_herdr.protocol
+        ):
             raise HarnessFailure(f"{self.name}: unexpected Herdr contract: {server}")
         self.socket_path = server["socket"]
         self.recorder.assertion(
             self.name,
             step,
-            f"Herdr 0.8.0 protocol 19 ready at {self.socket_path}",
+            f"Herdr {self.expected_herdr.version} protocol "
+            f"{self.expected_herdr.protocol} ready at {self.socket_path}",
         )
 
     def status_json(self) -> Dict[str, Any]:
@@ -728,7 +767,7 @@ def write_session_profile_config(path: Path, named_alias: str) -> None:
     )
 
 
-def run_live(output: Path) -> None:
+def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
     if platform.system() != "Darwin":
         raise HarnessFailure("the real lifecycle harness requires macOS")
     if shutil.which("herdr") is None:
@@ -736,17 +775,22 @@ def run_live(output: Path) -> None:
     version = subprocess.run(
         ["herdr", "--version"], capture_output=True, text=True, check=True
     ).stdout.strip()
-    if version != "herdr 0.8.0":
-        raise HarnessFailure(f"expected herdr 0.8.0, got {version!r}")
+    expected_version_output = f"herdr {expected_herdr.version}"
+    if version != expected_version_output:
+        raise HarnessFailure(f"expected {expected_version_output}, got {version!r}")
     if not DEBUG_TABBY.is_file():
         raise HarnessFailure("target/debug/tabby is missing; run `cargo build` first")
 
     root = Path(tempfile.mkdtemp(prefix="tabby-herdr-harness.", dir="/tmp"))
     recorder = Recorder(root)
     environment = build_environment(root)
-    default = SessionCase("default", [], environment, recorder)
+    default = SessionCase("default", [], environment, recorder, expected_herdr)
     named = SessionCase(
-        "named", ["--session", "tabby-lifecycle-named"], environment, recorder
+        "named",
+        ["--session", "tabby-lifecycle-named"],
+        environment,
+        recorder,
+        expected_herdr,
     )
     cases = [default, named]
     try:
@@ -950,6 +994,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", action="store_true", help="print the isolated plan without running it")
     parser.add_argument("--root", type=Path, help="sandbox root used only by --plan")
+    add_expected_herdr_arguments(parser)
     parser.add_argument(
         "--output",
         type=Path,
@@ -962,13 +1007,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        expected_herdr = expected_herdr_contract(args)
         if args.plan:
             root = args.root or Path("/tmp/tabby-herdr-harness.PLAN")
-            print(json.dumps(plan(root), indent=2, sort_keys=True))
+            print(json.dumps(plan(root, expected_herdr), indent=2, sort_keys=True))
             return 0
         if args.root is not None:
             raise HarnessFailure("--root is accepted only with --plan")
-        run_live(args.output.resolve())
+        run_live(args.output.resolve(), expected_herdr)
         print(f"Herdr lifecycle harness passed; transcript: {args.output.resolve()}")
         return 0
     except (HarnessFailure, OSError, subprocess.SubprocessError) as error:

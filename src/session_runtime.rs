@@ -44,6 +44,23 @@ const CONTROL_WORKER_QUEUE: usize = 16;
 const CONTROL_RECENT_REQUEST_IDS: usize = 128;
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SupportedHerdrContract {
+    version: &'static str,
+    protocol: u64,
+}
+
+const SUPPORTED_HERDR_CONTRACTS: [SupportedHerdrContract; 2] = [
+    SupportedHerdrContract {
+        version: "0.8.0",
+        protocol: 19,
+    },
+    SupportedHerdrContract {
+        version: "0.8.2",
+        protocol: 20,
+    },
+];
+
 static NEXT_LAUNCH_ID: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
@@ -1327,24 +1344,24 @@ fn validate_herdr_status(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
 
-    if !running
-        || !version_at_least_0_8_0(version)
-        || protocol != Some(19)
-        || reported_socket != socket.socket_path.to_string_lossy()
-    {
+    let supported_contract = protocol.is_some_and(|protocol| {
+        SUPPORTED_HERDR_CONTRACTS
+            .iter()
+            .any(|contract| contract.version == version && contract.protocol == protocol)
+    });
+
+    if !running || !supported_contract || reported_socket != socket.socket_path.to_string_lossy() {
+        let supported = SUPPORTED_HERDR_CONTRACTS
+            .iter()
+            .map(|contract| format!("{}/protocol {}", contract.version, contract.protocol))
+            .collect::<Vec<_>>()
+            .join(" or ");
         return Err(SessionRuntimeError::HerdrContract(format!(
-            "expected running Herdr >=0.8.0 protocol 19 at `{}`, got version `{version}`, protocol {protocol:?}, socket `{reported_socket}`",
+            "expected running Herdr {supported} at `{}`, got version `{version}`, protocol {protocol:?}, socket `{reported_socket}`",
             socket.socket_path.display()
         )));
     }
     Ok(())
-}
-
-fn version_at_least_0_8_0(version: &str) -> bool {
-    let mut parts = version.split('.');
-    let major = parts.next().and_then(|part| part.parse::<u64>().ok());
-    let minor = parts.next().and_then(|part| part.parse::<u64>().ok());
-    matches!((major, minor), (Some(major), Some(minor)) if major > 0 || minor >= 8)
 }
 
 fn run_runtime_loop(
@@ -2920,27 +2937,77 @@ mod tests {
     }
 
     #[test]
-    fn readiness_requires_the_confirmed_herdr_0_8_protocol_contract() {
+    fn readiness_accepts_verified_herdr_contracts() {
         let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
-        let valid = serde_json::json!({
-            "server": {
-                "running": true,
-                "version": "0.8.0",
-                "protocol": 19,
-                "socket": "/tmp/herdr-contract.sock"
-            }
-        });
-        validate_herdr_status(&valid, &socket).expect("accepted Herdr contract");
+        for (version, protocol) in [("0.8.0", 19), ("0.8.2", 20)] {
+            let status = serde_json::json!({
+                "server": {
+                    "running": true,
+                    "version": version,
+                    "protocol": protocol,
+                    "socket": "/tmp/herdr-contract.sock"
+                }
+            });
 
-        let wrong_protocol = serde_json::json!({
-            "server": {
-                "running": true,
-                "version": "0.8.0",
-                "protocol": 18,
-                "socket": "/tmp/herdr-contract.sock"
-            }
-        });
-        assert!(validate_herdr_status(&wrong_protocol, &socket).is_err());
+            validate_herdr_status(&status, &socket)
+                .unwrap_or_else(|error| panic!("rejected Herdr {version}/{protocol}: {error}"));
+        }
+    }
+
+    #[test]
+    fn readiness_rejects_unverified_herdr_contracts_with_supported_pairs() {
+        let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
+        for (version, protocol) in [
+            ("0.7.5", 19),
+            ("0.8.0", 18),
+            ("0.8.0", 20),
+            ("0.8.2", 19),
+            ("0.8.2", 21),
+            ("0.8.3", 20),
+        ] {
+            let status = serde_json::json!({
+                "server": {
+                    "running": true,
+                    "version": version,
+                    "protocol": protocol,
+                    "socket": "/tmp/herdr-contract.sock"
+                }
+            });
+
+            let error = match validate_herdr_status(&status, &socket) {
+                Err(error) => error,
+                Ok(()) => panic!("accepted unverified Herdr {version}/{protocol}"),
+            };
+            let diagnostic = error.to_string();
+            assert!(
+                diagnostic.contains("0.8.0/protocol 19 or 0.8.2/protocol 20"),
+                "diagnostic omitted supported contracts: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains(&format!("version `{version}`, protocol Some({protocol})")),
+                "diagnostic omitted actual contract: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_requires_the_running_server_at_the_selected_socket() {
+        let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
+        for (running, reported_socket) in [
+            (false, "/tmp/herdr-contract.sock"),
+            (true, "/tmp/different-herdr.sock"),
+        ] {
+            let status = serde_json::json!({
+                "server": {
+                    "running": running,
+                    "version": "0.8.2",
+                    "protocol": 20,
+                    "socket": reported_socket
+                }
+            });
+
+            assert!(validate_herdr_status(&status, &socket).is_err());
+        }
     }
 
     #[test]
