@@ -45,13 +45,13 @@ The two runs exercised the same behavior matrix against the default and named He
 | --- | --- |
 | Startup Gate | The registered `start` action reached one Ready owner only after the selected Herdr version, protocol, and socket matched. |
 | Concurrent hook ingress | Sixteen concurrent startup, creation, manual, and focus signals per session returned through the Ready owner. |
-| Focus quiet and periodic freshness | No evaluation advanced during the quiet interval; focused labels changed on the delayed and periodic evaluations. |
-| Significant command and cwd fallback | A real focused tab changed to `nvim` while the command ran and returned to the repository basename afterward. |
-| Manual rename intent | `manual-contract` became a persisted manual lock and blocked periodic overwrite. |
+| Focus Quiet Window and Continuous Focused-Tab Freshness | No evaluation advanced during the Focus Quiet Window; focused labels changed on the delayed and periodic evaluations. |
+| Significant Command and Working Directory Suffix | A real focused tab changed to `nvim` while the command ran and returned to its Working Directory Suffix afterward. |
+| Manually Locked Tab | `manual-contract` became a persisted Manually Locked Tab and blocked a periodic automatic label update. |
 | Session isolation and policy reload | Default and named sessions retained separate state for equal tab ids; a valid named policy reload applied, while an invalid reload was rejected without replacing it. |
 | Client detach | A real tmux-hosted Herdr client detached and the same Ready owner completed another periodic evaluation. |
 | Crash recovery | Killing the named owner released its lease; the next creation signal started a different owner and returned it to Ready. |
 | Registered binary handoff | A Homebrew-shaped binary became the sole Ready owner, then control returned to the plugin-root binary without overlapping owners. |
-| Session stop and restore | The default owner stopped with the Herdr server; restore created a different owner and retained the manual label and lock. |
+| Session stop and restore | The default owner stopped with the Herdr server; restore created a different owner and retained the label and Manually Locked Tab state. |
 
 The harness removed only its validated temporary roots after stopping both isolated servers. The deterministic runtime-status tests complement this live proof with rejected older, crossed, mismatched, and unknown version/protocol fixtures, including protocols 18 and 21.
