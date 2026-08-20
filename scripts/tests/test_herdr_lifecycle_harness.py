@@ -42,6 +42,10 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
                 "--plan",
                 "--root",
                 str(sandbox_root),
+                "--expected-herdr-version",
+                "0.8.2",
+                "--expected-herdr-protocol",
+                "20",
             ],
             cwd=REPO_ROOT,
             check=True,
@@ -50,6 +54,7 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
             env={
                 "PATH": "/usr/bin:/bin",
                 "HOME": "/Users/operator",
+                "HERDR_BIN_PATH": "/operator/unrelated/herdr",
                 "HERDR_SESSION": "operator-session",
                 "HERDR_SOCKET_PATH": "/Users/operator/.config/herdr/real.sock",
                 "HERDR_PLUGIN_STATE_DIR": "/Users/operator/.local/state/tabby",
@@ -58,6 +63,10 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
 
         plan = json.loads(completed.stdout)
         self.assertEqual(plan["transcript_schema_version"], 1)
+        self.assertEqual(
+            plan["expected_herdr_contract"],
+            {"version": "0.8.2", "protocol": 20},
+        )
         self.assertEqual([case["name"] for case in plan["cases"]], ["default", "named"])
         self.assertEqual(plan["cases"][0]["herdr_session_args"], [])
         self.assertEqual(
@@ -77,12 +86,18 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
         for name, expected in expected_paths.items():
             self.assertEqual(Path(environment[name]), expected)
 
+        self.assertNotIn("HERDR_BIN_PATH", environment)
         self.assertNotIn("HERDR_SOCKET_PATH", environment)
         self.assertNotIn("HERDR_PLUGIN_STATE_DIR", environment)
         self.assertNotIn("HERDR_SESSION", environment)
         self.assertEqual(
             plan["removed_inherited_herdr_variables"],
-            ["HERDR_PLUGIN_STATE_DIR", "HERDR_SESSION", "HERDR_SOCKET_PATH"],
+            [
+                "HERDR_BIN_PATH",
+                "HERDR_PLUGIN_STATE_DIR",
+                "HERDR_SESSION",
+                "HERDR_SOCKET_PATH",
+            ],
         )
         self.assertEqual(
             plan["scenarios"],

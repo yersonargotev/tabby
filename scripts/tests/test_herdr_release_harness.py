@@ -67,6 +67,7 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
 
     def test_plan_isolates_native_install_and_covers_the_release_gate(self) -> None:
         sandbox_root = Path("/tmp/tabby-release-harness-contract")
+        selected_path = "/operator/bin:/usr/bin:/bin"
         completed = subprocess.run(
             [
                 sys.executable,
@@ -74,14 +75,19 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
                 "--plan",
                 "--root",
                 str(sandbox_root),
+                "--expected-herdr-version",
+                "0.8.2",
+                "--expected-herdr-protocol",
+                "20",
             ],
             cwd=REPO_ROOT,
             check=True,
             capture_output=True,
             text=True,
             env={
-                "PATH": "/operator/bin:/usr/bin:/bin",
+                "PATH": selected_path,
                 "HOME": "/Users/operator",
+                "HERDR_BIN_PATH": "/operator/unrelated/herdr",
                 "HERDR_SESSION": "operator-session",
                 "HERDR_SOCKET_PATH": "/Users/operator/.config/herdr/real.sock",
                 "HERDR_PLUGIN_STATE_DIR": "/Users/operator/.local/state/tabby",
@@ -90,6 +96,10 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
 
         plan = json.loads(completed.stdout)
         self.assertEqual(plan["transcript_schema_version"], 1)
+        self.assertEqual(
+            plan["expected_herdr_contract"],
+            {"version": "0.8.2", "protocol": 20},
+        )
         self.assertEqual(plan["repository"], "yersonargotev/tabby")
         self.assertEqual(plan["plugin_id"], "yersonargotev.tabby")
         self.assertEqual(
@@ -129,13 +139,19 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
         for name, expected in expected_paths.items():
             self.assertEqual(Path(environment[name]), expected)
 
-        self.assertEqual(environment["PATH"], "/operator/bin:/usr/bin:/bin")
+        self.assertEqual(environment["PATH"], selected_path)
+        self.assertNotIn("HERDR_BIN_PATH", environment)
         self.assertNotIn("HERDR_SOCKET_PATH", environment)
         self.assertNotIn("HERDR_PLUGIN_STATE_DIR", environment)
         self.assertNotIn("HERDR_SESSION", environment)
         self.assertEqual(
             plan["removed_inherited_herdr_variables"],
-            ["HERDR_PLUGIN_STATE_DIR", "HERDR_SESSION", "HERDR_SOCKET_PATH"],
+            [
+                "HERDR_BIN_PATH",
+                "HERDR_PLUGIN_STATE_DIR",
+                "HERDR_SESSION",
+                "HERDR_SOCKET_PATH",
+            ],
         )
 
 

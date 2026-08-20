@@ -18,12 +18,17 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from herdr_lifecycle_harness import (
+    ExpectedHerdrContract,
     HarnessFailure,
     ReadyRuntime,
     Recorder,
     SessionCase,
+    add_expected_herdr_arguments,
+    build_environment,
+    expected_herdr_contract,
     process_exists,
     require_descendant,
+    resolve_herdr_binary,
     wait_for,
 )
 
@@ -43,29 +48,31 @@ READY_RE = re.compile(
 )
 
 
-def build_environment(root: Path) -> Dict[str, str]:
-    environment = dict(os.environ)
-    for name in [name for name in environment if name.startswith("HERDR_")]:
-        environment.pop(name, None)
-    environment.update(
-        {
-            "HOME": str(root / "home"),
-            "XDG_CONFIG_HOME": str(root / "xdg-config"),
-            "XDG_STATE_HOME": str(root / "xdg-state"),
-            "XDG_CACHE_HOME": str(root / "xdg-cache"),
-            "TMPDIR": str(root / "tmp"),
-            "HERDR_CONFIG_PATH": str(root / "config" / "herdr" / "config.toml"),
-        }
-    )
-    return environment
-
-
-def plan(root: Path) -> Dict[str, Any]:
-    environment = build_environment(root)
+def plan(
+    root: Path,
+    expected_herdr: ExpectedHerdrContract,
+    herdr_binary: Optional[Path] = None,
+) -> Dict[str, Any]:
+    environment = build_environment(root, herdr_binary)
     release_tag = f"v{manifest_version()}"
+    visible_environment = {
+        name: environment[name]
+        for name in (
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "TMPDIR",
+            "HERDR_CONFIG_PATH",
+            "PATH",
+        )
+    }
+    if "HERDR_BIN_PATH" in environment:
+        visible_environment["HERDR_BIN_PATH"] = environment["HERDR_BIN_PATH"]
     return {
         "root": str(root),
         "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
+        "expected_herdr_contract": expected_herdr.as_dict(),
         "repository": REPOSITORY,
         "plugin_id": PLUGIN_ID,
         "install_command": [
@@ -77,18 +84,7 @@ def plan(root: Path) -> Dict[str, Any]:
             release_tag,
             "--yes",
         ],
-        "environment": {
-            name: environment[name]
-            for name in (
-                "HOME",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-                "XDG_CACHE_HOME",
-                "TMPDIR",
-                "HERDR_CONFIG_PATH",
-                "PATH",
-            )
-        },
+        "environment": visible_environment,
         "removed_inherited_herdr_variables": sorted(
             name for name in os.environ if name.startswith("HERDR_")
         ),
@@ -112,8 +108,8 @@ def manifest_version() -> str:
     raise HarnessFailure("root Herdr manifest has no version")
 
 
-def restricted_prebuilt_path() -> str:
-    required = [shutil.which("herdr"), shutil.which("python3"), shutil.which("tmux")]
+def restricted_prebuilt_path(herdr_binary: Path) -> str:
+    required = [str(herdr_binary), shutil.which("python3"), shutil.which("tmux")]
     if any(path is None for path in required):
         raise HarnessFailure("herdr, python3, and tmux are required for release validation")
     directories = [str(Path(path).resolve().parent) for path in required if path is not None]
@@ -388,14 +384,16 @@ def exercise_client_detach(case: SessionCase, binary: Path, owner: ReadyRuntime)
     return after
 
 
-def run_live(output: Path) -> None:
+def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise HarnessFailure("release validation requires Apple Silicon macOS")
+    herdr_binary = resolve_herdr_binary()
     herdr_version = subprocess.run(
-        ["herdr", "--version"], capture_output=True, text=True, check=True
+        [str(herdr_binary), "--version"], capture_output=True, text=True, check=True
     ).stdout.strip()
-    if herdr_version != "herdr 0.8.0":
-        raise HarnessFailure(f"expected herdr 0.8.0, got {herdr_version!r}")
+    expected_version_output = f"herdr {expected_herdr.version}"
+    if herdr_version != expected_version_output:
+        raise HarnessFailure(f"expected {expected_version_output}, got {herdr_version!r}")
 
     expected_version = manifest_version()
     release_tag = f"v{expected_version}"
@@ -410,9 +408,9 @@ def run_live(output: Path) -> None:
         raise HarnessFailure(f"release tag does not resolve locally: {release_tag}")
     root = Path(tempfile.mkdtemp(prefix="tabby-release-harness.", dir="/tmp"))
     recorder = Recorder(root)
-    environment = build_environment(root)
-    environment["PATH"] = restricted_prebuilt_path()
-    case = SessionCase("release", [], environment, recorder)
+    environment = build_environment(root, herdr_binary)
+    environment["PATH"] = restricted_prebuilt_path(herdr_binary)
+    case = SessionCase("release", [], environment, recorder, expected_herdr)
     state_root = root / "xdg-state" / "herdr" / "plugins" / PLUGIN_ID / "session-tab-state"
     managed_root: Optional[Path] = None
     try:
@@ -607,6 +605,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", action="store_true", help="print the isolated plan without running it")
     parser.add_argument("--root", type=Path, help="sandbox root used only by --plan")
+    add_expected_herdr_arguments(parser)
     parser.add_argument(
         "--output",
         type=Path,
@@ -619,13 +618,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        expected_herdr = expected_herdr_contract(args)
         if args.plan:
             root = args.root or Path("/tmp/tabby-release-harness.PLAN")
-            print(json.dumps(plan(root), indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    plan(root, expected_herdr),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.root is not None:
             raise HarnessFailure("--root is accepted only with --plan")
-        run_live(args.output.resolve())
+        run_live(args.output.resolve(), expected_herdr)
         print(f"Herdr release harness passed; transcript: {args.output.resolve()}")
         return 0
     except (HarnessFailure, OSError, subprocess.SubprocessError) as error:

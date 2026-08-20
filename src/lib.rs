@@ -1,5 +1,6 @@
 pub mod config;
 pub mod herdr_client;
+pub(crate) mod herdr_contract;
 pub mod install;
 pub mod labeler;
 pub mod locks;

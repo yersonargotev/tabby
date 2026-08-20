@@ -318,7 +318,18 @@ pub struct SessionSnapshot {
 }
 
 impl SessionSnapshot {
-    fn into_focused_observation(self) -> Option<FocusedTabObservation> {
+    pub(crate) fn into_focused_observation(self) -> Option<FocusedTabObservation> {
+        self.into_focused_observation_with_pane_fallback(true)
+    }
+
+    pub(crate) fn into_focused_pane_observation(self) -> Option<FocusedTabObservation> {
+        self.into_focused_observation_with_pane_fallback(false)
+    }
+
+    fn into_focused_observation_with_pane_fallback(
+        self,
+        allow_first_pane_fallback: bool,
+    ) -> Option<FocusedTabObservation> {
         let selected_tab_id = self
             .focused_tab_id
             .as_deref()
@@ -360,10 +371,14 @@ impl SessionSnapshot {
                     .map(|pane| pane.pane_id.as_str())
             })
             .or_else(|| {
-                self.panes
-                    .iter()
-                    .find(|pane| pane.tab_id == tab.tab_id)
-                    .map(|pane| pane.pane_id.as_str())
+                if allow_first_pane_fallback {
+                    self.panes
+                        .iter()
+                        .find(|pane| pane.tab_id == tab.tab_id)
+                        .map(|pane| pane.pane_id.as_str())
+                } else {
+                    None
+                }
             })
             .map(str::to_owned);
 

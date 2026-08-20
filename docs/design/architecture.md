@@ -16,6 +16,14 @@ Primary Herdr APIs:
 
 Prior research lives in `docs/herdr-tab-title-research.md`. It is input, not final design.
 
+## Herdr compatibility gate
+
+The Session Runtime validates the running server before becoming Ready. Herdr's protocol number describes an incompatible attached-client binary wire format, while Tabby consumes a smaller newline-delimited JSON socket interface. The gate therefore requires Herdr 0.8.0 and protocol 19 only as minimum sanity baselines, then validates the actual JSON subset used by Tabby.
+
+One required-contract module reads the release-matched schema through the plugin host's `HERDR_BIN_PATH`, requires compatible request/response shapes for `session.snapshot`, `pane.process_info`, and `tab.rename`, and performs read-only `session.snapshot` plus conditional `pane.process_info` probes against the exact selected socket. Additive fields are accepted. Missing or incompatible shapes, malformed schema output, failed probes, older baselines, and contradictory socket status fail closed with a requirement-specific diagnostic. `tab.rename` is not probed because startup must not mutate user-visible state.
+
+The manifest retains `min_herdr_version = "0.8.0"` as its install-time lower bound. The explicit `0.8.0 / 19` and `0.8.2 / 20` lifecycle runs remain the mandatory evidence matrix, not the runtime allowlist; a compatible later binary protocol can pass without a code change. See ADR 0014 and the [contract-matrix lifecycle evidence](../evidence/issue-94-herdr-contract-matrix.md).
+
 ## Core behavior
 
 1. Run one lease-owned Session Runtime per Herdr Session through a session-scoped Startup Gate.
@@ -44,6 +52,7 @@ Implemented files/modules in the Rust crate:
 - `src/session_runtime.rs` — lifecycle, Startup Gate, lease, control ingress, scheduling, handoff, and effects.
 - `src/refresh_decision.rs` — pure bounded One-Shot Refresh policy with no Herdr or persistence I/O.
 - `src/refresh_executor.rs` — Herdr and Session-Scoped Tab State effect adapter for Refresh Decisions.
+- `src/herdr_contract.rs` — minimum-version, schema-subset, and read-only-probe compatibility gate.
 - `src/herdr_client.rs` — Herdr Unix-socket JSON-RPC client, DTOs, and Focused Observation/Process Inspector boundary.
 - `src/config.rs` — resolves, parses, validates, and compiles versioned `config.toml` into one Label Policy.
 - `src/labeler.rs` — Label Policy and candidate derivation.
@@ -93,7 +102,7 @@ Use unit tests for the pure behavior first:
 - manual lock detection;
 - session-scoped state mutations over a temporary state directory.
 
-The isolated macOS lifecycle harness adds real Herdr 0.8 evidence:
+The isolated macOS lifecycle harness accepts an explicit expected Herdr version/protocol evidence pair, resolves that selected binary into `HERDR_BIN_PATH`, and adds real evidence for each required matrix entry:
 
 - default and named session startup through `[[startup]]`;
 - concurrent hook coalescing and one Ready owner;
