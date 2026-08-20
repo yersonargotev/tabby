@@ -12,11 +12,13 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 const HERDR_BIN_PATH_ENV: &str = "HERDR_BIN_PATH";
 const HERDR_SOCKET_PATH_ENV: &str = "HERDR_SOCKET_PATH";
 const MINIMUM_HERDR_VERSION: (u64, u64, u64) = (0, 8, 0);
 const MINIMUM_HERDR_PROTOCOL: u64 = 19;
+const LIVE_PROBE_RESPONSE_DEADLINE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservedContract {
@@ -45,6 +47,54 @@ pub enum HerdrContractError {
         method: &'static str,
         source: HerdrError,
     },
+}
+
+impl HerdrContractError {
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, Self::LiveProbe { source, .. } if source.is_retryable_transport())
+    }
+}
+
+pub(crate) fn legacy_persisted_failure_is_retryable(diagnostic: &str) -> bool {
+    // Runtime metadata v1 did not persist a typed failure disposition. Decode only
+    // the complete diagnostic shapes emitted by the affected release so arbitrary
+    // protocol or server text cannot opt a terminal fault into recovery.
+    let Some(probe_failure) =
+        diagnostic.strip_prefix("Herdr runtime contract mismatch: read-only `")
+    else {
+        return false;
+    };
+    let Some((method, failure)) = probe_failure.split_once("` probe failed: ") else {
+        return false;
+    };
+    if !matches!(
+        method,
+        "session.snapshot" | "session.snapshot retry" | "pane.process_info"
+    ) {
+        return false;
+    }
+    if failure == "Herdr protocol error: Herdr closed the socket without a response" {
+        return true;
+    }
+    let Some(io_failure) = failure.strip_prefix("Herdr socket I/O failed: ") else {
+        return false;
+    };
+    [
+        "Resource temporarily unavailable",
+        "operation would block",
+        "timed out",
+        "Operation timed out",
+        "Interrupted system call",
+        "Connection refused",
+        "Connection reset by peer",
+        "Software caused connection abort",
+        "Socket is not connected",
+        "Broken pipe",
+        "No such file or directory",
+        "unexpected end of file",
+    ]
+    .iter()
+    .any(|transient| io_failure.contains(transient))
 }
 
 impl fmt::Display for HerdrContractError {
@@ -103,7 +153,10 @@ impl SystemContractProbe {
     fn new(binary: OsString, socket: &SessionSocket) -> Self {
         Self {
             binary,
-            client: HerdrClient::new(UnixSocketTransport::new(&socket.socket_path)),
+            client: HerdrClient::new(UnixSocketTransport::with_response_deadline(
+                &socket.socket_path,
+                LIVE_PROBE_RESPONSE_DEADLINE,
+            )),
         }
     }
 }
@@ -1577,6 +1630,55 @@ mod tests {
             .push_back(Ok(snapshot("0.8.2", 20, true)));
         let error = validate_with(&mut process_failure, &socket).expect_err("process failure");
         assert!(error.to_string().contains("pane.process_info"));
+    }
+
+    #[test]
+    fn distinguishes_retryable_live_probe_io_from_terminal_contract_failures() {
+        let retryable = HerdrContractError::LiveProbe {
+            method: "session.snapshot",
+            source: HerdrError::Io(io::Error::from(io::ErrorKind::WouldBlock)),
+        };
+        let terminal = HerdrContractError::Incompatible(
+            "api schema request method `tab.rename` is missing".to_string(),
+        );
+        let deterministic_io = HerdrContractError::LiveProbe {
+            method: "session.snapshot",
+            source: HerdrError::Io(io::Error::from(io::ErrorKind::PermissionDenied)),
+        };
+
+        assert!(retryable.is_retryable());
+        assert!(!terminal.is_retryable());
+        assert!(!deterministic_io.is_retryable());
+    }
+
+    #[test]
+    fn treats_a_live_probe_peer_close_as_retryable_transport_unavailability() {
+        let retryable = HerdrContractError::LiveProbe {
+            method: "session.snapshot",
+            source: HerdrError::ConnectionClosed,
+        };
+
+        assert!(retryable.is_retryable());
+    }
+
+    #[test]
+    fn recognizes_legacy_persisted_live_probe_transport_faults_without_generalizing_faults() {
+        for diagnostic in [
+            "Herdr runtime contract mismatch: read-only `session.snapshot` probe failed: Herdr socket I/O failed: Resource temporarily unavailable (os error 35)",
+            "Herdr runtime contract mismatch: read-only `pane.process_info` probe failed: Herdr socket I/O failed: timed out",
+            "Herdr runtime contract mismatch: read-only `session.snapshot retry` probe failed: Herdr protocol error: Herdr closed the socket without a response",
+        ] {
+            assert!(legacy_persisted_failure_is_retryable(diagnostic));
+        }
+        assert!(!legacy_persisted_failure_is_retryable(
+            "Herdr runtime contract mismatch: read-only `session.snapshot` probe failed: Herdr protocol error: malformed response"
+        ));
+        assert!(!legacy_persisted_failure_is_retryable(
+            "Herdr runtime contract mismatch: read-only `session.snapshot` probe failed: Herdr protocol error: Herdr socket I/O failed: timed out"
+        ));
+        assert!(!legacy_persisted_failure_is_retryable(
+            "Herdr runtime contract mismatch: read-only `session.snapshot` probe failed: Herdr socket I/O failed: Permission denied (os error 13)"
+        ));
     }
 
     #[test]

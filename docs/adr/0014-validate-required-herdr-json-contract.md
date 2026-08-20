@@ -16,7 +16,7 @@ One required-Herdr-contract module owns Herdr compatibility validation within Se
 - require Herdr 0.8.0 and protocol 19 as minimum sanity baselines;
 - invoke the release-matched `HERDR_BIN_PATH api schema --json` and require compatible request and response shapes for `session.snapshot`, `pane.process_info`, and `tab.rename`;
 - run read-only live probes for `session.snapshot` and, when a focused pane exists, `pane.process_info` against that socket; and
-- accept additive fields while rejecting malformed output, missing or incompatible requirements, failed probes, and contradictory status with an actionable diagnostic.
+- accept additive fields while rejecting malformed output, missing or incompatible requirements, and contradictory status with an actionable diagnostic; transient live-probe transport failures remain recoverable through the Startup Gate.
 
 `tab.rename` is validated from the schema rather than invoked as a startup probe because it mutates user-visible state. `HERDR_BIN_PATH` is authoritative for schema inspection; an unrelated `herdr` executable from `PATH` cannot satisfy the gate. The manifest retains `min_herdr_version = "0.8.0"` as the install-time lower bound, while runtime validation remains authoritative.
 
@@ -26,4 +26,4 @@ The lifecycle and release harnesses retain explicit expected version/protocol in
 
 Herdr 0.8.2 can run Tabby's Session Runtime without treating its binary protocol bump as a JSON incompatibility. Future unrelated wire-protocol bumps no longer require routine allowlist edits, while missing methods, fields, shapes, and behavior probes still fail closed.
 
-Schema validation cannot prove every semantic behavior behind an unchanged shape. Maintainers therefore continue to run the explicit real-runtime evidence matrix before release and add evidence for materially new Herdr contracts. A schema or probe failure leaves `tabby start` Faulted rather than guessing compatibility.
+Schema validation cannot prove every semantic behavior behind an unchanged shape. Maintainers therefore continue to run the explicit real-runtime evidence matrix before release and add evidence for materially new Herdr contracts. A deterministic schema, response, or protocol contradiction leaves `tabby start` Faulted rather than guessing compatibility. A live-probe transport failure releases the startup attempt without persisting a terminal fault so the next lifecycle or manual hook can retry.
