@@ -1,6 +1,6 @@
 # Adopt a session-owned runtime for Herdr 0.8
 
-Status: Accepted. Supersedes ADR 0009 and replaces ADR 0006's registration-only install decision. Preserves ADR 0007's focused-tab-only rule and ADR 0001's manual-intent priority. ADR 0014 extends its initial Herdr 0.8.0/protocol 19 compatibility decision with an explicit verified-contract matrix.
+Status: Accepted. Supersedes ADR 0009 and replaces ADR 0006's registration-only install decision. Preserves ADR 0007's focused-tab-only rule and ADR 0001's manual-intent priority. ADR 0014 extends its initial Herdr 0.8.0/protocol 19 baseline with required-JSON-contract validation.
 
 ## Context
 
@@ -14,7 +14,7 @@ Reliable detach, stop, and restore behavior also requires ownership that outlive
 
 ## Decision
 
-Tabby will support macOS with Herdr 0.8.0 and protocol 19 as its minimum runtime contract. Compatibility modes for Herdr 0.7.x and an event-subscription-based strict mode will not be retained.
+Tabby will support macOS with Herdr 0.8.0 and protocol 19 as minimum runtime sanity baselines. ADR 0014 defines the authoritative required JSON socket contract for later releases. Compatibility modes for Herdr 0.7.x and an event-subscription-based strict mode will not be retained.
 
 One Session Runtime will own each running Herdr Session:
 

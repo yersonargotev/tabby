@@ -318,7 +318,7 @@ pub struct SessionSnapshot {
 }
 
 impl SessionSnapshot {
-    fn into_focused_observation(self) -> Option<FocusedTabObservation> {
+    pub(crate) fn into_focused_observation(self) -> Option<FocusedTabObservation> {
         let selected_tab_id = self
             .focused_tab_id
             .as_deref()

@@ -14,7 +14,7 @@ herdr plugin action invoke start --plugin yersonargotev.tabby
 
 The marketplace is an automatic community index; a listing is not a security review or endorsement by Herdr. Its install action resolves to the same `yersonargotev/tabby` source shown above. Herdr previews and runs the repository's single build command before registration. It installs the checksum-verified release binary at `.herdr/bin/tabby`; Rust is needed only when that release has no matching Apple Silicon artifact. Homebrew remains an optional alternative, not a prerequisite.
 
-Tabby accepts only Herdr runtime contracts verified end to end: Herdr 0.8.0 with protocol 19 and Herdr 0.8.2 with protocol 20. The manifest keeps `min_herdr_version = "0.8.0"`, while the Startup Gate rejects unverified version/protocol pairs with an actionable diagnostic instead of assuming every later protocol is compatible. The Apple Silicon lifecycle proof is recorded in [`docs/evidence/issue-94-herdr-contract-matrix.md`](docs/evidence/issue-94-herdr-contract-matrix.md).
+Tabby requires Herdr 0.8.0 and protocol 19 as minimum sanity baselines, then validates the JSON socket contract it actually consumes before the Session Runtime becomes Ready. It reads the schema through Herdr's host-provided `HERDR_BIN_PATH`, requires compatible shapes for `session.snapshot`, `pane.process_info`, and `tab.rename`, and runs only read-only startup probes against the exact selected session socket. Missing or incompatible requirements fail closed with an actionable diagnostic; additive fields and later binary wire-protocol versions do not require a Tabby code change by themselves. Herdr `0.8.0 / protocol 19` and `0.8.2 / protocol 20` remain the mandatory Apple Silicon lifecycle evidence matrix, recorded in [`docs/evidence/issue-94-herdr-contract-matrix.md`](docs/evidence/issue-94-herdr-contract-matrix.md).
 
 Tabby refreshes automatically through Herdr events and periodic evaluation. To test it immediately, optionally run either manual refresh command; both request the same refresh through different paths:
 
@@ -172,7 +172,7 @@ cargo build
 python3 scripts/prepare-herdr-plugin.py
 ```
 
-On macOS, run the isolated real-lifecycle harness with the exact installed Herdr contract. For the current stable Herdr 0.8.2:
+On macOS, select the exact Herdr binary through `PATH` and run the isolated real-lifecycle harness with explicit evidence guards. For Herdr 0.8.2:
 
 ```sh
 python3 scripts/herdr_lifecycle_harness.py \
@@ -180,7 +180,7 @@ python3 scripts/herdr_lifecycle_harness.py \
   --expected-herdr-protocol 20
 ```
 
-The legacy verified pair remains available with the default `0.8.0 / 19` arguments. The harness prepares `.herdr/bin/tabby` from the existing debug build, links the root manifest, uses temporary HOME/XDG/config roots, exercises default and named Herdr Sessions, writes a sanitized JSONL transcript under `.scratch/`, and removes its temporary sessions and state. It never falls back to the operator's Herdr configuration.
+The `0.8.0 / 19` evidence pair remains available with the default arguments. The harness resolves the selected `herdr` from `PATH`, rejects a version/protocol mismatch, and injects that exact canonical path as `HERDR_BIN_PATH` whenever it invokes Tabby directly. It prepares `.herdr/bin/tabby` from the existing debug build, links the root manifest, uses temporary HOME/XDG/config roots, exercises default and named Herdr Sessions, writes a sanitized JSONL transcript under `.scratch/`, and removes its temporary sessions and state. It never inherits the operator's `HERDR_*` variables or falls back to the operator's Herdr configuration.
 
 For release planning, also run:
 

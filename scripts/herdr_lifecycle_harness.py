@@ -72,7 +72,14 @@ def expected_herdr_contract(args: argparse.Namespace) -> ExpectedHerdrContract:
     )
 
 
-def build_environment(root: Path) -> Dict[str, str]:
+def resolve_herdr_binary() -> Path:
+    selected = shutil.which("herdr")
+    if selected is None:
+        raise HarnessFailure("herdr is not installed or is not available on PATH")
+    return Path(selected).resolve()
+
+
+def build_environment(root: Path, herdr_binary: Path) -> Dict[str, str]:
     environment = dict(os.environ)
     for name in [name for name in environment if name.startswith("HERDR_")]:
         environment.pop(name, None)
@@ -84,13 +91,18 @@ def build_environment(root: Path) -> Dict[str, str]:
             "XDG_CACHE_HOME": str(root / "xdg-cache"),
             "TMPDIR": str(root / "tmp"),
             "HERDR_CONFIG_PATH": str(root / "config" / "herdr" / "config.toml"),
+            "HERDR_BIN_PATH": str(herdr_binary.resolve()),
         }
     )
     return environment
 
 
-def plan(root: Path, expected_herdr: ExpectedHerdrContract) -> Dict[str, Any]:
-    environment = build_environment(root)
+def plan(
+    root: Path,
+    expected_herdr: ExpectedHerdrContract,
+    herdr_binary: Path,
+) -> Dict[str, Any]:
+    environment = build_environment(root, herdr_binary)
     visible_environment = {
         name: environment[name]
         for name in (
@@ -100,6 +112,7 @@ def plan(root: Path, expected_herdr: ExpectedHerdrContract) -> Dict[str, Any]:
             "XDG_CACHE_HOME",
             "TMPDIR",
             "HERDR_CONFIG_PATH",
+            "HERDR_BIN_PATH",
         )
     }
     return {
@@ -210,7 +223,10 @@ class SessionCase:
         self.socket_path: Optional[str] = None
 
     def herdr_argv(self, *args: str) -> List[str]:
-        return ["herdr", *self.session_args, *args]
+        herdr_binary = self.environment.get("HERDR_BIN_PATH")
+        if not herdr_binary:
+            raise HarnessFailure("isolated environment has no HERDR_BIN_PATH")
+        return [herdr_binary, *self.session_args, *args]
 
     def run(
         self,
@@ -770,10 +786,9 @@ def write_session_profile_config(path: Path, named_alias: str) -> None:
 def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
     if platform.system() != "Darwin":
         raise HarnessFailure("the real lifecycle harness requires macOS")
-    if shutil.which("herdr") is None:
-        raise HarnessFailure("herdr is not installed")
+    herdr_binary = resolve_herdr_binary()
     version = subprocess.run(
-        ["herdr", "--version"], capture_output=True, text=True, check=True
+        [str(herdr_binary), "--version"], capture_output=True, text=True, check=True
     ).stdout.strip()
     expected_version_output = f"herdr {expected_herdr.version}"
     if version != expected_version_output:
@@ -783,7 +798,7 @@ def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
 
     root = Path(tempfile.mkdtemp(prefix="tabby-herdr-harness.", dir="/tmp"))
     recorder = Recorder(root)
-    environment = build_environment(root)
+    environment = build_environment(root, herdr_binary)
     default = SessionCase("default", [], environment, recorder, expected_herdr)
     named = SessionCase(
         "named",
@@ -1010,7 +1025,13 @@ def main() -> int:
         expected_herdr = expected_herdr_contract(args)
         if args.plan:
             root = args.root or Path("/tmp/tabby-herdr-harness.PLAN")
-            print(json.dumps(plan(root, expected_herdr), indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    plan(root, expected_herdr, resolve_herdr_binary()),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.root is not None:
             raise HarnessFailure("--root is accepted only with --plan")

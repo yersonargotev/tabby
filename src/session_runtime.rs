@@ -44,23 +44,6 @@ const CONTROL_WORKER_QUEUE: usize = 16;
 const CONTROL_RECENT_REQUEST_IDS: usize = 128;
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SupportedHerdrContract {
-    version: &'static str,
-    protocol: u64,
-}
-
-const SUPPORTED_HERDR_CONTRACTS: [SupportedHerdrContract; 2] = [
-    SupportedHerdrContract {
-        version: "0.8.0",
-        protocol: 19,
-    },
-    SupportedHerdrContract {
-        version: "0.8.2",
-        protocol: 20,
-    },
-];
-
 static NEXT_LAUNCH_ID: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
@@ -1082,16 +1065,17 @@ fn request_ready_owner(
         .take(CONTROL_MAX_LINE_BYTES)
         .read_line(&mut line)?;
     let reply: ControlReply = serde_json::from_str(&line)?;
+    if reply.launch_id != metadata.launch_id {
+        // A replacement owner can bind the same session-scoped endpoint before its Ready
+        // metadata replaces the crashed owner's record. Treat that cross-generation snapshot
+        // as transient and let the Startup Gate poll a coherent owner generation.
+        return Ok(None);
+    }
     if !reply.accepted {
         return Err(SessionRuntimeError::Control(
             reply
                 .error
                 .unwrap_or_else(|| "request rejected".to_string()),
-        ));
-    }
-    if reply.launch_id != metadata.launch_id {
-        return Err(SessionRuntimeError::Control(
-            "control reply came from a stale runtime launch".to_string(),
         ));
     }
     if reply.request_id != request.request_id {
@@ -1147,7 +1131,7 @@ fn run_owned_session(
     launch: &SessionRuntimeLaunch<'_>,
     launch_id: &str,
 ) -> Result<(), SessionRuntimeError> {
-    validate_live_herdr_contract(launch.socket)?;
+    crate::herdr_contract::validate_live(launch.socket)?;
     let paths = RuntimePaths::for_launch(launch);
     ensure_private_directory(launch.state_base)?;
     if let Some(runtimes_root) = paths.directory.parent() {
@@ -1305,63 +1289,6 @@ fn acquire_runtime_lease(
         }
         thread::park_timeout(Duration::from_millis(25));
     }
-}
-
-fn validate_live_herdr_contract(socket: &SessionSocket) -> Result<(), SessionRuntimeError> {
-    let output = Command::new("herdr")
-        .args(["status", "--json"])
-        .env(HERDR_SOCKET_PATH_ENV, &socket.socket_path)
-        .output()
-        .map_err(SessionRuntimeError::HerdrStatusIo)?;
-    if !output.status.success() {
-        return Err(SessionRuntimeError::HerdrStatusFailed {
-            status: output.status,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-    let status: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    validate_herdr_status(&status, socket)
-}
-
-fn validate_herdr_status(
-    status: &serde_json::Value,
-    socket: &SessionSocket,
-) -> Result<(), SessionRuntimeError> {
-    let server = status
-        .get("server")
-        .ok_or_else(|| SessionRuntimeError::HerdrContract("missing server status".to_string()))?;
-    let running = server
-        .get("running")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let version = server
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let protocol = server.get("protocol").and_then(serde_json::Value::as_u64);
-    let reported_socket = server
-        .get("socket")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-
-    let supported_contract = protocol.is_some_and(|protocol| {
-        SUPPORTED_HERDR_CONTRACTS
-            .iter()
-            .any(|contract| contract.version == version && contract.protocol == protocol)
-    });
-
-    if !running || !supported_contract || reported_socket != socket.socket_path.to_string_lossy() {
-        let supported = SUPPORTED_HERDR_CONTRACTS
-            .iter()
-            .map(|contract| format!("{}/protocol {}", contract.version, contract.protocol))
-            .collect::<Vec<_>>()
-            .join(" or ");
-        return Err(SessionRuntimeError::HerdrContract(format!(
-            "expected running Herdr {supported} at `{}`, got version `{version}`, protocol {protocol:?}, socket `{reported_socket}`",
-            socket.socket_path.display()
-        )));
-    }
-    Ok(())
 }
 
 fn run_runtime_loop(
@@ -1831,9 +1758,7 @@ pub enum SessionRuntimeError {
     SpawnRuntime(io::Error),
     ChildWait(io::Error),
     ChildExitedBeforeReady(ExitStatus),
-    HerdrStatusIo(io::Error),
-    HerdrStatusFailed { status: ExitStatus, stderr: String },
-    HerdrContract(String),
+    HerdrContract(crate::herdr_contract::HerdrContractError),
     Readiness(String),
     Control(String),
     Config(crate::config::ConfigError),
@@ -1880,17 +1805,8 @@ impl fmt::Display for SessionRuntimeError {
                 formatter,
                 "Session Runtime exited with {status} before readiness"
             ),
-            Self::HerdrStatusIo(error) => {
-                write!(formatter, "failed to inspect the Herdr runtime: {error}")
-            }
-            Self::HerdrStatusFailed { status, stderr } => {
-                write!(
-                    formatter,
-                    "`herdr status --json` failed with {status}: {stderr}"
-                )
-            }
-            Self::HerdrContract(message) => {
-                write!(formatter, "Herdr runtime contract mismatch: {message}")
+            Self::HerdrContract(error) => {
+                write!(formatter, "Herdr runtime contract mismatch: {error}")
             }
             Self::Readiness(message) => {
                 write!(formatter, "Session Runtime readiness failed: {message}")
@@ -1922,6 +1838,12 @@ impl SessionRuntimeError {
 impl From<io::Error> for SessionRuntimeError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<crate::herdr_contract::HerdrContractError> for SessionRuntimeError {
+    fn from(error: crate::herdr_contract::HerdrContractError) -> Self {
+        Self::HerdrContract(error)
     }
 }
 
@@ -2937,77 +2859,66 @@ mod tests {
     }
 
     #[test]
-    fn readiness_accepts_verified_herdr_contracts() {
-        let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
-        for (version, protocol) in [("0.8.0", 19), ("0.8.2", 20)] {
-            let status = serde_json::json!({
-                "server": {
-                    "running": true,
-                    "version": version,
-                    "protocol": protocol,
-                    "socket": "/tmp/herdr-contract.sock"
-                }
-            });
+    fn stale_metadata_during_owner_recovery_is_retried() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-recovery-metadata-race-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        let listener = bind_private_listener(&paths.control_directory, &paths.control_socket)
+            .expect("new owner control listener");
+        let (sender, receiver) = trigger_mailbox();
+        spawn_control_acceptor(
+            listener,
+            socket.session_key.clone(),
+            socket.identity_hex(),
+            "new-launch".to_string(),
+            "/tmp/tabby-owner".to_string(),
+            sender,
+        );
+        write_metadata(
+            &paths.metadata,
+            &RuntimeMetadata {
+                schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+                state: RuntimeMetadataState::Ready,
+                pid: 1,
+                session_key: socket.session_key.clone(),
+                socket_path: socket.socket_path.to_string_lossy().into_owned(),
+                socket_identity_hex: socket.identity_hex(),
+                launch_id: "crashed-launch".to_string(),
+                tabby_version: env!("CARGO_PKG_VERSION").to_string(),
+                binary_path: "/tmp/tabby".to_string(),
+                config_path: "/tmp/config.toml".to_string(),
+                config_schema_version: Some(crate::config::SCHEMA_VERSION),
+                config_source: Some("built-in defaults".to_string()),
+                selected_profile: None,
+                latest_config_error: None,
+                last_evaluation_unix_ms: None,
+                last_failure: None,
+                next_periodic_unix_ms: None,
+            },
+        )
+        .expect("stale ready metadata");
 
-            validate_herdr_status(&status, &socket)
-                .unwrap_or_else(|error| panic!("rejected Herdr {version}/{protocol}: {error}"));
-        }
-    }
+        assert!(
+            signal_ready_owner(&launch, RefreshTrigger::Creation)
+                .expect("stale observation is retryable")
+                .is_none()
+        );
+        assert!(receiver.recv_until(Some(Instant::now())).is_none());
 
-    #[test]
-    fn readiness_rejects_unverified_herdr_contracts_with_supported_pairs() {
-        let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
-        for (version, protocol) in [
-            ("0.7.5", 19),
-            ("0.8.0", 18),
-            ("0.8.0", 20),
-            ("0.8.2", 19),
-            ("0.8.2", 21),
-            ("0.8.3", 20),
-        ] {
-            let status = serde_json::json!({
-                "server": {
-                    "running": true,
-                    "version": version,
-                    "protocol": protocol,
-                    "socket": "/tmp/herdr-contract.sock"
-                }
-            });
-
-            let error = match validate_herdr_status(&status, &socket) {
-                Err(error) => error,
-                Ok(()) => panic!("accepted unverified Herdr {version}/{protocol}"),
-            };
-            let diagnostic = error.to_string();
-            assert!(
-                diagnostic.contains("0.8.0/protocol 19 or 0.8.2/protocol 20"),
-                "diagnostic omitted supported contracts: {diagnostic}"
-            );
-            assert!(
-                diagnostic.contains(&format!("version `{version}`, protocol Some({protocol})")),
-                "diagnostic omitted actual contract: {diagnostic}"
-            );
-        }
-    }
-
-    #[test]
-    fn readiness_requires_the_running_server_at_the_selected_socket() {
-        let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
-        for (running, reported_socket) in [
-            (false, "/tmp/herdr-contract.sock"),
-            (true, "/tmp/different-herdr.sock"),
-        ] {
-            let status = serde_json::json!({
-                "server": {
-                    "running": running,
-                    "version": "0.8.2",
-                    "protocol": 20,
-                    "socket": reported_socket
-                }
-            });
-
-            assert!(validate_herdr_status(&status, &socket).is_err());
-        }
+        let _ = fs::remove_file(&paths.control_socket);
+        let _ = fs::remove_dir_all(&paths.control_directory);
+        fs::remove_dir_all(&state_base).expect("remove state base");
     }
 
     #[test]

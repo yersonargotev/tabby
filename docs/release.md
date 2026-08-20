@@ -48,19 +48,21 @@ release_tag="v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0
 python3 scripts/check-release-contract.py --dist-manifest plan-dist-manifest.json --tag "$release_tag"
 ```
 
-On Apple Silicon macOS, run the lifecycle harness against every supported Herdr contract before tagging. Both binaries are required release inputs; do not tag when either contract cannot be exercised. Run the matrix explicitly so the harness cannot silently use its default:
+On Apple Silicon macOS, run the lifecycle harness against both required Herdr evidence pairs before tagging. These pairs prove the required JSON contract across two adjacent binary wire protocols; they are not a runtime allowlist. Select each exact binary through `PATH` and pass explicit expectations so the harness cannot exercise a different installation accidentally:
 
 ```sh
-python3 scripts/herdr_lifecycle_harness.py \
+PATH="/path/to/herdr-0.8.0/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  python3 scripts/herdr_lifecycle_harness.py \
   --expected-herdr-version 0.8.0 \
   --expected-herdr-protocol 19
 
-python3 scripts/herdr_lifecycle_harness.py \
+PATH="/path/to/herdr-0.8.2/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  python3 scripts/herdr_lifecycle_harness.py \
   --expected-herdr-version 0.8.2 \
   --expected-herdr-protocol 20
 ```
 
-The `0.8.0 / 19` pair remains the harness default for local convenience, but the release proof must pass both explicit commands. Review each sanitized transcript and the recorded coverage in [`docs/evidence/issue-94-herdr-contract-matrix.md`](evidence/issue-94-herdr-contract-matrix.md) before tagging.
+The `0.8.0 / 19` pair remains the harness default for local convenience, but the release proof must pass both explicit commands. The harness resolves the PATH-selected binary once, rejects a version/protocol mismatch, clears inherited `HERDR_*` variables, and injects that exact canonical path as `HERDR_BIN_PATH` for direct Tabby invocations. Review each sanitized transcript and the recorded coverage in [`docs/evidence/issue-94-herdr-contract-matrix.md`](evidence/issue-94-herdr-contract-matrix.md) before tagging.
 
 After publishing a tag, run `python3 scripts/herdr_release_harness.py` against the real repository and release assets, passing the same `--expected-herdr-version` and `--expected-herdr-protocol` pair. The first completed native release proof and its coverage limits are recorded in [`docs/evidence/issue-79-herdr-native-release.md`](evidence/issue-79-herdr-native-release.md).
 
