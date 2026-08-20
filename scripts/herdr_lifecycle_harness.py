@@ -79,7 +79,7 @@ def resolve_herdr_binary() -> Path:
     return Path(selected).resolve()
 
 
-def build_environment(root: Path, herdr_binary: Path) -> Dict[str, str]:
+def build_environment(root: Path, herdr_binary: Optional[Path] = None) -> Dict[str, str]:
     environment = dict(os.environ)
     for name in [name for name in environment if name.startswith("HERDR_")]:
         environment.pop(name, None)
@@ -91,16 +91,17 @@ def build_environment(root: Path, herdr_binary: Path) -> Dict[str, str]:
             "XDG_CACHE_HOME": str(root / "xdg-cache"),
             "TMPDIR": str(root / "tmp"),
             "HERDR_CONFIG_PATH": str(root / "config" / "herdr" / "config.toml"),
-            "HERDR_BIN_PATH": str(herdr_binary.resolve()),
         }
     )
+    if herdr_binary is not None:
+        environment["HERDR_BIN_PATH"] = str(herdr_binary.resolve())
     return environment
 
 
 def plan(
     root: Path,
     expected_herdr: ExpectedHerdrContract,
-    herdr_binary: Path,
+    herdr_binary: Optional[Path] = None,
 ) -> Dict[str, Any]:
     environment = build_environment(root, herdr_binary)
     visible_environment = {
@@ -112,9 +113,10 @@ def plan(
             "XDG_CACHE_HOME",
             "TMPDIR",
             "HERDR_CONFIG_PATH",
-            "HERDR_BIN_PATH",
         )
     }
+    if "HERDR_BIN_PATH" in environment:
+        visible_environment["HERDR_BIN_PATH"] = environment["HERDR_BIN_PATH"]
     return {
         "root": str(root),
         "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
@@ -1027,7 +1029,7 @@ def main() -> int:
             root = args.root or Path("/tmp/tabby-herdr-harness.PLAN")
             print(
                 json.dumps(
-                    plan(root, expected_herdr, resolve_herdr_binary()),
+                    plan(root, expected_herdr),
                     indent=2,
                     sort_keys=True,
                 )

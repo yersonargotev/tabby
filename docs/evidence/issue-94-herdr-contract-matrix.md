@@ -6,8 +6,8 @@ Host contract: Apple Silicon macOS
 
 Tabby source under test:
 
-- base commit: `eb834a94df49cb19e2b2029e2bd11bd714304df6`;
-- `src/herdr_contract.rs` SHA-256: `5d18347b7f3f87e8f887dddf1185daa7f8decd8e9d7a0eb3b3edd6f9302ce45f`.
+- base commit: `a889ba9b5f9f54bde58219ee3d708cd785a6f6d8`;
+- `src/herdr_contract.rs` SHA-256: `8e654e3557748b422e645396ee98bced944f63ce79e613ee248636d708970ac7`.
 
 The base commit plus source-file fingerprint identifies the exact implementation tested independently of the later documentation commit.
 

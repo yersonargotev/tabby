@@ -2,10 +2,8 @@
 
 import json
 import importlib.util
-import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -37,35 +35,31 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
 
     def test_plan_isolates_default_and_named_sessions(self) -> None:
         sandbox_root = Path("/tmp/tabby-harness-contract")
-        with tempfile.TemporaryDirectory() as binary_dir:
-            selected_herdr = Path(binary_dir) / "herdr"
-            selected_herdr.write_text("#!/bin/sh\nexit 0\n")
-            selected_herdr.chmod(0o755)
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(HARNESS),
-                    "--plan",
-                    "--root",
-                    str(sandbox_root),
-                    "--expected-herdr-version",
-                    "0.8.2",
-                    "--expected-herdr-protocol",
-                    "20",
-                ],
-                cwd=REPO_ROOT,
-                check=True,
-                capture_output=True,
-                text=True,
-                env={
-                    "PATH": os.pathsep.join([binary_dir, "/usr/bin", "/bin"]),
-                    "HOME": "/Users/operator",
-                    "HERDR_BIN_PATH": "/operator/unrelated/herdr",
-                    "HERDR_SESSION": "operator-session",
-                    "HERDR_SOCKET_PATH": "/Users/operator/.config/herdr/real.sock",
-                    "HERDR_PLUGIN_STATE_DIR": "/Users/operator/.local/state/tabby",
-                },
-            )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(HARNESS),
+                "--plan",
+                "--root",
+                str(sandbox_root),
+                "--expected-herdr-version",
+                "0.8.2",
+                "--expected-herdr-protocol",
+                "20",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/Users/operator",
+                "HERDR_BIN_PATH": "/operator/unrelated/herdr",
+                "HERDR_SESSION": "operator-session",
+                "HERDR_SOCKET_PATH": "/Users/operator/.config/herdr/real.sock",
+                "HERDR_PLUGIN_STATE_DIR": "/Users/operator/.local/state/tabby",
+            },
+        )
 
         plan = json.loads(completed.stdout)
         self.assertEqual(plan["transcript_schema_version"], 1)
@@ -88,11 +82,11 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
             "XDG_CACHE_HOME": sandbox_root / "xdg-cache",
             "TMPDIR": sandbox_root / "tmp",
             "HERDR_CONFIG_PATH": sandbox_root / "config" / "herdr" / "config.toml",
-            "HERDR_BIN_PATH": selected_herdr.resolve(),
         }
         for name, expected in expected_paths.items():
             self.assertEqual(Path(environment[name]), expected)
 
+        self.assertNotIn("HERDR_BIN_PATH", environment)
         self.assertNotIn("HERDR_SOCKET_PATH", environment)
         self.assertNotIn("HERDR_PLUGIN_STATE_DIR", environment)
         self.assertNotIn("HERDR_SESSION", environment)

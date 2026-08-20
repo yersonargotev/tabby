@@ -51,10 +51,24 @@ READY_RE = re.compile(
 def plan(
     root: Path,
     expected_herdr: ExpectedHerdrContract,
-    herdr_binary: Path,
+    herdr_binary: Optional[Path] = None,
 ) -> Dict[str, Any]:
     environment = build_environment(root, herdr_binary)
     release_tag = f"v{manifest_version()}"
+    visible_environment = {
+        name: environment[name]
+        for name in (
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "TMPDIR",
+            "HERDR_CONFIG_PATH",
+            "PATH",
+        )
+    }
+    if "HERDR_BIN_PATH" in environment:
+        visible_environment["HERDR_BIN_PATH"] = environment["HERDR_BIN_PATH"]
     return {
         "root": str(root),
         "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
@@ -70,19 +84,7 @@ def plan(
             release_tag,
             "--yes",
         ],
-        "environment": {
-            name: environment[name]
-            for name in (
-                "HOME",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-                "XDG_CACHE_HOME",
-                "TMPDIR",
-                "HERDR_CONFIG_PATH",
-                "HERDR_BIN_PATH",
-                "PATH",
-            )
-        },
+        "environment": visible_environment,
         "removed_inherited_herdr_variables": sorted(
             name for name in os.environ if name.startswith("HERDR_")
         ),
@@ -621,7 +623,7 @@ def main() -> int:
             root = args.root or Path("/tmp/tabby-release-harness.PLAN")
             print(
                 json.dumps(
-                    plan(root, expected_herdr, resolve_herdr_binary()),
+                    plan(root, expected_herdr),
                     indent=2,
                     sort_keys=True,
                 )

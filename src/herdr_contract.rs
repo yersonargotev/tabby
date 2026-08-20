@@ -170,7 +170,16 @@ fn validate_with(
                     process_info.pane_id, focused.pane.pane_id
                 )));
             }
-            Err(_first_error) => {
+            Err(first_error) => {
+                if !matches!(
+                    &first_error,
+                    HerdrError::Rpc(error) if error.code == "pane_not_found"
+                ) {
+                    return Err(HerdrContractError::LiveProbe {
+                        method: "pane.process_info",
+                        source: first_error,
+                    });
+                }
                 // The focused pane can exit between snapshot and process inspection. Retry once
                 // from a fresh coherent snapshot before declaring the contract unavailable.
                 let retry_snapshot =
@@ -1515,12 +1524,32 @@ mod tests {
         let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
         let mut probe = fake_probe("0.8.2", 20, true);
         probe.process_results =
-            VecDeque::from([Err(HerdrError::Protocol("pane disappeared".to_string()))]);
+            VecDeque::from([Err(HerdrError::Rpc(crate::herdr_client::RpcError {
+                code: "pane_not_found".to_string(),
+                message: "pane not found".to_string(),
+            }))]);
         probe.snapshots.push_back(Ok(snapshot("0.8.2", 20, false)));
 
         validate_with(&mut probe, &socket).expect("transient process race");
 
         assert_eq!(probe.requested_panes, ["pane-1"]);
+    }
+
+    #[test]
+    fn rejects_a_non_transient_process_probe_error_without_hiding_it_behind_focus_loss() {
+        let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
+        let mut probe = fake_probe("0.8.2", 20, true);
+        probe.process_results = VecDeque::from([Err(HerdrError::Protocol(
+            "malformed process response".to_string(),
+        ))]);
+        probe.snapshots.push_back(Ok(snapshot("0.8.2", 20, false)));
+
+        let error = validate_with(&mut probe, &socket).expect_err("process probe failure");
+
+        assert!(error.to_string().contains("pane.process_info"));
+        assert!(error.to_string().contains("malformed process response"));
+        assert_eq!(probe.requested_panes, ["pane-1"]);
+        assert_eq!(probe.snapshots.len(), 1);
     }
 
     #[test]
@@ -1535,7 +1564,10 @@ mod tests {
 
         let mut process_failure = fake_probe("0.8.2", 20, true);
         process_failure.process_results = VecDeque::from([
-            Err(HerdrError::Protocol("pane disappeared".to_string())),
+            Err(HerdrError::Rpc(crate::herdr_client::RpcError {
+                code: "pane_not_found".to_string(),
+                message: "pane not found".to_string(),
+            })),
             Err(HerdrError::Protocol(
                 "process probe unavailable".to_string(),
             )),
