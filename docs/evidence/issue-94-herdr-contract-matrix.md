@@ -4,7 +4,7 @@ Date: 2026-08-19
 
 Host contract: Apple Silicon macOS
 
-Tabby implementation commit: `33e3bac61c462bb28ba1d158c46198bab8ef6522`
+Tabby implementation commit: `399a782121858378edfff5e9e07d65af19667257`
 
 Result: passed
 
@@ -54,4 +54,4 @@ The two runs exercised the same behavior matrix against the default and named He
 | Registered binary handoff | A Homebrew-shaped binary became the sole Ready owner, then control returned to the plugin-root binary without overlapping owners. |
 | Session stop and restore | The default owner stopped with the Herdr server; restore created a different owner and retained the label and Manually Locked Tab state. |
 
-The harness removed only its validated temporary roots after stopping both isolated servers. At the recorded implementation commit, deterministic runtime-status tests complemented this live proof by rejecting older, crossed, mismatched, and unknown version/protocol fixtures, including protocols 18 and 21. ADR 0014 subsequently replaced that pair allowlist with fail-closed validation of the required JSON schema subset and read-only live probes. The recorded binaries, transcript counts, assertions, checksum, and observed lifecycle outcomes remain historical evidence; a compatible later protocol may now pass the runtime gate without changing Tabby.
+The harness removed only its validated temporary roots after stopping both isolated servers. At the recorded implementation commit, both runs exercised the dynamic gate itself: the host-selected absolute `HERDR_BIN_PATH`, minimum release and protocol, required JSON schema subset, exact socket identity, and read-only live probes all validated before each Session Runtime became Ready. Deterministic contract tests complement this live proof by rejecting older or contradictory status, malformed schema output, incompatible request and response shapes, failed probes, relative binary paths, and ambiguous response unions while accepting a compatible protocol 21 fixture. The recorded binaries, transcript counts, assertions, checksum, and observed lifecycle outcomes prove the required contract across protocols 19 and 20 without making that pair a permanent runtime allowlist.
