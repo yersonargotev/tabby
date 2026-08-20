@@ -122,7 +122,7 @@ class HerdrManifestContractTests(unittest.TestCase):
             shutil.copy2(REPO_ROOT / "herdr-plugin.toml", canonical)
             shutil.copy2(REPO_ROOT / "packaging/herdr/herdr-plugin.toml", homebrew)
             shutil.copy2(REPO_ROOT / "Cargo.toml", cargo)
-            homebrew.write_text(homebrew.read_text().replace('version = "0.1.15"', 'version = "0.1.14"'))
+            homebrew.write_text(homebrew.read_text().replace('version = "0.1.16"', 'version = "0.1.15"'))
 
             completed = self.run_checker(canonical, homebrew, cargo)
 
