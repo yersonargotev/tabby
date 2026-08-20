@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
-const HERDR_RPC_TIMEOUT: Duration = Duration::from_millis(75);
+const DEFAULT_HERDR_RPC_DEADLINE: Duration = Duration::from_millis(75);
+const HERDR_RPC_READ_SLICE: Duration = Duration::from_millis(75);
 
 pub trait HerdrApi {
     /// Reads a coherent focused tab and pane from `session.snapshot`.
@@ -27,15 +28,41 @@ pub trait RpcTransport {
 #[derive(Debug)]
 pub enum HerdrError {
     Io(std::io::Error),
+    ConnectionClosed,
     Json(serde_json::Error),
     Rpc(RpcError),
     Protocol(String),
+}
+
+impl HerdrError {
+    pub(crate) fn is_retryable_transport(&self) -> bool {
+        match self {
+            Self::ConnectionClosed => true,
+            Self::Io(error) => matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::Interrupted
+                    | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
+            ),
+            Self::Json(_) | Self::Rpc(_) | Self::Protocol(_) => false,
+        }
+    }
 }
 
 impl fmt::Display for HerdrError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "Herdr socket I/O failed: {error}"),
+            Self::ConnectionClosed => {
+                formatter.write_str("Herdr closed the socket without a response")
+            }
             Self::Json(error) => write!(formatter, "Herdr JSON parsing failed: {error}"),
             Self::Rpc(error) => write!(
                 formatter,
@@ -52,7 +79,7 @@ impl std::error::Error for HerdrError {
         match self {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::Rpc(_) | Self::Protocol(_) => None,
+            Self::ConnectionClosed | Self::Rpc(_) | Self::Protocol(_) => None,
         }
     }
 }
@@ -71,12 +98,24 @@ impl From<serde_json::Error> for HerdrError {
 
 pub struct UnixSocketTransport {
     socket_path: PathBuf,
+    response_deadline: Duration,
 }
 
 impl UnixSocketTransport {
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: socket_path.into(),
+            response_deadline: DEFAULT_HERDR_RPC_DEADLINE,
+        }
+    }
+
+    pub(crate) fn with_response_deadline(
+        socket_path: impl Into<PathBuf>,
+        response_deadline: Duration,
+    ) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+            response_deadline,
         }
     }
 
@@ -96,21 +135,40 @@ impl UnixSocketTransport {
 impl RpcTransport for UnixSocketTransport {
     fn send_request_line(&mut self, request_line: &str) -> Result<String, HerdrError> {
         let mut stream = UnixStream::connect(&self.socket_path)?;
-        stream.set_read_timeout(Some(HERDR_RPC_TIMEOUT))?;
-        stream.set_write_timeout(Some(HERDR_RPC_TIMEOUT))?;
+        stream.set_write_timeout(Some(self.response_deadline))?;
         stream.write_all(request_line.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()?;
 
         let mut response_line = String::new();
-        let bytes_read = BufReader::new(stream).read_line(&mut response_line)?;
-        if bytes_read == 0 {
-            return Err(HerdrError::Protocol(
-                "Herdr closed the socket without a response".to_string(),
-            ));
+        let deadline = Instant::now() + self.response_deadline;
+        let mut reader = BufReader::new(stream);
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Herdr RPC response deadline elapsed",
+                )
+                .into());
+            };
+            reader
+                .get_mut()
+                .set_read_timeout(Some(remaining.min(HERDR_RPC_READ_SLICE)))?;
+            match reader.read_line(&mut response_line) {
+                Ok(0) => {
+                    return Err(HerdrError::ConnectionClosed);
+                }
+                Ok(_) => return Ok(response_line),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-
-        Ok(response_line)
     }
 }
 
@@ -539,6 +597,12 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io;
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    static NEXT_SOCKET_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     const PANE_PROCESS_INFO_FIXTURE: &str =
         include_str!("../tests/fixtures/herdr-client/pane-process-info.json");
@@ -787,6 +851,74 @@ mod tests {
 
         let error = client.observe_focused_tab().expect_err("transport error");
         assert!(matches!(error, HerdrError::Io(_)));
+    }
+
+    #[test]
+    fn unix_transport_tolerates_a_transient_read_timeout_within_its_deadline() {
+        let unique = NEXT_SOCKET_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let socket_path = std::env::temp_dir().join(format!(
+            "tabby-herdr-client-timeout-{}-{unique}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&socket_path).expect("bind test socket");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test client");
+            let mut request = String::new();
+            BufReader::new(&mut stream)
+                .read_line(&mut request)
+                .expect("read request");
+            thread::sleep(Duration::from_millis(125));
+            stream
+                .write_all(b"{\"result\":true}\n")
+                .expect("write response");
+        });
+
+        let mut transport =
+            UnixSocketTransport::with_response_deadline(&socket_path, Duration::from_millis(500));
+        let response = transport
+            .send_request_line("{\"method\":\"session.snapshot\"}")
+            .expect("response within the bounded transport deadline");
+
+        assert_eq!(response, "{\"result\":true}\n");
+        server.join().expect("join test server");
+        std::fs::remove_file(socket_path).expect("remove test socket");
+    }
+
+    #[test]
+    fn default_transport_preserves_the_runtime_rpc_budget() {
+        let transport = UnixSocketTransport::new("/tmp/herdr.sock");
+
+        assert_eq!(transport.response_deadline, DEFAULT_HERDR_RPC_DEADLINE);
+        assert_eq!(transport.response_deadline, Duration::from_millis(75));
+    }
+
+    #[test]
+    fn unix_transport_stops_retrying_when_its_response_deadline_elapses() {
+        let unique = NEXT_SOCKET_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let socket_path = std::env::temp_dir().join(format!(
+            "tabby-herdr-client-deadline-{}-{unique}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&socket_path).expect("bind test socket");
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept test client");
+            thread::sleep(Duration::from_millis(300));
+        });
+        let mut transport =
+            UnixSocketTransport::with_response_deadline(&socket_path, Duration::from_millis(100));
+
+        let started = Instant::now();
+        let error = transport
+            .send_request_line("{\"method\":\"session.snapshot\"}")
+            .expect_err("silent peer must reach the response deadline");
+
+        assert!(matches!(
+            error,
+            HerdrError::Io(ref source) if source.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        server.join().expect("join test server");
+        std::fs::remove_file(socket_path).expect("remove test socket");
     }
 
     fn assert_request_matches_fixture<P>(request: JsonRpcRequest<P>, fixture: &str)

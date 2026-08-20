@@ -282,9 +282,15 @@ fn warnings_and_fixes(snapshot: &StatusSnapshot) -> (Vec<String>, BTreeSet<Strin
         RuntimeInspection::Starting { .. } => {
             warnings.push("Session Runtime is starting but not Ready".to_string());
         }
-        RuntimeInspection::Faulted { diagnostic, .. } => {
+        RuntimeInspection::Faulted {
+            diagnostic,
+            latest_config_error,
+            ..
+        } => {
             warnings.push(format!("Session Runtime is Faulted: {diagnostic}"));
-            fixes.insert("run `tabby ensure-started` for this Herdr Session".to_string());
+            if latest_config_error.is_some() {
+                fixes.insert("run `tabby ensure-started` for this Herdr Session".to_string());
+            }
         }
         RuntimeInspection::Ready { binary_path, .. } => {
             let binary_identity = startup::binary_identity(binary_path);
@@ -753,6 +759,10 @@ mod tests {
         assert!(output.contains("recent plugin action failed"));
         assert!(output.contains("recent plugin action reported SkippedLocked"));
         assert!(output.contains("tabby repair-state --discard"));
+        assert!(
+            !output.contains("run `tabby ensure-started`"),
+            "status must not recommend an ineffective recovery for a terminal fault"
+        );
     }
 
     #[test]

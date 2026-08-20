@@ -831,6 +831,9 @@ pub fn inspect_runtime(
     if let Err(diagnostic) = validate_runtime_identity(&metadata, launch) {
         return Ok(faulted_inspection(diagnostic, lease_held, Some(&metadata)));
     }
+    if is_legacy_retryable_contract_fault(&metadata, lease_held) {
+        return Ok(RuntimeInspection::Absent);
+    }
     if metadata.state == RuntimeMetadataState::Faulted {
         return Ok(faulted_inspection(
             metadata
@@ -1020,9 +1023,13 @@ fn request_ready_owner(
     };
 
     validate_runtime_identity(&metadata, launch).map_err(SessionRuntimeError::Control)?;
+    let lease_held = LifetimeLease::is_held(&paths.lifetime_lease)?;
+    if is_legacy_retryable_contract_fault(&metadata, lease_held) {
+        return Ok(None);
+    }
     if metadata.state == RuntimeMetadataState::Faulted
         && metadata.latest_config_error.is_some()
-        && !LifetimeLease::is_held(&paths.lifetime_lease)?
+        && !lease_held
     {
         if metadata.config_path.is_empty() {
             return Err(SessionRuntimeError::Control(
@@ -1115,6 +1122,16 @@ fn validate_runtime_metadata(
     Ok(())
 }
 
+fn is_legacy_retryable_contract_fault(metadata: &RuntimeMetadata, lease_held: bool) -> bool {
+    metadata.state == RuntimeMetadataState::Faulted
+        && !lease_held
+        && metadata.latest_config_error.is_none()
+        && metadata
+            .last_failure
+            .as_deref()
+            .is_some_and(crate::herdr_contract::legacy_persisted_failure_is_retryable)
+}
+
 fn validate_runtime_identity(
     metadata: &RuntimeMetadata,
     launch: &SessionRuntimeLaunch<'_>,
@@ -1170,7 +1187,11 @@ fn run_owned_session_with_contract_validator(
         .to_string_lossy()
         .into_owned();
     if let Err(error) = validate_contract(launch.socket) {
+        let retryable = error.is_retryable();
         let error = SessionRuntimeError::HerdrContract(error);
+        if retryable {
+            return Err(error);
+        }
         write_initial_runtime_fault(
             &paths.metadata,
             launch,
@@ -2559,6 +2580,98 @@ mod tests {
         let exit_status = Command::new("false").status().expect("run false");
         let child_exit = classify_child_exit_before_readiness(&launch, exit_status);
         assert!(child_exit.to_string().contains(diagnostic));
+
+        fs::remove_dir_all(state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn transient_herdr_contract_probe_failure_leaves_runtime_retryable() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-transient-contract-runtime-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+
+        let error = run_owned_session_with_contract_validator(&launch, "transient-probe", |_| {
+            Err(crate::herdr_contract::HerdrContractError::LiveProbe {
+                method: "session.snapshot",
+                source: crate::herdr_client::HerdrError::Io(io::Error::from(
+                    io::ErrorKind::WouldBlock,
+                )),
+            })
+        })
+        .expect_err("transient probe failure");
+
+        assert!(error.to_string().contains("session.snapshot"));
+        assert!(
+            !LifetimeLease::is_held(&paths.lifetime_lease).expect("inspect runtime lease"),
+            "runtime lease must be released after the failed attempt"
+        );
+        assert_eq!(
+            inspect_runtime(&launch).expect("inspect retryable runtime"),
+            RuntimeInspection::Absent,
+            "a later startup request must be allowed to try again"
+        );
+        assert_eq!(
+            signal_ready_owner(&launch, RefreshTrigger::Startup)
+                .expect("retryable runtime is not terminal"),
+            None
+        );
+        let mut retry = FakeAdapter::default();
+        assert!(matches!(
+            ensure_ready_owner_with(&launch, RefreshTrigger::Startup, &mut retry)
+                .expect("later Startup Gate request"),
+            EnsureRuntimeOutcome::NewOwnerReady(_)
+        ));
+        assert_eq!(retry.spawned, 1);
+
+        fs::remove_dir_all(state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn legacy_live_probe_transport_fault_is_retryable_after_upgrade() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-legacy-eagain-runtime-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        fs::create_dir_all(&paths.directory).expect("runtime directory");
+        write_initial_runtime_fault(
+            &paths.metadata,
+            &launch,
+            "legacy-eagain",
+            "/tmp/tabby",
+            "",
+            None,
+            "Herdr runtime contract mismatch: read-only `pane.process_info` probe failed: Herdr socket I/O failed: timed out".to_string(),
+        )
+        .expect("legacy fault metadata");
+
+        assert_eq!(
+            inspect_runtime(&launch).expect("inspect legacy fault"),
+            RuntimeInspection::Absent
+        );
+        assert_eq!(
+            signal_ready_owner(&launch, RefreshTrigger::Startup)
+                .expect("legacy transient fault is retryable"),
+            None
+        );
 
         fs::remove_dir_all(state_base).expect("remove state base");
     }
