@@ -279,7 +279,7 @@ action shown above.
 
 ## Release evidence
 
-The current production source is release
+The recorded production proof uses release
 [`v0.1.13`](https://github.com/yersonargotev/tabby/releases/tag/v0.1.13). Its
 [native Herdr install evidence](https://github.com/yersonargotev/tabby/blob/main/docs/evidence/issue-79-herdr-native-release.md)
 records checksum-verified installation, registration, explicit activation,

@@ -23,7 +23,7 @@ harness_spec.loader.exec_module(harness)
 
 class ReleaseHarnessPlanTests(unittest.TestCase):
     def test_ready_status_parser_accepts_configuration_diagnostics(self) -> None:
-        status = """Session Runtime: Ready pid=42 version=0.1.14 lease_held=true
+        status = """Session Runtime: Ready pid=42 version=0.1.15 lease_held=true
 Configuration: path=/tmp/config.toml active_schema_version=1 selected_profile=work
 Ready owner binary: /tmp/tabby
 Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_unix_ms=123 next_periodic_unix_ms=456 last_failure=<none>
@@ -38,7 +38,7 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
 
     def test_registration_accepts_every_current_manifest_action(self) -> None:
         plugin = {
-            "version": "0.1.14",
+            "version": "0.1.15",
             "actions": [
                 {"id": "start", "command": [".herdr/bin/tabby", "start"]},
                 {"id": "refresh", "command": [".herdr/bin/tabby", "refresh"]},
@@ -63,7 +63,7 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
             },
         }
 
-        harness.assert_registration(plugin, "0.1.14", "release-commit")
+        harness.assert_registration(plugin, "0.1.15", "release-commit")
 
     def test_plan_isolates_native_install_and_covers_the_release_gate(self) -> None:
         sandbox_root = Path("/tmp/tabby-release-harness-contract")
@@ -110,7 +110,7 @@ Session Runtime details: launch_id=release-1 binary=/tmp/tabby last_evaluation_u
                 "install",
                 "yersonargotev/tabby",
                 "--ref",
-                "v0.1.14",
+                "v0.1.15",
                 "--yes",
             ],
         )
