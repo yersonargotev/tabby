@@ -136,7 +136,7 @@ impl ContractProbe for SystemContractProbe {
     }
 }
 
-/// Validates the complete startup contract before Session Runtime artifacts exist.
+/// Validates the complete startup contract before the Session Runtime becomes Ready.
 pub(crate) fn validate_live(socket: &SessionSocket) -> Result<(), HerdrContractError> {
     let herdr_binary = required_herdr_binary()?;
     let mut probe = SystemContractProbe::new(herdr_binary, socket);
@@ -161,7 +161,7 @@ fn validate_with(
         })?;
     validate_snapshot_contract(&snapshot.version, u64::from(snapshot.protocol), &observed)?;
 
-    if let Some(focused) = snapshot.into_focused_observation() {
+    if let Some(focused) = snapshot.into_focused_pane_observation() {
         match probe.pane_process_info(&focused.pane.pane_id) {
             Ok(process_info) if process_info.pane_id == focused.pane.pane_id => {}
             Ok(process_info) => {
@@ -185,7 +185,7 @@ fn validate_with(
                     u64::from(retry_snapshot.protocol),
                     &observed,
                 )?;
-                if let Some(retry_focused) = retry_snapshot.into_focused_observation() {
+                if let Some(retry_focused) = retry_snapshot.into_focused_pane_observation() {
                     let process_info = probe
                         .pane_process_info(&retry_focused.pane.pane_id)
                         .map_err(|source| HerdrContractError::LiveProbe {
@@ -376,6 +376,9 @@ fn validate_schema(schema: &Value, observed_protocol: u64) -> Result<(), HerdrCo
         true,
         "session.snapshot",
     )?;
+    for field in ["focused_tab_id", "focused_pane_id"] {
+        require_nullable_field_type(schema, snapshot, field, "string", false, "session.snapshot")?;
+    }
     let tabs = require_field_type(schema, snapshot, "tabs", "array", true, "session.snapshot")?;
     let tab_info = array_item(schema, tabs, "session.snapshot.tabs")?;
     validate_tab_info(schema, tab_info)?;
@@ -490,8 +493,54 @@ fn validate_request_method(
     if request_accepts_type(root, params, "object")? != Some(true) {
         return Err(incompatible(format!("{method} params must be an object")));
     }
+    reject_unsupported_required_fields(
+        root,
+        params,
+        &fields
+            .iter()
+            .map(|(field, _, _)| *field)
+            .collect::<Vec<_>>(),
+        method,
+        0,
+    )?;
     for (field, expected_type, required) in fields {
         require_request_field_type(root, params, field, expected_type, *required, method)?;
+    }
+    Ok(())
+}
+
+fn reject_unsupported_required_fields(
+    root: &Value,
+    object: &Value,
+    supported: &[&str],
+    context: &str,
+    depth: usize,
+) -> Result<(), HerdrContractError> {
+    if depth > 16 {
+        return Err(incompatible("api schema required-field chain is too deep"));
+    }
+    let object = resolve(root, object)?;
+    if let Some(required) = object.get("required") {
+        let required = required
+            .as_array()
+            .ok_or_else(|| incompatible(format!("{context} params.required must be an array")))?;
+        for field in required {
+            let field = field.as_str().ok_or_else(|| {
+                incompatible(format!("{context} params.required entries must be strings"))
+            })?;
+            if !supported.contains(&field) {
+                return Err(incompatible(format!(
+                    "{context} params require unsupported field `{field}`"
+                )));
+            }
+        }
+    }
+    for combinator in ["allOf", "anyOf", "oneOf"] {
+        if let Some(variants) = object.get(combinator).and_then(Value::as_array) {
+            for variant in variants {
+                reject_unsupported_required_fields(root, variant, supported, context, depth + 1)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1141,7 +1190,7 @@ mod tests {
                             {"properties":{"type":{"const":"pane_process_info"},"process_info":{"$ref":"#/schemas/success_response/$defs/PaneProcessInfo"}},"required":["type","process_info"]},
                             {"properties":{"type":{"const":"ok"}},"required":["type"]}
                         ]},
-                        "SessionSnapshot":{"type":"object","properties":{"version":{"type":"string"},"protocol":{"type":"integer","format":"uint32","minimum":0},"tabs":{"type":"array","items":{"$ref":"#/schemas/success_response/$defs/TabInfo"}},"panes":{"type":"array","items":{"$ref":"#/schemas/success_response/$defs/PaneInfo"}}},"required":["version","protocol","tabs","panes"]},
+                        "SessionSnapshot":{"type":"object","properties":{"version":{"type":"string"},"protocol":{"type":"integer","format":"uint32","minimum":0},"focused_tab_id":{"type":["string","null"]},"focused_pane_id":{"type":["string","null"]},"tabs":{"type":"array","items":{"$ref":"#/schemas/success_response/$defs/TabInfo"}},"panes":{"type":"array","items":{"$ref":"#/schemas/success_response/$defs/PaneInfo"}}},"required":["version","protocol","tabs","panes"]},
                         "TabInfo":{"type":"object","properties":{"tab_id":{"type":"string"},"workspace_id":{"type":"string"},"number":{"type":"integer","format":"uint64","minimum":0},"label":{"type":"string"},"focused":{"type":"boolean"}},"required":["tab_id","workspace_id","number","label","focused"]},
                         "PaneInfo":{"type":"object","properties":{"pane_id":{"type":"string"},"workspace_id":{"type":"string"},"tab_id":{"type":"string"},"focused":{"type":"boolean"},"cwd":{"type":["string","null"]},"foreground_cwd":{"type":["null","string"]},"revision":{"type":"integer","format":"uint64","minimum":0}},"required":["pane_id","workspace_id","tab_id","focused","revision"]},
                         "PaneProcessInfo":{"type":"object","properties":{"pane_id":{"type":"string"},"foreground_processes":{"type":"array","items":{"$ref":"#/schemas/success_response/$defs/PaneProcessInfoProcess"}}},"required":["pane_id"]},
@@ -1252,6 +1301,24 @@ mod tests {
     }
 
     #[test]
+    fn does_not_probe_an_unfocused_first_pane_in_the_focused_tab() {
+        let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
+        let mut probe = fake_probe("0.8.2", 20, true);
+        let snapshot = probe
+            .snapshots
+            .front_mut()
+            .expect("snapshot")
+            .as_mut()
+            .expect("valid snapshot");
+        snapshot.focused_pane_id = None;
+        snapshot.panes[0].focused = false;
+
+        validate_with(&mut probe, &socket).expect("compatible contract without a focused pane");
+
+        assert!(probe.requested_panes.is_empty());
+    }
+
+    #[test]
     fn retries_a_process_probe_once_when_the_focused_pane_disappears() {
         let socket = SessionSocket::resolve("/tmp/herdr-contract.sock").expect("socket");
         let mut probe = fake_probe("0.8.2", 20, true);
@@ -1336,6 +1403,42 @@ mod tests {
             json!("integer");
         let error = validate_schema(&wrong_field, 20).expect_err("wrong field");
         assert!(error.to_string().contains("pane_info.tab_id"));
+    }
+
+    #[test]
+    fn rejects_request_parameters_that_tabby_cannot_supply() {
+        let mut snapshot_extra = compatible_schema(20);
+        snapshot_extra["schemas"]["request"]["$defs"]["EmptyParams"] = json!({
+            "type": "object",
+            "properties": {"future": {"type": "string"}},
+            "required": ["future"]
+        });
+        let error = validate_schema(&snapshot_extra, 20).expect_err("unsupported snapshot param");
+        assert!(error.to_string().contains("session.snapshot"));
+        assert!(error.to_string().contains("future"));
+
+        let mut rename_extra = compatible_schema(20);
+        rename_extra["schemas"]["request"]["$defs"]["TabRenameParams"] = json!({
+            "allOf": [
+                {"type": "object", "properties": {"tab_id": {"type": "string"}, "label": {"type": "string"}}, "required": ["tab_id", "label"]},
+                {"properties": {"workspace_id": {"type": "string"}}, "required": ["workspace_id"]}
+            ]
+        });
+        let error = validate_schema(&rename_extra, 20).expect_err("unsupported rename param");
+        assert!(error.to_string().contains("tab.rename"));
+        assert!(error.to_string().contains("workspace_id"));
+    }
+
+    #[test]
+    fn rejects_incompatible_snapshot_focus_selectors() {
+        for field in ["focused_tab_id", "focused_pane_id"] {
+            let mut schema = compatible_schema(20);
+            schema["schemas"]["success_response"]["$defs"]["SessionSnapshot"]["properties"]
+                [field]["type"] = json!("integer");
+
+            let error = validate_schema(&schema, 20).expect_err("incompatible focus selector");
+            assert!(error.to_string().contains(field));
+        }
     }
 
     #[test]

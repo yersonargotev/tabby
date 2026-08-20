@@ -971,7 +971,7 @@ impl SessionRuntimeAdapter for SystemSessionRuntimeAdapter {
                 .map_err(SessionRuntimeError::ChildWait)?
             {
                 self.child.take();
-                return Err(SessionRuntimeError::ChildExitedBeforeReady(status));
+                return Err(classify_child_exit_before_readiness(launch, status));
             }
 
             if Instant::now() >= deadline {
@@ -985,6 +985,19 @@ impl SessionRuntimeAdapter for SystemSessionRuntimeAdapter {
             }
             thread::park_timeout(Duration::from_millis(25));
         }
+    }
+}
+
+fn classify_child_exit_before_readiness(
+    launch: &SessionRuntimeLaunch<'_>,
+    status: ExitStatus,
+) -> SessionRuntimeError {
+    match inspect_runtime(launch) {
+        Ok(RuntimeInspection::Faulted { diagnostic, .. }) => {
+            SessionRuntimeError::Control(diagnostic)
+        }
+        Ok(_) => SessionRuntimeError::ChildExitedBeforeReady(status),
+        Err(error) => error,
     }
 }
 
@@ -1095,7 +1108,9 @@ fn validate_runtime_metadata(
 ) -> Result<(), String> {
     validate_runtime_identity(metadata, launch)?;
     if metadata.state != RuntimeMetadataState::Ready {
-        return Err("Session Runtime is Faulted and cannot accept control requests".to_string());
+        return Err(metadata.last_failure.clone().unwrap_or_else(|| {
+            "Session Runtime is Faulted and cannot accept control requests".to_string()
+        }));
     }
     Ok(())
 }
@@ -1131,7 +1146,18 @@ fn run_owned_session(
     launch: &SessionRuntimeLaunch<'_>,
     launch_id: &str,
 ) -> Result<(), SessionRuntimeError> {
-    crate::herdr_contract::validate_live(launch.socket)?;
+    run_owned_session_with_contract_validator(launch, launch_id, |socket| {
+        crate::herdr_contract::validate_live(socket)
+    })
+}
+
+fn run_owned_session_with_contract_validator(
+    launch: &SessionRuntimeLaunch<'_>,
+    launch_id: &str,
+    validate_contract: impl FnOnce(
+        &SessionSocket,
+    ) -> Result<(), crate::herdr_contract::HerdrContractError>,
+) -> Result<(), SessionRuntimeError> {
     let paths = RuntimePaths::for_launch(launch);
     ensure_private_directory(launch.state_base)?;
     if let Some(runtimes_root) = paths.directory.parent() {
@@ -1143,6 +1169,19 @@ fn run_owned_session(
     let binary_identity = crate::startup::binary_identity(launch.binary_path)
         .to_string_lossy()
         .into_owned();
+    if let Err(error) = validate_contract(launch.socket) {
+        let error = SessionRuntimeError::HerdrContract(error);
+        write_initial_runtime_fault(
+            &paths.metadata,
+            launch,
+            launch_id,
+            &binary_identity,
+            "",
+            None,
+            error.to_string(),
+        )?;
+        return Err(error);
+    }
     let config_path = match crate::config::path_from_env() {
         Ok(path) => path,
         Err(error) => {
@@ -1251,6 +1290,26 @@ fn write_initial_config_fault(
     config_path: &str,
     error: &crate::config::ConfigError,
 ) -> Result<(), SessionRuntimeError> {
+    write_initial_runtime_fault(
+        metadata_path,
+        launch,
+        launch_id,
+        binary_identity,
+        config_path,
+        Some(error.to_string()),
+        format!("invalid initial configuration: {error}"),
+    )
+}
+
+fn write_initial_runtime_fault(
+    metadata_path: &Path,
+    launch: &SessionRuntimeLaunch<'_>,
+    launch_id: &str,
+    binary_identity: &str,
+    config_path: &str,
+    latest_config_error: Option<String>,
+    diagnostic: String,
+) -> Result<(), SessionRuntimeError> {
     write_metadata(
         metadata_path,
         &RuntimeMetadata {
@@ -1267,9 +1326,9 @@ fn write_initial_config_fault(
             config_schema_version: None,
             config_source: None,
             selected_profile: None,
-            latest_config_error: Some(error.to_string()),
+            latest_config_error,
             last_evaluation_unix_ms: None,
-            last_failure: Some(format!("invalid initial configuration: {error}")),
+            last_failure: Some(diagnostic),
             next_periodic_unix_ms: None,
         },
     )
@@ -2446,6 +2505,60 @@ mod tests {
                 .expect("fixed configuration is retryable"),
             None
         );
+
+        fs::remove_dir_all(state_base).expect("remove state base");
+    }
+
+    #[test]
+    fn herdr_contract_failure_is_a_precise_persisted_runtime_fault() {
+        let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
+        let state_base = PathBuf::from("/tmp").join(format!(
+            "tby-contract-runtime-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&state_base).expect("state base");
+        let socket = SessionSocket::resolve(state_base.join("herdr.sock")).expect("socket");
+        let launch = SessionRuntimeLaunch {
+            socket: &socket,
+            state_base: &state_base,
+            binary_path: Path::new("/tmp/tabby"),
+        };
+        let paths = RuntimePaths::for_launch(&launch);
+        let diagnostic = "api schema request method `tab.rename` is missing";
+
+        let error = run_owned_session_with_contract_validator(&launch, "contract-fault", |_| {
+            assert!(
+                LifetimeLease::is_held(&paths.lifetime_lease).expect("inspect runtime lease"),
+                "contract validation must run under the Session Runtime Lease"
+            );
+            Err(crate::herdr_contract::HerdrContractError::Incompatible(
+                diagnostic.to_string(),
+            ))
+        })
+        .expect_err("contract mismatch");
+        assert!(error.to_string().contains(diagnostic));
+
+        let RuntimeInspection::Faulted {
+            diagnostic: persisted,
+            lease_held,
+            ..
+        } = inspect_runtime(&launch).expect("inspect contract fault")
+        else {
+            panic!("contract mismatch must persist a Faulted runtime");
+        };
+        assert!(persisted.contains(diagnostic));
+        assert!(
+            !lease_held,
+            "runtime lease must be released after the fault"
+        );
+
+        let surfaced = signal_ready_owner(&launch, RefreshTrigger::Startup)
+            .expect_err("faulted runtime cannot accept a trigger");
+        assert!(surfaced.to_string().contains(diagnostic));
+
+        let exit_status = Command::new("false").status().expect("run false");
+        let child_exit = classify_child_exit_before_readiness(&launch, exit_status);
+        assert!(child_exit.to_string().contains(diagnostic));
 
         fs::remove_dir_all(state_base).expect("remove state base");
     }
