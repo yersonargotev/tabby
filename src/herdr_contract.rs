@@ -339,6 +339,18 @@ fn validate_schema(schema: &Value, observed_protocol: u64) -> Result<(), HerdrCo
     let request = schema
         .pointer("/schemas/request")
         .ok_or_else(|| incompatible("api schema.schemas.request is missing"))?;
+    if request_accepts_type(schema, request, "object")? != Some(true) {
+        return Err(incompatible("api request envelope must be an object"));
+    }
+    reject_unsupported_required_fields(schema, request, &["id"], "api request envelope", 0, false)?;
+    require_request_field_type(
+        schema,
+        request,
+        "id",
+        "string",
+        true,
+        "api request envelope",
+    )?;
     validate_request_method(schema, request, "session.snapshot", &[])?;
     validate_request_method(
         schema,
@@ -486,6 +498,15 @@ fn validate_request_method(
 ) -> Result<(), HerdrContractError> {
     let variant = find_discriminator(root, request_schema, "method", method)?
         .ok_or_else(|| incompatible(format!("api schema request method `{method}` is missing")))?;
+    let envelope_context = format!("{method} request envelope");
+    reject_unsupported_required_fields(
+        root,
+        variant,
+        &["method", "params"],
+        &envelope_context,
+        0,
+        true,
+    )?;
     require_required(root, variant, "method", method)?;
     require_required(root, variant, "params", method)?;
     let params = property(root, variant, "params", method)?;
@@ -493,6 +514,7 @@ fn validate_request_method(
     if request_accepts_type(root, params, "object")? != Some(true) {
         return Err(incompatible(format!("{method} params must be an object")));
     }
+    let params_context = format!("{method} params");
     reject_unsupported_required_fields(
         root,
         params,
@@ -500,8 +522,9 @@ fn validate_request_method(
             .iter()
             .map(|(field, _, _)| *field)
             .collect::<Vec<_>>(),
-        method,
+        &params_context,
         0,
+        true,
     )?;
     for (field, expected_type, required) in fields {
         require_request_field_type(root, params, field, expected_type, *required, method)?;
@@ -515,6 +538,7 @@ fn reject_unsupported_required_fields(
     supported: &[&str],
     context: &str,
     depth: usize,
+    traverse_alternatives: bool,
 ) -> Result<(), HerdrContractError> {
     if depth > 16 {
         return Err(incompatible("api schema required-field chain is too deep"));
@@ -523,22 +547,45 @@ fn reject_unsupported_required_fields(
     if let Some(required) = object.get("required") {
         let required = required
             .as_array()
-            .ok_or_else(|| incompatible(format!("{context} params.required must be an array")))?;
+            .ok_or_else(|| incompatible(format!("{context}.required must be an array")))?;
         for field in required {
             let field = field.as_str().ok_or_else(|| {
-                incompatible(format!("{context} params.required entries must be strings"))
+                incompatible(format!("{context}.required entries must be strings"))
             })?;
             if !supported.contains(&field) {
                 return Err(incompatible(format!(
-                    "{context} params require unsupported field `{field}`"
+                    "{context} requires unsupported field `{field}`"
                 )));
             }
         }
     }
-    for combinator in ["allOf", "anyOf", "oneOf"] {
+    for combinator in ["allOf"] {
         if let Some(variants) = object.get(combinator).and_then(Value::as_array) {
             for variant in variants {
-                reject_unsupported_required_fields(root, variant, supported, context, depth + 1)?;
+                reject_unsupported_required_fields(
+                    root,
+                    variant,
+                    supported,
+                    context,
+                    depth + 1,
+                    traverse_alternatives,
+                )?;
+            }
+        }
+    }
+    if traverse_alternatives {
+        for combinator in ["anyOf", "oneOf"] {
+            if let Some(variants) = object.get(combinator).and_then(Value::as_array) {
+                for variant in variants {
+                    reject_unsupported_required_fields(
+                        root,
+                        variant,
+                        supported,
+                        context,
+                        depth + 1,
+                        true,
+                    )?;
+                }
             }
         }
     }
@@ -997,6 +1044,8 @@ fn has_only_supported_type_keywords(value: &Value) -> bool {
         matches!(
             key.as_str(),
             "$ref"
+                | "$defs"
+                | "$schema"
                 | "type"
                 | "anyOf"
                 | "oneOf"
@@ -1088,14 +1137,29 @@ fn find_discriminator_with_depth<'a>(
     let discriminators = properties_for_field(root, value, property, depth)?;
     let mut saw_expected = false;
     let mut contradiction = false;
+    let mut unsupported = false;
     for discriminator in discriminators {
         let discriminator = resolve(root, discriminator)?;
-        if let Some(actual) = discriminator.get("const").and_then(Value::as_str) {
+        if let Some(constant) = discriminator.get("const") {
+            let Some(actual) = constant.as_str() else {
+                contradiction = true;
+                continue;
+            };
             saw_expected |= actual == expected;
             contradiction |= actual != expected;
         }
+        match schema_accepts_string_instance(root, discriminator, expected, depth + 1)? {
+            Some(true) => {}
+            Some(false) => contradiction = true,
+            None => unsupported = true,
+        }
     }
-    if saw_expected && !contradiction {
+    if saw_expected {
+        if contradiction || unsupported {
+            return Err(incompatible(format!(
+                "api schema discriminator `{property}` for `{expected}` is contradictory or unsupported"
+            )));
+        }
         return Ok(Some(value));
     }
 
@@ -1112,6 +1176,130 @@ fn find_discriminator_with_depth<'a>(
         }
     }
     Ok(None)
+}
+
+fn schema_accepts_string_instance(
+    root: &Value,
+    value: &Value,
+    expected: &str,
+    depth: usize,
+) -> Result<Option<bool>, HerdrContractError> {
+    if depth > 16 {
+        return Err(incompatible("api schema discriminator chain is too deep"));
+    }
+    let value = resolve(root, value)?;
+    if let Some(accepted) = value.as_bool() {
+        return Ok(Some(accepted));
+    }
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "type"
+                | "const"
+                | "enum"
+                | "anyOf"
+                | "oneOf"
+                | "allOf"
+                | "description"
+                | "title"
+                | "default"
+                | "examples"
+                | "deprecated"
+                | "readOnly"
+                | "writeOnly"
+                | "$comment"
+        )
+    }) {
+        return Ok(None);
+    }
+
+    let mut accepted = Some(true);
+    if let Some(types) = object.get("type") {
+        let accepts_string = match types {
+            Value::String(actual) => Some(actual == "string"),
+            Value::Array(actual) if actual.iter().all(Value::is_string) => Some(
+                actual
+                    .iter()
+                    .any(|actual| actual.as_str() == Some("string")),
+            ),
+            _ => None,
+        };
+        accepted = and_acceptance(accepted, accepts_string);
+    }
+    if let Some(constant) = object.get("const") {
+        accepted = and_acceptance(accepted, Some(constant.as_str() == Some(expected)));
+    }
+    if let Some(values) = object.get("enum") {
+        let contains_expected = values
+            .as_array()
+            .map(|values| values.iter().any(|value| value.as_str() == Some(expected)));
+        accepted = and_acceptance(accepted, contains_expected);
+    }
+    for combinator in ["allOf", "anyOf", "oneOf"] {
+        let Some(variants) = object.get(combinator) else {
+            continue;
+        };
+        let Some(variants) = variants.as_array() else {
+            accepted = and_acceptance(accepted, None);
+            continue;
+        };
+        let mut results = Vec::with_capacity(variants.len());
+        for variant in variants {
+            results.push(schema_accepts_string_instance(
+                root,
+                variant,
+                expected,
+                depth + 1,
+            )?);
+        }
+        let combined = match combinator {
+            "allOf" => all_acceptance(&results),
+            "anyOf" => any_acceptance(&results),
+            "oneOf" => one_acceptance(&results),
+            _ => unreachable!(),
+        };
+        accepted = and_acceptance(accepted, combined);
+    }
+    Ok(accepted)
+}
+
+fn and_acceptance(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+
+fn all_acceptance(results: &[Option<bool>]) -> Option<bool> {
+    results.iter().copied().fold(Some(true), and_acceptance)
+}
+
+fn any_acceptance(results: &[Option<bool>]) -> Option<bool> {
+    if results.contains(&Some(true)) {
+        Some(true)
+    } else if results.iter().any(Option::is_none) {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+fn one_acceptance(results: &[Option<bool>]) -> Option<bool> {
+    let matches = results
+        .iter()
+        .filter(|result| **result == Some(true))
+        .count();
+    if matches > 1 {
+        Some(false)
+    } else if results.iter().any(Option::is_none) {
+        None
+    } else {
+        Some(matches == 1)
+    }
 }
 
 fn incompatible(message: impl Into<String>) -> HerdrContractError {
@@ -1165,6 +1353,10 @@ mod tests {
             "protocol": protocol,
             "schemas": {
                 "request": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
                     "oneOf": [
                         {"type":"object","properties":{"method":{"const":"session.snapshot"},"params":{"$ref":"#/schemas/request/$defs/EmptyParams"}},"required":["method","params"]},
                         {"type":"object","properties":{"method":{"const":"tab.rename"},"params":{"$ref":"#/schemas/request/$defs/TabRenameParams"}},"required":["method","params"]},
@@ -1427,6 +1619,52 @@ mod tests {
         let error = validate_schema(&rename_extra, 20).expect_err("unsupported rename param");
         assert!(error.to_string().contains("tab.rename"));
         assert!(error.to_string().contains("workspace_id"));
+    }
+
+    #[test]
+    fn rejects_request_envelope_fields_that_tabby_cannot_supply() {
+        let mut schema = compatible_schema(20);
+        let rename = schema["schemas"]["request"]["oneOf"]
+            .as_array_mut()
+            .expect("request variants")
+            .iter_mut()
+            .find(|variant| variant["properties"]["method"]["const"] == "tab.rename")
+            .expect("tab.rename variant");
+        rename["properties"]["auth_token"] = json!({"type": "string"});
+        rename["required"]
+            .as_array_mut()
+            .expect("required fields")
+            .push(json!("auth_token"));
+
+        let error = validate_schema(&schema, 20).expect_err("unsupported request envelope field");
+        assert!(error.to_string().contains("tab.rename"));
+        assert!(error.to_string().contains("auth_token"));
+    }
+
+    #[test]
+    fn rejects_contradictory_discriminator_constraints() {
+        let mut request = compatible_schema(20);
+        request["schemas"]["request"]["oneOf"][1]["properties"]["method"]["type"] =
+            json!("integer");
+        let error = validate_schema(&request, 20).expect_err("impossible request discriminator");
+        assert!(error.to_string().contains("tab.rename"));
+
+        let mut response = compatible_schema(20);
+        response["schemas"]["success_response"]["$defs"]["ResponseResult"]["oneOf"][0]["properties"]
+            ["type"]["type"] = json!("integer");
+        let error = validate_schema(&response, 20).expect_err("impossible response discriminator");
+        assert!(error.to_string().contains("session_snapshot"));
+
+        let mut composed = compatible_schema(20);
+        let rename = composed["schemas"]["request"]["oneOf"][1].take();
+        composed["schemas"]["request"]["oneOf"][1] = json!({
+            "allOf": [
+                {"properties": {"method": {"const": "tab.rename"}}, "required": ["method"]},
+                {"type": "object", "properties": {"method": {"type": "integer"}, "params": rename["properties"]["params"].clone()}, "required": ["params"]}
+            ]
+        });
+        let error = validate_schema(&composed, 20).expect_err("contradictory allOf discriminator");
+        assert!(error.to_string().contains("tab.rename"));
     }
 
     #[test]

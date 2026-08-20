@@ -1,10 +1,15 @@
 # Issue 94 Herdr contract matrix evidence
 
-Date: 2026-08-19
+Date: 2026-08-20
 
 Host contract: Apple Silicon macOS
 
-Tabby implementation commit: `399a782121858378edfff5e9e07d65af19667257`
+Tabby source under test:
+
+- base commit: `eb834a94df49cb19e2b2029e2bd11bd714304df6`;
+- `src/herdr_contract.rs` SHA-256: `5d18347b7f3f87e8f887dddf1185daa7f8decd8e9d7a0eb3b3edd6f9302ce45f`.
+
+The base commit plus source-file fingerprint identifies the exact implementation tested independently of the later documentation commit.
 
 Result: passed
 
@@ -12,10 +17,10 @@ Result: passed
 
 | Herdr version | Protocol | Binary source | Result |
 | --- | ---: | --- | --- |
-| 0.8.0 | 19 | Existing Homebrew installation at `/opt/homebrew/bin/herdr` | Passed |
+| 0.8.0 | 19 | Official Apple Silicon binary from the [Herdr v0.8.0 release](https://github.com/herdrdev/herdr/releases/tag/v0.8.0), SHA-256 `d53a9f93fccfdfcc55632927bf51002f5add0aa7990bcdf508ffbd84ac658178` | Passed |
 | 0.8.2 | 20 | Official Apple Silicon binary from the [Herdr v0.8.2 release](https://github.com/herdrdev/herdr/releases/tag/v0.8.2), SHA-256 `a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574` | Passed |
 
-The 0.8.2 binary ran from an isolated temporary directory. The operator's installed 0.8.0 binary was not replaced or modified. These results are the mandatory real-runtime evidence matrix for the JSON socket contract Tabby consumes; they are not a permanent version/protocol runtime allowlist.
+Both official binaries ran from isolated temporary directories. The operator's installed Herdr 0.8.2 binary was not replaced or modified. These results are the mandatory real-runtime evidence matrix for the JSON socket contract Tabby consumes; they are not a permanent version/protocol runtime allowlist.
 
 ## Reproduction
 
@@ -54,4 +59,4 @@ The two runs exercised the same behavior matrix against the default and named He
 | Registered binary handoff | A Homebrew-shaped binary became the sole Ready owner, then control returned to the plugin-root binary without overlapping owners. |
 | Session stop and restore | The default owner stopped with the Herdr server; restore created a different owner and retained the label and Manually Locked Tab state. |
 
-The harness removed only its validated temporary roots after stopping both isolated servers. At the recorded implementation commit, both runs exercised the dynamic gate itself: the host-selected absolute `HERDR_BIN_PATH`, minimum release and protocol, required JSON schema subset, exact socket identity, and read-only live probes all validated before each Session Runtime became Ready. Deterministic contract tests complement this live proof by rejecting older or contradictory status, malformed schema output, incompatible request and response shapes, failed probes, relative binary paths, and ambiguous response unions while accepting a compatible protocol 21 fixture. The recorded binaries, transcript counts, assertions, checksum, and observed lifecycle outcomes prove the required contract across protocols 19 and 20 without making that pair a permanent runtime allowlist.
+The harness removed only its validated temporary roots after stopping both isolated servers. On the fingerprinted source under test, both runs exercised the dynamic gate itself: the host-selected absolute `HERDR_BIN_PATH`, minimum release and protocol, required JSON schema subset, exact socket identity, and read-only live probes all validated before each Session Runtime became Ready. Deterministic contract tests complement this live proof by rejecting older or contradictory status, malformed schema output, incompatible request and response shapes, unsupported required envelope fields, contradictory discriminators, failed probes, relative binary paths, and ambiguous response unions while accepting a compatible protocol 21 fixture. The recorded binaries, transcript counts, assertions, checksums, and observed lifecycle outcomes prove the required contract across protocols 19 and 20 without making that pair a permanent runtime allowlist.
