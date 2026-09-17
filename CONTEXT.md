@@ -13,7 +13,7 @@ A foreground app or command that is stable and meaningful enough to represent th
 _Avoid_: foreground process, process name, app
 
 **Working Directory Suffix**:
-The configured number of trailing path components from the focused pane's current working directory, used only when there is no Significant Command candidate. It defaults to one component, so `/Users/me/dev/dots` becomes `dots`; with two components it becomes `dev/dots`.
+The configured number of trailing path components from the focused pane's current working directory. It is the fallback when there is no Significant Command and may also provide directory context within a contextual Significant Command label; it defaults to one component, so `/Users/me/dev/dots` becomes `dots`, while two components become `dev/dots`.
 _Avoid_: Working Directory Basename, full path, cwd label
 
 **Manually Locked Tab**:
@@ -110,7 +110,7 @@ The pane within the focused tab that Herdr reports as focused. If no pane in the
 _Avoid_: active pane, selected pane
 
 **Label Policy**:
-The validated rules used to turn process and cwd data into a Tab Label Candidate, including Significant Command allowlists, ignored commands, runner/subcommand pairs, command aliases, exact lexical directory aliases, explicit classified-candidate prefixes, Unicode-scalar and optional display-cell limits, and trailing Working Directory components. Directory aliases apply only to Working Directory Suffix fallback and preserve distinct symlink spellings. Prefixes apply after command classification and aliases; Tabby forms one final label before enforcing its limits. A selected profile compiles one complete policy for one exact Session Identity; profiles inherit only other profiles and built-ins, while the global policy is the fallback for sessions without a selector. Version 1 starts from tested built-in defaults and may extend or present them through `config.toml`; runtime timing and safety guarantees are not part of Label Policy configuration.
+The validated rules used to turn process and cwd data into a Tab Label Candidate, including Significant Command allowlists, ignored commands, runner/subcommand pairs, command aliases, exact lexical directory aliases, explicit classified-candidate prefixes, command presentation format, Unicode-scalar and optional display-cell limits, and trailing Working Directory components. Directory aliases present the Working Directory Suffix both as a fallback and as opt-in context beside a Significant Command while preserving distinct symlink spellings. Prefixes apply after command classification and aliases; Tabby forms one final label before enforcing its limits. A selected profile compiles one complete policy for one exact Session Identity; profiles inherit only other profiles and built-ins, while the global policy is the fallback for sessions without a selector. Version 1 starts from tested built-in defaults and may extend or present them through `config.toml`; runtime timing and safety guarantees are not part of Label Policy configuration.
 _Avoid_: config, preferences, ruleset
 
 **Process Inspector**:
