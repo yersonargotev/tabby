@@ -2756,7 +2756,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_reload_atomically_activates_presentation_and_retains_directory_aliases() {
+    fn runtime_config_reload_atomically_switches_contextual_presentation_and_retains_policy() {
         let unique = NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed);
         let directory = PathBuf::from("/tmp").join(format!(
             "tby-directory-alias-reload-test-{}-{unique}",
@@ -2795,18 +2795,18 @@ mod tests {
 
         fs::write(
             &config_path,
-            "version = 1\n[profiles.first.labels.prefixes]\nnvim = \"first: \"\n[profiles.first.directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n[[session_selectors]]\nprofile = \"first\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
+            "version = 1\n[profiles.first.labels]\ncommand_format = \"command_and_directory\"\n[profiles.first.labels.prefixes]\nnvim = \"first: \"\n[profiles.first.directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n[[session_selectors]]\nprofile = \"first\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
         )
         .expect("initial alias config");
         reload_config(&mut state, &runtime_config, &mut metadata).expect("activate initial alias");
         assert_eq!(reload_candidate(&state), "first");
-        assert_eq!(reload_significant_candidate(&state), "first: nvim");
+        assert_eq!(reload_significant_candidate(&state), "first: nvim · first");
         assert_eq!(metadata.selected_profile.as_deref(), Some("first"));
 
         fs::write(&config_path, "version = 2\n").expect("rejected alias config");
         assert!(reload_config(&mut state, &runtime_config, &mut metadata).is_err());
         assert_eq!(reload_candidate(&state), "first");
-        assert_eq!(reload_significant_candidate(&state), "first: nvim");
+        assert_eq!(reload_significant_candidate(&state), "first: nvim · first");
         assert_eq!(metadata.selected_profile.as_deref(), Some("first"));
         assert!(
             metadata
@@ -2817,7 +2817,7 @@ mod tests {
 
         fs::write(
             &config_path,
-            "version = 1\n[profiles.second.labels.prefixes]\nnvim = \"second: \"\n[profiles.second.directories.aliases]\n\"/Users/me/dev/tabby\" = \"second\"\n[[session_selectors]]\nprofile = \"second\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
+            "version = 1\n[profiles.second.labels]\ncommand_format = \"command_only\"\n[profiles.second.labels.prefixes]\nnvim = \"second: \"\n[profiles.second.directories.aliases]\n\"/Users/me/dev/tabby\" = \"second\"\n[[session_selectors]]\nprofile = \"second\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
         )
         .expect("replacement alias config");
         reload_config(&mut state, &runtime_config, &mut metadata)

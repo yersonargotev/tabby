@@ -14,6 +14,14 @@ const DEFAULT_RUNNER_SUBCOMMANDS: &[(&str, &str)] = &[
 const DEFAULT_IGNORED_COMMANDS: &[&str] = &[
     "bash", "dash", "env", "fish", "login", "nu", "screen", "sh", "sudo", "tmux", "zsh",
 ];
+const COMMAND_DIRECTORY_SEPARATOR: &str = " · ";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CommandFormat {
+    #[default]
+    CommandOnly,
+    CommandAndDirectory,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelCandidate {
@@ -59,6 +67,7 @@ pub(crate) struct LabelPresentation {
     pub max_length: usize,
     pub max_display_width: Option<usize>,
     pub cwd_components: usize,
+    pub command_format: CommandFormat,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +82,7 @@ pub struct LabelPolicy {
     max_length: usize,
     max_display_width: Option<usize>,
     cwd_components: usize,
+    command_format: CommandFormat,
 }
 
 impl Default for LabelPolicy {
@@ -97,6 +107,7 @@ impl Default for LabelPolicy {
             max_length: 32,
             max_display_width: None,
             cwd_components: 1,
+            command_format: CommandFormat::CommandOnly,
         }
     }
 }
@@ -126,6 +137,7 @@ impl LabelPolicy {
         policy.max_length = presentation.max_length;
         policy.max_display_width = presentation.max_display_width;
         policy.cwd_components = presentation.cwd_components;
+        policy.command_format = presentation.command_format;
         policy
     }
 
@@ -158,9 +170,17 @@ impl LabelPolicy {
         if let Some(process_info) = process_info.filter(|info| info.pane_id == pane.pane_id)
             && let Some(label) = self.significant_command(process_info)
         {
-            return Some(LabelCandidate::significant_command(
-                self.present_significant_command(&label),
-            ));
+            let command = self.significant_command_presentation(&label);
+            let presented = match self.command_format {
+                CommandFormat::CommandOnly => self.truncate_final(&command),
+                CommandFormat::CommandAndDirectory => {
+                    self.working_directory_label(pane).map_or_else(
+                        || self.truncate_grapheme_prefix(&command),
+                        |directory| self.present_command_and_directory(&command, &directory),
+                    )
+                }
+            };
+            return Some(LabelCandidate::significant_command(presented));
         }
 
         self.working_directory_label(pane)
@@ -237,7 +257,7 @@ impl LabelPolicy {
         (!components.is_empty()).then(|| components[start..].join("/"))
     }
 
-    fn present_significant_command(&self, classified: &str) -> String {
+    fn significant_command_presentation(&self, classified: &str) -> String {
         let alias = self
             .aliases
             .get(classified)
@@ -248,7 +268,97 @@ impl LabelPolicy {
             .get(classified)
             .map(String::as_str)
             .unwrap_or("");
-        self.truncate_final(&format!("{prefix}{alias}"))
+        format!("{prefix}{alias}")
+    }
+
+    fn present_command_and_directory(&self, command: &str, directory: &str) -> String {
+        let full = format!("{command}{COMMAND_DIRECTORY_SEPARATOR}{directory}");
+        if self.fits(&full) {
+            return full;
+        }
+
+        let command_graphemes = command.graphemes(true).collect::<Vec<_>>();
+        let directory_graphemes = directory.graphemes(true).collect::<Vec<_>>();
+        let Some(first_command) = command_graphemes.first() else {
+            return String::new();
+        };
+        let Some(last_directory) = directory_graphemes.last() else {
+            return self.truncate_grapheme_prefix(command);
+        };
+        let minimum = format!("{first_command}{COMMAND_DIRECTORY_SEPARATOR}{last_directory}");
+        if !self.fits(&minimum) {
+            return self.truncate_grapheme_prefix(command);
+        }
+
+        let mut command_count = 1;
+        let mut directory_start = directory_graphemes.len() - 1;
+        let mut prefer_command = true;
+        loop {
+            let can_grow_command = command_count < command_graphemes.len();
+            let can_grow_directory = directory_start > 0;
+            if !can_grow_command && !can_grow_directory {
+                break;
+            }
+
+            let mut grew = false;
+            for grow_command in [prefer_command, !prefer_command] {
+                let next_command_count = command_count + usize::from(grow_command);
+                let next_directory_start =
+                    directory_start.saturating_sub(usize::from(!grow_command));
+                if (grow_command && !can_grow_command) || (!grow_command && !can_grow_directory) {
+                    continue;
+                }
+                let candidate = format!(
+                    "{}{COMMAND_DIRECTORY_SEPARATOR}{}",
+                    command_graphemes[..next_command_count].concat(),
+                    directory_graphemes[next_directory_start..].concat()
+                );
+                if self.fits(&candidate) {
+                    command_count = next_command_count;
+                    directory_start = next_directory_start;
+                    prefer_command = !grow_command;
+                    grew = true;
+                    break;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        format!(
+            "{}{COMMAND_DIRECTORY_SEPARATOR}{}",
+            command_graphemes[..command_count].concat(),
+            directory_graphemes[directory_start..].concat()
+        )
+    }
+
+    fn fits(&self, label: &str) -> bool {
+        label.chars().count() <= self.max_length
+            && self
+                .max_display_width
+                .is_none_or(|maximum| UnicodeWidthStr::width(label) <= maximum)
+    }
+
+    fn truncate_grapheme_prefix(&self, label: &str) -> String {
+        let mut scalar_count = 0;
+        let mut display_width = 0;
+        label
+            .graphemes(true)
+            .take_while(|grapheme| {
+                let next_scalar_count = scalar_count + grapheme.chars().count();
+                let next_display_width = display_width + UnicodeWidthStr::width(*grapheme);
+                let fits = next_scalar_count <= self.max_length
+                    && self
+                        .max_display_width
+                        .is_none_or(|maximum| next_display_width <= maximum);
+                if fits {
+                    scalar_count = next_scalar_count;
+                    display_width = next_display_width;
+                }
+                fits
+            })
+            .collect()
     }
 
     fn truncate_final(&self, label: &str) -> String {
@@ -518,6 +628,7 @@ mod tests {
                 max_length: 5,
                 max_display_width: None,
                 cwd_components: 1,
+                command_format: CommandFormat::CommandOnly,
             },
         );
 
@@ -576,6 +687,7 @@ mod tests {
                     max_length: 32,
                     max_display_width: Some(max_display_width),
                     cwd_components: 1,
+                    command_format: CommandFormat::CommandOnly,
                 },
             )
         };
@@ -598,6 +710,7 @@ mod tests {
                 max_length: 2,
                 max_display_width: None,
                 cwd_components: 1,
+                command_format: CommandFormat::CommandOnly,
             },
         );
         assert_eq!(label(&scalar_policy, "combining"), "e\u{301}");

@@ -106,6 +106,7 @@ Session Runtime details: launch_id=launch-1 binary=/opt/tabby/bin/tabby last_eva
                 "concurrent-hook-coalescing",
                 "focus-quiet-and-periodic-cadence",
                 "fixed-focus-command-and-cwd-fallback",
+                "contextual-command-directory-labels",
                 "client-attach-detach",
                 "manual-lock-stop-restore",
                 "session-policy-profile-selection-and-local-reload",

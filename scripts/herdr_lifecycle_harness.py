@@ -139,6 +139,7 @@ def plan(
             "concurrent-hook-coalescing",
             "focus-quiet-and-periodic-cadence",
             "fixed-focus-command-and-cwd-fallback",
+            "contextual-command-directory-labels",
             "client-attach-detach",
             "manual-lock-stop-restore",
             "session-policy-profile-selection-and-local-reload",
@@ -766,12 +767,17 @@ def write_records(output: Path, records: Iterable[Dict[str, Any]]) -> None:
     output.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
 
 
-def write_session_profile_config(path: Path, named_alias: str) -> None:
+def write_session_profile_config(
+    path: Path, named_alias: str, command_format: str = "command_and_directory"
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
             [
                 "version = 1",
+                "",
+                "[profiles.named.labels]",
+                f"command_format = {json.dumps(command_format)}",
                 "",
                 "[profiles.named.directories.aliases]",
                 f"{json.dumps(str(REPO_ROOT))} = {json.dumps(named_alias)}",
@@ -895,7 +901,9 @@ def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
             str(REPO_ROOT),
             "--focus",
         )
-        named_tab_id = json.loads(named_created.stdout)["result"]["tab"]["tab_id"]
+        named_result = json.loads(named_created.stdout)["result"]
+        named_tab_id = named_result["tab"]["tab_id"]
+        named_pane_id = named_result["root_pane"]["pane_id"]
         named.wait_for_label("named-policy")
         if default_tab_id != named_tab_id:
             raise HarnessFailure("expected equal first tab IDs in default and named sessions")
@@ -919,8 +927,37 @@ def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
             "Session-Scoped Tab State resolved under isolated Herdr state, outside the plugin source root",
         )
 
-        write_session_profile_config(tabby_config, "named-policy-v2")
+        named.herdr(
+            "run-contextual-significant-command",
+            "pane",
+            "run",
+            named_pane_id,
+            "nvim",
+            "--clean",
+            "-u",
+            "NONE",
+        )
+        named.wait_for_label("nvim · named-policy", timeout=15.0)
+        recorder.assertion(
+            "named",
+            "contextual-command-directory-label",
+            "the selected profile presented one focused Significant Command with its directory alias while the default session retained manual intent",
+        )
+
+        write_session_profile_config(tabby_config, "named-policy-v2", "command_only")
         named.tabby("reload-named-policy", "config", "reload")
+        named.wait_for_label("nvim")
+        named.herdr(
+            "leave-contextual-significant-command",
+            "pane",
+            "send-keys",
+            named_pane_id,
+            "esc",
+            ":",
+            "q",
+            "!",
+            "enter",
+        )
         named.wait_for_label("named-policy-v2")
         if default.focused_tab_label() != "manual-contract":
             raise HarnessFailure("named-session reload changed the default session label")
@@ -937,7 +974,7 @@ def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
             raise HarnessFailure("rejected reload was not reported through Runtime Status")
         if "latest_error=<none>" not in default.tabby_status_text():
             raise HarnessFailure("named-session reload error leaked into the default runtime")
-        write_session_profile_config(tabby_config, "named-policy-v2")
+        write_session_profile_config(tabby_config, "named-policy-v2", "command_only")
         recorder.assertion(
             "all",
             "session-local-policy-reload",

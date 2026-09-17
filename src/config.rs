@@ -1,6 +1,6 @@
 //! Versioned user configuration compiled into one validated Label Policy.
 
-use crate::labeler::{LabelPolicy, LabelPresentation};
+use crate::labeler::{CommandFormat, LabelPolicy, LabelPresentation};
 use crate::startup::SessionSocket;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,7 +39,24 @@ struct LabelsConfig {
     max_length: Option<usize>,
     max_display_width: Option<usize>,
     cwd_components: Option<usize>,
+    command_format: Option<CommandFormatConfig>,
     prefixes: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CommandFormatConfig {
+    CommandOnly,
+    CommandAndDirectory,
+}
+
+impl From<CommandFormatConfig> for CommandFormat {
+    fn from(value: CommandFormatConfig) -> Self {
+        match value {
+            CommandFormatConfig::CommandOnly => Self::CommandOnly,
+            CommandFormatConfig::CommandAndDirectory => Self::CommandAndDirectory,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -382,6 +399,10 @@ fn compile_policy(
             max_length: labels.max_length.unwrap_or(32),
             max_display_width: labels.max_display_width,
             cwd_components: labels.cwd_components.unwrap_or(1),
+            command_format: labels
+                .command_format
+                .unwrap_or(CommandFormatConfig::CommandOnly)
+                .into(),
         },
     ))
 }
@@ -571,6 +592,7 @@ fn merge_profiles(
         .max_display_width
         .or(parent.labels.max_display_width);
     parent.labels.cwd_components = child.labels.cwd_components.or(parent.labels.cwd_components);
+    parent.labels.command_format = child.labels.command_format.or(parent.labels.command_format);
     merge_map(
         &mut parent.labels.prefixes,
         &child.labels.prefixes,
@@ -789,6 +811,221 @@ mod tests {
             .expect("Working Directory Suffix");
 
         assert_eq!(candidate.label(), "tabby");
+    }
+
+    #[test]
+    fn contextual_format_distinguishes_commands_in_different_directories() {
+        let contextual =
+            parse("version = 1\n[labels]\ncommand_format = \"command_and_directory\"\n")
+                .expect("contextual configuration");
+        let legacy = parse("version = 1\n[labels]\ncommand_format = \"command_only\"\n")
+            .expect("legacy configuration");
+
+        for (path, command, expected) in [
+            ("/Users/me/dev/tabby", "codex", "codex · tabby"),
+            ("/Users/me/dev/tabby", "nvim", "nvim · tabby"),
+            (
+                "/Users/me/dev/packy-project/packy-catalog",
+                "codex",
+                "codex · packy-catalog",
+            ),
+            (
+                "/Users/me/dev/packy-project/packy-catalog",
+                "nvim",
+                "nvim · packy-catalog",
+            ),
+        ] {
+            let pane = pane_with_path(path);
+            let process = process(command, &[command]);
+            let contextual_candidate = contextual
+                .policy()
+                .candidate_for_pane(&pane, Some(&process))
+                .expect("contextual Significant Command candidate");
+            assert_eq!(contextual_candidate.label(), expected);
+            assert_eq!(
+                contextual_candidate.source(),
+                crate::labeler::LabelCandidateSource::SignificantCommand
+            );
+            assert_eq!(label_for(&legacy, &pane, Some(&process)), command);
+        }
+    }
+
+    #[test]
+    fn contextual_format_reuses_existing_classification_and_directory_rules() {
+        let loaded = parse(
+            r#"
+version = 1
+[labels]
+command_format = "command_and_directory"
+cwd_components = 2
+[labels.prefixes]
+"pnpm lint" = "run: "
+[commands]
+additional_ignored = ["lazygit"]
+[commands.runners]
+pnpm = ["lint"]
+[commands.aliases]
+"pnpm lint" = "style"
+[directories.aliases]
+"/Users/me/dev/aliased" = "project"
+"#,
+        )
+        .expect("contextual policy");
+
+        let mut pane = pane_with_path("/Users/me/dev/fallback");
+        pane.foreground_cwd = Some("/Users/me/dev/aliased".to_string());
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("pnpm", &["pnpm", "lint"]))),
+            "run: style · project"
+        );
+
+        pane.foreground_cwd = None;
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("pnpm", &["pnpm", "lint"]))),
+            "run: style · dev/fallback"
+        );
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("lazygit", &["lazygit"]))),
+            "dev/fallback"
+        );
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("python", &["python"]))),
+            "dev/fallback"
+        );
+
+        for (path, expected) in [
+            ("/Users/me/one/src", "nvim · one/src"),
+            ("/Users/me/two/src", "nvim · two/src"),
+        ] {
+            assert_eq!(
+                label_for(
+                    &loaded,
+                    &pane_with_path(path),
+                    Some(&process("nvim", &["nvim"]))
+                ),
+                expected
+            );
+        }
+
+        let mut mismatched = process("nvim", &["nvim"]);
+        mismatched.pane_id = "other:pane".to_string();
+        assert_eq!(label_for(&loaded, &pane, Some(&mismatched)), "dev/fallback");
+
+        pane.cwd = None;
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("nvim", &["nvim"]))),
+            "nvim"
+        );
+    }
+
+    #[test]
+    fn contextual_format_inherits_and_overrides_with_profile_isolation() {
+        let contextual_session =
+            SessionSocket::resolve("/tmp/contextual/herdr.sock").expect("contextual session");
+        let override_session =
+            SessionSocket::resolve("/tmp/override/herdr.sock").expect("override session");
+        let global_session = SessionSocket::resolve("/tmp/global/herdr.sock").expect("global");
+        let config = r#"
+version = 1
+[labels]
+command_format = "command_and_directory"
+[profiles.parent.labels]
+command_format = "command_and_directory"
+[profiles.inherited]
+extends = "parent"
+[profiles.legacy]
+extends = "parent"
+[profiles.legacy.labels]
+command_format = "command_only"
+[[session_selectors]]
+profile = "inherited"
+identity = "/tmp/contextual/herdr.sock"
+[[session_selectors]]
+profile = "legacy"
+identity = "/tmp/override/herdr.sock"
+"#;
+
+        let contextual = parse_with_home(config, None, Some(&contextual_session))
+            .expect("inherited contextual profile");
+        let overridden = parse_with_home(config, None, Some(&override_session))
+            .expect("overridden legacy profile");
+        let global =
+            parse_with_home(config, None, Some(&global_session)).expect("global contextual policy");
+
+        assert_eq!(candidate(&contextual, "nvim", &["nvim"]), "nvim · tabby");
+        assert_eq!(candidate(&overridden, "nvim", &["nvim"]), "nvim");
+        assert_eq!(candidate(&global, "nvim", &["nvim"]), "nvim · tabby");
+    }
+
+    #[test]
+    fn contextual_abbreviation_preserves_graphemes_and_both_ends_when_possible() {
+        for (labels, aliases, expected) in [
+            (
+                "command_format = \"command_and_directory\"\nmax_length = 13",
+                "",
+                "codex · tabby",
+            ),
+            (
+                "command_format = \"command_and_directory\"\nmax_length = 10",
+                "",
+                "code · bby",
+            ),
+            (
+                "command_format = \"command_and_directory\"\nmax_length = 4",
+                "",
+                "code",
+            ),
+            (
+                "command_format = \"command_and_directory\"\nmax_length = 6\nmax_display_width = 8",
+                "[commands.aliases]\ncodex = \"甲乙\"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"项目\"",
+                "甲 · 目",
+            ),
+            (
+                "command_format = \"command_and_directory\"\nmax_length = 8",
+                "[commands.aliases]\ncodex = \"éx\"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"👩‍💻z\"",
+                "éx · z",
+            ),
+            (
+                "command_format = \"command_and_directory\"\nmax_length = 10",
+                "[commands.aliases]\ncodex = \"éx\"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"👩‍💻z\"",
+                "éx · 👩‍💻z",
+            ),
+            (
+                "command_format = \"command_and_directory\"\nmax_length = 12",
+                "[commands.aliases]\ncodex = \"abcdefghij\"\n[directories.aliases]\n\"/Users/me/dev/tabby\" = \"klmnopqrst\"",
+                "abcde · qrst",
+            ),
+        ] {
+            let config = format!("version = 1\n[labels]\n{labels}\n{aliases}\n");
+            let loaded = parse(&config).expect("bounded contextual policy");
+            assert_eq!(candidate(&loaded, "codex", &["codex"]), expected);
+        }
+
+        let contextual = parse(
+            "version = 1\n[labels]\ncommand_format = \"command_and_directory\"\nmax_length = 1\n[commands.aliases]\ncodex = \"éx\"\n",
+        )
+        .expect("tiny contextual policy");
+        let legacy = parse(
+            "version = 1\n[labels]\ncommand_format = \"command_only\"\nmax_length = 1\n[commands.aliases]\ncodex = \"éx\"\n",
+        )
+        .expect("tiny legacy policy");
+        assert_eq!(candidate(&contextual, "codex", &["codex"]), "");
+        assert_eq!(candidate(&legacy, "codex", &["codex"]), "e");
+    }
+
+    #[test]
+    fn command_format_parse_errors_identify_the_field() {
+        for contents in [
+            "version = 1\n[labels]\ncommand_format = \"unknown\"",
+            "version = 1\n[labels]\ncommand_format = 1",
+            "version = 1\n[profiles.work.labels]\ncommand_format = false",
+        ] {
+            let error = parse(contents).expect_err("invalid command format");
+            assert!(
+                error.to_string().contains("command_format"),
+                "diagnostic did not identify command_format: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1282,6 +1519,10 @@ nvim = "vim"
     }
 
     fn pane_with_cwd(basename: &str) -> PaneInfo {
+        pane_with_path(&format!("/Users/me/dev/{basename}"))
+    }
+
+    fn pane_with_path(path: &str) -> PaneInfo {
         PaneInfo {
             pane_id: "workspace:pane".to_string(),
             terminal_id: Some("terminal".to_string()),
@@ -1290,7 +1531,7 @@ nvim = "vim"
             focused: true,
             label: None,
             title: None,
-            cwd: Some(format!("/Users/me/dev/{basename}")),
+            cwd: Some(path.to_string()),
             foreground_cwd: None,
             agent: None,
             display_agent: None,
