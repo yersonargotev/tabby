@@ -15,12 +15,14 @@ const DEFAULT_IGNORED_COMMANDS: &[&str] = &[
     "bash", "dash", "env", "fish", "login", "nu", "screen", "sh", "sudo", "tmux", "zsh",
 ];
 const COMMAND_DIRECTORY_SEPARATOR: &str = " · ";
+const DIRECTORY_COMMAND_SEPARATOR: &str = " > ";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum CommandFormat {
     #[default]
     CommandOnly,
     CommandAndDirectory,
+    DirectoryAndCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +178,13 @@ impl LabelPolicy {
                 CommandFormat::CommandAndDirectory => {
                     self.working_directory_label(pane).map_or_else(
                         || self.truncate_grapheme_prefix(&command),
-                        |directory| self.present_command_and_directory(&command, &directory),
+                        |directory| self.present_context(&command, &directory, false),
+                    )
+                }
+                CommandFormat::DirectoryAndCommand => {
+                    self.working_directory_label(pane).map_or_else(
+                        || self.truncate_grapheme_prefix(&command),
+                        |directory| self.present_context(&command, &directory, true),
                     )
                 }
             };
@@ -271,8 +279,15 @@ impl LabelPolicy {
         format!("{prefix}{alias}")
     }
 
-    fn present_command_and_directory(&self, command: &str, directory: &str) -> String {
-        let full = format!("{command}{COMMAND_DIRECTORY_SEPARATOR}{directory}");
+    fn present_context(&self, command: &str, directory: &str, directory_first: bool) -> String {
+        let compose = |command: &str, directory: &str| {
+            if directory_first {
+                format!("{directory}{DIRECTORY_COMMAND_SEPARATOR}{command}")
+            } else {
+                format!("{command}{COMMAND_DIRECTORY_SEPARATOR}{directory}")
+            }
+        };
+        let full = compose(command, directory);
         if self.fits(&full) {
             return full;
         }
@@ -285,9 +300,13 @@ impl LabelPolicy {
         let Some(last_directory) = directory_graphemes.last() else {
             return self.truncate_grapheme_prefix(command);
         };
-        let minimum = format!("{first_command}{COMMAND_DIRECTORY_SEPARATOR}{last_directory}");
+        let minimum = compose(first_command, last_directory);
         if !self.fits(&minimum) {
-            return self.truncate_grapheme_prefix(command);
+            return self.truncate_grapheme_prefix(if directory_first {
+                directory
+            } else {
+                command
+            });
         }
 
         let mut command_count = 1;
@@ -308,10 +327,9 @@ impl LabelPolicy {
                 if (grow_command && !can_grow_command) || (!grow_command && !can_grow_directory) {
                     continue;
                 }
-                let candidate = format!(
-                    "{}{COMMAND_DIRECTORY_SEPARATOR}{}",
-                    command_graphemes[..next_command_count].concat(),
-                    directory_graphemes[next_directory_start..].concat()
+                let candidate = compose(
+                    &command_graphemes[..next_command_count].concat(),
+                    &directory_graphemes[next_directory_start..].concat(),
                 );
                 if self.fits(&candidate) {
                     command_count = next_command_count;
@@ -326,10 +344,9 @@ impl LabelPolicy {
             }
         }
 
-        format!(
-            "{}{COMMAND_DIRECTORY_SEPARATOR}{}",
-            command_graphemes[..command_count].concat(),
-            directory_graphemes[directory_start..].concat()
+        compose(
+            &command_graphemes[..command_count].concat(),
+            &directory_graphemes[directory_start..].concat(),
         )
     }
 

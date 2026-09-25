@@ -48,6 +48,7 @@ struct LabelsConfig {
 enum CommandFormatConfig {
     CommandOnly,
     CommandAndDirectory,
+    DirectoryAndCommand,
 }
 
 impl From<CommandFormatConfig> for CommandFormat {
@@ -55,6 +56,7 @@ impl From<CommandFormatConfig> for CommandFormat {
         match value {
             CommandFormatConfig::CommandOnly => Self::CommandOnly,
             CommandFormatConfig::CommandAndDirectory => Self::CommandAndDirectory,
+            CommandFormatConfig::DirectoryAndCommand => Self::DirectoryAndCommand,
         }
     }
 }
@@ -848,6 +850,48 @@ mod tests {
             );
             assert_eq!(label_for(&legacy, &pane, Some(&process)), command);
         }
+    }
+
+    #[test]
+    fn directory_first_format_uses_directory_before_command() {
+        let loaded = parse("version = 1\n[labels]\ncommand_format = \"directory_and_command\"\n")
+            .expect("directory-first configuration");
+        let pane = pane_with_path("/Users/me/dev/dots");
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("codex", &["codex"]))),
+            "dots > codex"
+        );
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("zsh", &["zsh"]))),
+            "dots"
+        );
+
+        let bounded = parse(
+            "version = 1\n[labels]\ncommand_format = \"directory_and_command\"\nmax_length = 10\n",
+        )
+        .expect("bounded directory-first configuration");
+        assert_eq!(
+            label_for(&bounded, &pane, Some(&process("codex", &["codex"]))),
+            "ots > code"
+        );
+
+        let tiny = parse(
+            "version = 1\n[labels]\ncommand_format = \"directory_and_command\"\nmax_length = 4\n",
+        )
+        .expect("tiny directory-first configuration");
+        assert_eq!(
+            label_for(&tiny, &pane, Some(&process("codex", &["codex"]))),
+            "dots"
+        );
+
+        let aliased = parse(
+            "version = 1\n[labels]\ncommand_format = \"directory_and_command\"\n[labels.prefixes]\ncodex = \"ai: \"\n[commands.aliases]\ncodex = \"agent\"\n[directories.aliases]\n\"/Users/me/dev/dots\" = \"project\"\n",
+        )
+        .expect("aliased directory-first configuration");
+        assert_eq!(
+            label_for(&aliased, &pane, Some(&process("codex", &["codex"]))),
+            "project > ai: agent"
+        );
     }
 
     #[test]
