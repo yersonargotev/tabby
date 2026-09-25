@@ -19,9 +19,9 @@ const DIRECTORY_COMMAND_SEPARATOR: &str = " > ";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum CommandFormat {
-    #[default]
     CommandOnly,
     CommandAndDirectory,
+    #[default]
     DirectoryAndCommand,
 }
 
@@ -70,6 +70,7 @@ pub(crate) struct LabelPresentation {
     pub max_display_width: Option<usize>,
     pub cwd_components: usize,
     pub command_format: CommandFormat,
+    pub separator: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ pub struct LabelPolicy {
     max_display_width: Option<usize>,
     cwd_components: usize,
     command_format: CommandFormat,
+    separator: String,
 }
 
 impl Default for LabelPolicy {
@@ -109,7 +111,8 @@ impl Default for LabelPolicy {
             max_length: 32,
             max_display_width: None,
             cwd_components: 1,
-            command_format: CommandFormat::CommandOnly,
+            command_format: CommandFormat::DirectoryAndCommand,
+            separator: DIRECTORY_COMMAND_SEPARATOR.to_string(),
         }
     }
 }
@@ -140,6 +143,14 @@ impl LabelPolicy {
         policy.max_display_width = presentation.max_display_width;
         policy.cwd_components = presentation.cwd_components;
         policy.command_format = presentation.command_format;
+        policy.separator = presentation
+            .separator
+            .unwrap_or_else(|| match policy.command_format {
+                CommandFormat::CommandAndDirectory => COMMAND_DIRECTORY_SEPARATOR.to_string(),
+                CommandFormat::CommandOnly | CommandFormat::DirectoryAndCommand => {
+                    DIRECTORY_COMMAND_SEPARATOR.to_string()
+                }
+            });
         policy
     }
 
@@ -282,9 +293,9 @@ impl LabelPolicy {
     fn present_context(&self, command: &str, directory: &str, directory_first: bool) -> String {
         let compose = |command: &str, directory: &str| {
             if directory_first {
-                format!("{directory}{DIRECTORY_COMMAND_SEPARATOR}{command}")
+                format!("{directory}{}{command}", self.separator)
             } else {
-                format!("{command}{COMMAND_DIRECTORY_SEPARATOR}{directory}")
+                format!("{command}{}{directory}", self.separator)
             }
         };
         let full = compose(command, directory);
@@ -482,7 +493,7 @@ mod tests {
         for command in ["nvim", "lazygit", "codex", "claude"] {
             let candidate = candidate_for(process(command, &[command]), pane_with_cwd("tabby"));
 
-            assert_eq!(candidate.label(), command);
+            assert_eq!(candidate.label(), format!("tabby > {command}"));
             assert_eq!(candidate.source(), LabelCandidateSource::SignificantCommand);
         }
     }
@@ -490,10 +501,10 @@ mod tests {
     #[test]
     fn labels_runner_subcommand_pairs_as_significant_commands() {
         for (runner, subcommand, expected) in [
-            ("pnpm", "dev", "pnpm dev"),
-            ("npm", "test", "npm test"),
-            ("go", "test", "go test"),
-            ("cargo", "run", "cargo run"),
+            ("pnpm", "dev", "tabby > pnpm dev"),
+            ("npm", "test", "tabby > npm test"),
+            ("go", "test", "tabby > go test"),
+            ("cargo", "run", "tabby > cargo run"),
         ] {
             let candidate = candidate_for(
                 process(runner, &[runner, subcommand, "--watch"]),
@@ -549,7 +560,7 @@ mod tests {
             pane_with_cwd("tabby"),
         );
 
-        assert_eq!(candidate.label(), "pnpm dev");
+        assert_eq!(candidate.label(), "tabby > pnpm dev");
         assert_eq!(candidate.source(), LabelCandidateSource::SignificantCommand);
     }
 
@@ -622,7 +633,7 @@ mod tests {
             pane_with_cwd("tabby"),
         );
 
-        assert_eq!(candidate.label(), "pnpm dev");
+        assert_eq!(candidate.label(), "tabby > pnpm dev");
         assert_eq!(candidate.source(), LabelCandidateSource::SignificantCommand);
     }
 
@@ -646,6 +657,7 @@ mod tests {
                 max_display_width: None,
                 cwd_components: 1,
                 command_format: CommandFormat::CommandOnly,
+                separator: None,
             },
         );
 
@@ -705,6 +717,7 @@ mod tests {
                     max_display_width: Some(max_display_width),
                     cwd_components: 1,
                     command_format: CommandFormat::CommandOnly,
+                    separator: None,
                 },
             )
         };
@@ -728,6 +741,7 @@ mod tests {
                 max_display_width: None,
                 cwd_components: 1,
                 command_format: CommandFormat::CommandOnly,
+                separator: None,
             },
         );
         assert_eq!(label(&scalar_policy, "combining"), "e\u{301}");
