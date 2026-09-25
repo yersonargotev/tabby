@@ -2,7 +2,7 @@
 
 Approved scope: [spec #98](https://github.com/yersonargotev/tabby/issues/98), delivered through [ticket #99](https://github.com/yersonargotev/tabby/issues/99).
 
-The original opt-in `command_and_directory` presentation combines the Significant Command with the existing Working Directory Suffix or directory alias, for example `codex · tabby`. As of issue #103, the built-in default is `directory_and_command`, yielding `tabby > codex`. An explicit `command_only` retains the application-only presentation. Both contextual modes accept an optional separator; their omitted-separator defaults are ` · ` and ` > ` respectively.
+The original opt-in `command_and_directory` presentation combines the Significant Command with the existing Working Directory Suffix or directory alias, for example `codex · tabby`. As of issue #103, the built-in default is `directory_and_command`, yielding `tabby > codex`. An explicit `command_only` retains the Significant Command-only presentation. Both contextual modes accept an optional separator; their omitted-separator defaults are ` · ` and ` > ` respectively.
 
 The mode belongs to Label Policy and follows existing configuration, profile selection, and reload semantics. Directory context uses the existing effective working directory; it introduces no filesystem discovery, sibling-tab disambiguation, or runtime ownership changes. A composed label remains a Significant Command candidate.
 
