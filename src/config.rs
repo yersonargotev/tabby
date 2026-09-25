@@ -40,6 +40,7 @@ struct LabelsConfig {
     max_display_width: Option<usize>,
     cwd_components: Option<usize>,
     command_format: Option<CommandFormatConfig>,
+    separator: Option<String>,
     prefixes: BTreeMap<String, String>,
 }
 
@@ -339,6 +340,18 @@ fn compile_policy(
         MIN_CWD_COMPONENTS,
         MAX_CWD_COMPONENTS,
     )?;
+    if let Some(separator) = &labels.separator {
+        if separator.is_empty() {
+            return validation_error("labels.separator", "must not be empty".to_string());
+        }
+        if separator.chars().any(char::is_control) {
+            return validation_error(
+                "labels.separator",
+                "contains a control character that cannot be represented safely in a Herdr tab label"
+                    .to_string(),
+            );
+        }
+    }
     validate_unique_tokens(
         "commands.additional_significant",
         &commands.additional_significant,
@@ -403,8 +416,9 @@ fn compile_policy(
             cwd_components: labels.cwd_components.unwrap_or(1),
             command_format: labels
                 .command_format
-                .unwrap_or(CommandFormatConfig::CommandOnly)
+                .unwrap_or(CommandFormatConfig::DirectoryAndCommand)
                 .into(),
+            separator: labels.separator.clone(),
         },
     ))
 }
@@ -595,6 +609,7 @@ fn merge_profiles(
         .or(parent.labels.max_display_width);
     parent.labels.cwd_components = child.labels.cwd_components.or(parent.labels.cwd_components);
     parent.labels.command_format = child.labels.command_format.or(parent.labels.command_format);
+    parent.labels.separator = child.labels.separator.clone().or(parent.labels.separator);
     merge_map(
         &mut parent.labels.prefixes,
         &child.labels.prefixes,
@@ -813,6 +828,106 @@ mod tests {
             .expect("Working Directory Suffix");
 
         assert_eq!(candidate.label(), "tabby");
+        assert_eq!(
+            label_for(&loaded, &pane, Some(&process("codex", &["codex"]))),
+            "tabby > codex"
+        );
+    }
+
+    #[test]
+    fn contextual_separator_uses_mode_defaults_or_exact_configured_text() {
+        let pane = pane_with_path("/Users/me/dev/dots");
+        for (settings, expected) in [
+            ("command_format = \"command_and_directory\"", "codex · dots"),
+            (
+                "command_format = \"command_and_directory\"\nseparator = \" / \"",
+                "codex / dots",
+            ),
+            (
+                "command_format = \"directory_and_command\"\nseparator = \" / \"",
+                "dots / codex",
+            ),
+            (
+                "command_format = \"command_only\"\nseparator = \" / \"",
+                "codex",
+            ),
+        ] {
+            let loaded = parse(&format!("version = 1\n[labels]\n{settings}\n"))
+                .expect("valid separator configuration");
+            assert_eq!(
+                label_for(&loaded, &pane, Some(&process("codex", &["codex"]))),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn separator_validation_identifies_global_and_profile_fields() {
+        for (contents, field) in [
+            (
+                "version = 1\n[labels]\nseparator = \"\"",
+                "labels.separator",
+            ),
+            (
+                "version = 1\n[labels]\nseparator = \"\\n\"",
+                "labels.separator",
+            ),
+            (
+                "version = 1\n[profiles.work.labels]\nseparator = \"\\t\"",
+                "profiles.work.labels.separator",
+            ),
+        ] {
+            let error = parse(contents).expect_err("invalid separator");
+            assert!(error.to_string().contains(field), "{error}");
+        }
+        let spaced = parse("version = 1\n[labels]\nseparator = \" \"")
+            .expect("spaces are a valid exact separator");
+        assert_eq!(candidate(&spaced, "codex", &["codex"]), "tabby codex");
+    }
+
+    #[test]
+    fn separator_inherits_and_overrides_without_using_global_settings() {
+        let config = r#"
+version = 1
+[labels]
+separator = " / "
+[profiles.parent.labels]
+separator = " 🌱 "
+[profiles.inherited]
+extends = "parent"
+[profiles.child]
+extends = "parent"
+[profiles.child.labels]
+separator = " : "
+[[session_selectors]]
+profile = "inherited"
+identity = "/tmp/issue-103-inherited.sock"
+[[session_selectors]]
+profile = "child"
+identity = "/tmp/issue-103-child.sock"
+"#;
+        for (socket, expected) in [
+            ("/tmp/issue-103-inherited.sock", "tabby 🌱 codex"),
+            ("/tmp/issue-103-child.sock", "tabby : codex"),
+            ("/tmp/issue-103-global.sock", "tabby / codex"),
+        ] {
+            let session = SessionSocket::resolve(socket).expect("session");
+            let loaded = parse_with_home(config, None, Some(&session)).expect("profile policy");
+            assert_eq!(candidate(&loaded, "codex", &["codex"]), expected);
+        }
+    }
+
+    #[test]
+    fn long_unicode_separator_obeys_both_limits_without_an_orphan() {
+        let bounded = parse(
+            "version = 1\n[labels]\nseparator = \" 👩‍💻 \"\nmax_length = 8\nmax_display_width = 7",
+        )
+        .expect("bounded separator");
+        assert_eq!(candidate(&bounded, "codex", &["codex"]), "y 👩‍💻 co");
+
+        let tiny = parse("version = 1\n[labels]\nseparator = \" 👩‍💻 \"\nmax_length = 4")
+            .expect("tiny separator");
+        assert_eq!(candidate(&tiny, "codex", &["codex"]), "tabb");
     }
 
     #[test]
@@ -1081,6 +1196,7 @@ version = 1
 [labels]
 max_length = 4
 cwd_components = 2
+command_format = "command_only"
 
 [commands]
 additional_significant = ["btop"]
@@ -1130,6 +1246,7 @@ version = 1
 
 [labels]
 max_length = 4
+command_format = "command_only"
 
 [directories.aliases]
 "/Users/me/code/./tabby" = "repository"
@@ -1309,6 +1426,7 @@ additional_significant = ["yazi"]
 extends = "parent"
 [profiles.child.labels]
 cwd_components = 1
+command_format = "command_only"
 [[session_selectors]]
 profile = "child"
 identity = "/tmp/tabby-profile/herdr.sock"
@@ -1493,6 +1611,7 @@ version = 1
 
 [labels]
 max_length = 8
+command_format = "command_only"
 
 [labels.prefixes]
 "nvim" = "edit: "

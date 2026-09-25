@@ -500,7 +500,7 @@ mod tests {
 
         assert_eq!(
             herdr.renames,
-            vec![("w1:t2".to_string(), "codex".to_string())]
+            vec![("w1:t2".to_string(), "tabby > codex".to_string())]
         );
     }
 
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(
             first.tabs[0].action,
             TabTickAction::DeferredUnstable {
-                candidate_label: "nvim".to_string()
+                candidate_label: "tabby > nvim".to_string()
             }
         );
         assert_eq!(
@@ -545,7 +545,7 @@ mod tests {
             second.tabs[0].action,
             TabTickAction::Renamed {
                 from: "old".to_string(),
-                to: "nvim".to_string()
+                to: "tabby > nvim".to_string()
             }
         );
         assert_eq!(

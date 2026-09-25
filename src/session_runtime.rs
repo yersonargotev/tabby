@@ -2795,24 +2795,25 @@ mod tests {
 
         fs::write(
             &config_path,
-            "version = 1\n[profiles.first.labels]\ncommand_format = \"command_and_directory\"\n[profiles.first.labels.prefixes]\nnvim = \"first: \"\n[profiles.first.directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n[[session_selectors]]\nprofile = \"first\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
+            "version = 1\n[profiles.first.labels]\ncommand_format = \"command_and_directory\"\nseparator = \" / \"\n[profiles.first.labels.prefixes]\nnvim = \"first: \"\n[profiles.first.directories.aliases]\n\"/Users/me/dev/tabby\" = \"first\"\n[[session_selectors]]\nprofile = \"first\"\nidentity = \"/tmp/tabby-directory-alias-reload.sock\"\n",
         )
         .expect("initial alias config");
         reload_config(&mut state, &runtime_config, &mut metadata).expect("activate initial alias");
         assert_eq!(reload_candidate(&state), "first");
-        assert_eq!(reload_significant_candidate(&state), "first: nvim · first");
+        assert_eq!(reload_significant_candidate(&state), "first: nvim / first");
         assert_eq!(metadata.selected_profile.as_deref(), Some("first"));
 
-        fs::write(&config_path, "version = 2\n").expect("rejected alias config");
+        fs::write(&config_path, "version = 1\n[labels]\nseparator = \"\\n\"\n")
+            .expect("rejected separator config");
         assert!(reload_config(&mut state, &runtime_config, &mut metadata).is_err());
         assert_eq!(reload_candidate(&state), "first");
-        assert_eq!(reload_significant_candidate(&state), "first: nvim · first");
+        assert_eq!(reload_significant_candidate(&state), "first: nvim / first");
         assert_eq!(metadata.selected_profile.as_deref(), Some("first"));
         assert!(
             metadata
                 .latest_config_error
                 .as_deref()
-                .is_some_and(|error| error.contains("field `version`"))
+                .is_some_and(|error| error.contains("labels.separator"))
         );
 
         fs::write(

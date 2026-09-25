@@ -558,13 +558,13 @@ def exercise_focused_process_and_manual_lock(
 
     case.wait_for_label(REPO_ROOT.name)
     case.herdr("run-significant-command", "pane", "run", pane_id, "nvim", "--clean", "-u", "NONE")
-    case.wait_for_label("nvim", timeout=15.0)
+    case.wait_for_label(f"{REPO_ROOT.name} > nvim", timeout=15.0)
     case.herdr("leave-significant-command", "pane", "send-keys", pane_id, "esc", ":", "q", "!", "enter")
     case.wait_for_label(REPO_ROOT.name, timeout=18.0)
     case.recorder.assertion(
         case.name,
         "fixed-focus-process-change",
-        "one focused tab changed cwd fallback -> nvim -> cwd fallback without navigation",
+        "one focused tab changed cwd fallback -> directory-first nvim -> cwd fallback without navigation",
     )
 
     manual_label = "manual-contract"
@@ -768,7 +768,10 @@ def write_records(output: Path, records: Iterable[Dict[str, Any]]) -> None:
 
 
 def write_session_profile_config(
-    path: Path, named_alias: str, command_format: str = "command_and_directory"
+    path: Path,
+    named_alias: str,
+    command_format: str = "command_and_directory",
+    separator: Optional[str] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -778,6 +781,7 @@ def write_session_profile_config(
                 "",
                 "[profiles.named.labels]",
                 f"command_format = {json.dumps(command_format)}",
+                *([f"separator = {json.dumps(separator)}"] if separator is not None else []),
                 "",
                 "[profiles.named.directories.aliases]",
                 f"{json.dumps(str(REPO_ROOT))} = {json.dumps(named_alias)}",
@@ -837,7 +841,7 @@ def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
             / PLUGIN_ID
             / "config.toml"
         )
-        write_session_profile_config(tabby_config, "named-policy")
+        write_session_profile_config(tabby_config, "named-policy", separator=" / ")
 
         default.run("prepare-plugin-root", PREPARE_COMMAND)
         if not TABBY.is_file():
@@ -937,7 +941,7 @@ def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
             "-u",
             "NONE",
         )
-        named.wait_for_label("nvim · named-policy", timeout=15.0)
+        named.wait_for_label("nvim / named-policy", timeout=15.0)
         recorder.assertion(
             "named",
             "contextual-command-directory-label",
@@ -961,7 +965,7 @@ def run_live(output: Path, expected_herdr: ExpectedHerdrContract) -> None:
         named.wait_for_label("named-policy-v2")
         if default.focused_tab_label() != "manual-contract":
             raise HarnessFailure("named-session reload changed the default session label")
-        tabby_config.write_text("version = 2\n")
+        tabby_config.write_text('version = 1\n[labels]\nseparator = "\\n"\n')
         rejected = named.tabby("reject-named-policy-reload", "config", "reload", check=False)
         if rejected.returncode == 0:
             raise HarnessFailure("invalid named-session reload was accepted")

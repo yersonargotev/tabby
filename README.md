@@ -83,7 +83,8 @@ version = 1
 max_length = 32
 max_display_width = 32
 cwd_components = 1
-command_format = "command_only"
+command_format = "directory_and_command"
+separator = " / " # Optional: overrides the mode's separator
 
 [labels.prefixes]
 "lazygit" = "git: "
@@ -109,7 +110,7 @@ go = ["run", "test"]
 "/Users/me/work/customer-api" = "api"
 ```
 
-All fields except `version` are optional. Additional commands and runner pairs extend the built-ins; command aliases change presentation only after classification. `labels.prefixes` is keyed by those classified Significant Command and runner/subcommand candidates: aliases apply first, then the candidate's prefix, then Tabby bounds the final label. There are no prefix or icon defaults. `command_format` accepts `command_only`, `command_and_directory`, and `directory_and_command`; its default is `command_only`, which preserves command-only labels such as `codex`. The contextual formats combine the Significant Command with the effective Working Directory Suffix or directory alias, as `codex · tabby` or `tabby > codex`, respectively. Without a usable directory they keep the Significant Command alone, and without a Significant Command they keep the existing directory fallback. Defaults are `max_length = 32`, `cwd_components = 1`, Significant Commands `nvim`, `lazygit`, `codex`, and `claude`, runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`, plus the ignored shell/wrapper list described above. `max_length` accepts 1–128 Unicode scalars; optional `max_display_width` accepts 1–256 display cells; and `cwd_components` accepts 1–8 trailing components.
+All fields except `version` are optional. Additional commands and runner pairs extend the built-ins; command aliases change presentation only after classification. `labels.prefixes` is keyed by those classified Significant Command and runner/subcommand candidates: aliases apply first, then the candidate's prefix, then Tabby bounds the final label. There are no prefix or icon defaults. `command_format` accepts `command_only`, `command_and_directory`, and `directory_and_command`. With no label settings, the built-in `directory_and_command` format produces `tabby > codex`. Set `command_format = "command_only"` to retain `codex`, or `command_format = "command_and_directory"` to retain `codex · tabby`. The optional `separator` sets the exact text between the two parts; when omitted it is ` > ` for `directory_and_command` and ` · ` for `command_and_directory`. For example, `separator = " / "` produces `tabby / codex` in directory-first mode. Without a usable directory the contextual formats keep the Significant Command alone, and without a Significant Command they keep the existing directory fallback. Defaults are `max_length = 32`, `cwd_components = 1`, Significant Commands `nvim`, `lazygit`, `codex`, and `claude`, runner pairs `pnpm dev`, `npm test`, `go test`, and `cargo run`, plus the ignored shell/wrapper list described above. `max_length` accepts 1–128 Unicode scalars; optional `max_display_width` accepts 1–256 display cells; and `cwd_components` accepts 1–8 trailing components.
 
 `max_display_width` uses [`unicode-width` 0.2.2](https://docs.rs/unicode-width/0.2.2/unicode_width/) with Unicode 17.0.0 tables. Its conservative non-CJK policy treats ASCII as one cell, CJK wide characters as two, fully-qualified emoji ZWJ sequences as two, and ambiguous-width characters as narrow; it preserves combining sequences. Private-use glyphs are bounded by the Unicode tables, but exact rendering depends on the user's terminal and font, so Tabby does not promise font-perfect widths.
 
@@ -121,7 +122,7 @@ Unknown fields, unsupported versions, unsafe labels, unknown or contradictory pr
 
 ### Per-Session profiles
 
-The global policy above is the fallback for sessions without a selector. A selected profile is instead compiled from built-in defaults and its optional profile inheritance; it does not inherit the global policy. Child scalar fields override their parent, command lists add entries, and duplicate map keys across inheritance are rejected rather than silently shadowed.
+The global policy above is the fallback for sessions without a selector. A selected profile is instead compiled from built-in defaults and its optional profile inheritance; it does not inherit the global policy. Child scalar fields, including `command_format` and `separator`, override their parent, command lists add entries, and duplicate map keys across inheritance are rejected rather than silently shadowed.
 
 ```toml
 [profiles.work]
